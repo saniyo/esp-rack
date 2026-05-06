@@ -109,6 +109,7 @@ void AutoUpdateService::registerManifest(WebManager* web) {
   tab.restPath = AUTO_UPDATE_FORM_PATH;
   tab.postable = true;
   tab.auth = WebAuthLevel::Admin;
+  tab.order = 80;
   web->addTabToFeature("system", tab);
 }
 

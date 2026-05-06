@@ -22,6 +22,13 @@ struct WebTabSpec {
   bool postable = false;  // tab can POST updates to restPath
   bool live = false;      // tab subscribes to feature.wsPath for push updates
   WebAuthLevel auth = WebAuthLevel::Authenticated;
+  // Sort key for tab placement within a feature (smaller = earlier).
+  // For top-level features the tab vector is built directly inside
+  // registerManifest, so insertion order matches code order — `order`
+  // is mostly relevant for compound features where multiple modules
+  // contribute via addTabToFeature() and topological install order
+  // would otherwise produce a non-deterministic sequence.
+  int order = 0;
 };
 
 struct WebActionSpec {

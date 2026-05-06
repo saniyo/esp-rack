@@ -152,6 +152,7 @@ void SecuritySettingsService::registerManifest(WebManager* web) {
   tab.restPath = SECURITY_JWT_FORM_PATH;
   tab.postable = true;
   tab.auth     = WebAuthLevel::Admin;
+  tab.order    = 50;
   web->addTabToFeature("system", tab);
 }
 

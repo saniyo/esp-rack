@@ -26,6 +26,7 @@ void SystemStatus::registerManifest(WebManager* web) {
   tab.restPath = SYSTEM_STATUS_FORM_PATH;
   tab.postable = false;
   tab.auth = WebAuthLevel::Authenticated;
+  tab.order = 10;  // first tab — legacy parity
   web->addTabToFeature("system", tab);
 }
 

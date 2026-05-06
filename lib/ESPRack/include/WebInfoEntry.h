@@ -1,6 +1,7 @@
 #ifndef WebInfoEntry_h
 #define WebInfoEntry_h
 
+#include <algorithm>
 #include <functional>
 #include <utility>
 
@@ -97,11 +98,20 @@ class WebInfoEntry : public IWebFeatureEntry {
   }
 
   // Contribute a tab from another service. Enables the "compound feature"
-  // pattern: ESPReact registers an empty 'system' shell, then each service
-  // (SystemStatus / OTASettings / UploadFirmware) contributes its own tab
-  // via WebManager::addTabToFeature("system", tab) in its own ctor/manifest.
+  // pattern: App ctor registers an empty 'system' shell, then each module
+  // (SystemStatus / OTA / UploadFirmware / …) contributes its own tab via
+  // WebManager::addTabToFeature("system", tab) in onInstall.
+  //
+  // Insertion is sorted by tab.order so the System page tab order is
+  // deterministic regardless of the topological install order Builder
+  // chooses — without this, raising a module's priority for ANY reason
+  // (e.g. adding a `requires_` edge) would silently shuffle the System
+  // tab strip. Equal `order` values keep stable insertion order.
   bool addTab(const WebTabSpec& tab) override {
-    _spec.tabs.push_back(tab);
+    auto pos = std::upper_bound(
+        _spec.tabs.begin(), _spec.tabs.end(), tab,
+        [](const WebTabSpec& a, const WebTabSpec& b) { return a.order < b.order; });
+    _spec.tabs.insert(pos, tab);
     return true;
   }
 

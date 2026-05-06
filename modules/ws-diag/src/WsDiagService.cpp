@@ -27,6 +27,7 @@ void WsDiagService::registerManifest(WebManager* web) {
   tab.postable = false;
   tab.live     = true;
   tab.auth     = WebAuthLevel::Admin;
+  tab.order    = 20;  // legacy parity: status / clients / config / endpoints / …
   web->addTabToFeature("system", tab);
 }
 

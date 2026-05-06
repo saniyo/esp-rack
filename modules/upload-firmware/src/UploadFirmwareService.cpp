@@ -37,6 +37,7 @@ void UploadFirmwareService::registerManifest(WebManager* web) {
   tab.restPath = UPLOAD_FIRMWARE_FORM_PATH;
   tab.postable = false;
   tab.auth = WebAuthLevel::Admin;
+  tab.order = 70;
   web->addTabToFeature("system", tab);
 }
 

@@ -53,6 +53,7 @@ void OTASettingsService::registerManifest(WebManager* web) {
   tab.restPath = OTA_SETTINGS_FORM_PATH;
   tab.postable = true;
   tab.auth = WebAuthLevel::Admin;
+  tab.order = 60;
   web->addTabToFeature("system", tab);
 }
 

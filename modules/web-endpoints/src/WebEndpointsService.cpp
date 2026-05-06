@@ -25,6 +25,7 @@ void WebEndpointsService::registerManifest(WebManager* web) {
   tab.postable = false;
   tab.live     = false;
   tab.auth     = WebAuthLevel::Admin;
+  tab.order    = 40;
   web->addTabToFeature("system", tab);
 }
 

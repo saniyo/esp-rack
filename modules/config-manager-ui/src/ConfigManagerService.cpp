@@ -26,6 +26,7 @@ void ConfigManagerService::registerManifest(WebManager* web) {
   tab.postable = false;
   tab.live     = false;
   tab.auth     = WebAuthLevel::Admin;
+  tab.order    = 30;
   web->addTabToFeature("system", tab);
 
   // Action: explicit "snapshot all current primaries" — overwrites every
