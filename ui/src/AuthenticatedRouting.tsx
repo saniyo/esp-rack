@@ -91,11 +91,21 @@ const AuthenticatedRouting: FC = () => {
   // Default landing — first menu-visible feature in manifest order.
   // Falls back to /system on the rare manifest-empty bootstrap so
   // RootRedirect lands somewhere instead of looping at "/".
+  //
+  // Strip the trailing "/*" wildcard: manifest entries publish their
+  // routes in router-match form ("/system/*", "/wifi/*"), but Navigate
+  // takes a literal URL — passing the asterisk through would land the
+  // browser at "/system/*" which then matches nothing, the catch-all
+  // would Navigate back to the same URL, and the user would see a
+  // permanent white screen until manual reload. Bit me right after a
+  // sign-in flow (fetchLoginRedirect → navigate("/") → catch-all →
+  // Navigate(defaultPath) — this is the only place the chain runs).
   const defaultPath = useMemo(() => {
     const first = manifest.features.find(
       (f) => f.menu?.label && !f.menu?.hidden && f.route
     );
-    return first?.route ?? '/system';
+    const raw = first?.route ?? '/system';
+    return raw.replace(/\/\*$/, '');
   }, [manifest]);
 
   return (
