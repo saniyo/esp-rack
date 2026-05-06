@@ -122,6 +122,15 @@ void App::begin() {
     }
   });
 #endif
+
+  // 8. Start AsyncWebServer listening on port 80. Done LAST so every
+  // module's registerFeature/registerAction + the static-file fallback
+  // are already mounted before the first incoming request arrives.
+  // The legacy ESPReact pattern delegated this call to the consumer's
+  // main.cpp; ESPRack absorbs it because the consumer would just call
+  // it right after app->begin() anyway, and forgetting it surfaces as
+  // "192.168.4.1 doesn't load anything" with no actionable error.
+  server_->begin();
 }
 
 void App::loop() {
