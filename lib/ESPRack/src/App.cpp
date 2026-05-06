@@ -1,6 +1,8 @@
 #include "App.h"
 #include "NullSecurityManager.h"
 #include "ESPFS.h"
+#include "Features.h"
+#include "WebFeatureSpec.h"
 
 #include <ESPAsyncWebServer.h>
 #include <WiFi.h>
@@ -32,7 +34,35 @@ App::App(AsyncWebServer* server, const char* deviceName, const char* deviceVersi
                    &wsManager_,
                    deviceName,
                    deviceVersion},
-    security_     {&nullSecurity()} {}
+    security_     {&nullSecurity()} {
+  // Framework-owned UI shell — registered BEFORE Builder runs module
+  // onInstall, so that modules calling addTabToFeature("system", ...)
+  // find a parent. buildFeatures map exposed via /rest/uiManifest is
+  // populated here so the manifest payload reflects build-time gates
+  // even if no module touches them.
+  webManager_.registerBuildFeature("project",         FT_ENABLED(FT_PROJECT));
+  webManager_.registerBuildFeature("security",        FT_ENABLED(FT_SECURITY));
+  webManager_.registerBuildFeature("websocket",       FT_ENABLED(FT_WEBSOCKET));
+  webManager_.registerBuildFeature("mqtt",            FT_ENABLED(FT_MQTT));
+  webManager_.registerBuildFeature("ntp",             FT_ENABLED(FT_NTP));
+  webManager_.registerBuildFeature("ota",             FT_ENABLED(FT_OTA));
+  webManager_.registerBuildFeature("upload_firmware", FT_ENABLED(FT_UPLOAD_FIRMWARE));
+  webManager_.registerBuildFeature("telegram",        FT_ENABLED(FT_TELEGRAM));
+  webManager_.registerBuildFeature("auto_update",     FT_ENABLED(FT_AUTO_UPDATE));
+  webManager_.registerBuildFeature("system_info",     FT_ENABLED(FT_SYSTEM_INFO));
+
+  WebFeatureSpec sys;
+  sys.id            = "system";
+  sys.title         = "System";
+  sys.component     = "DynamicSettings";
+  sys.menu.label    = "System";
+  sys.menu.icon     = "Settings";
+  sys.menu.order    = 900;
+  sys.menu.auth     = WebAuthLevel::Authenticated;
+  sys.auth          = WebAuthLevel::Authenticated;
+  sys.routeTemplate = "/system/*";
+  webManager_.registerCompoundFeature(std::move(sys));
+}
 
 App::~App() {
   if (begun_) shutdown();
