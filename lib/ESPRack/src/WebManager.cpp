@@ -27,28 +27,61 @@ void WebManager::begin() {
   _begun = true;
 }
 
+// Streamed manifest assembly. Earlier revisions buffered the whole
+// payload into a single AsyncJsonResponse — fine at 2-3 modules,
+// catastrophic past ~12 features because the fixed buffer silently
+// truncated mid-stream and dropped trailing entries (which manifested
+// as "menu items mysteriously missing"). Now we beginResponseStream()
+// and serialize each entry into its own small per-entry document, so
+// total manifest size is bounded only by the network pipe — adding
+// modules costs zero buffer pressure.
+//
+// Per-entry doc is sized for the largest single feature spec we expect
+// (full WebFeatureSpec with tabs + actions). 4 KB leaves comfortable
+// headroom; if a single entry ever exceeded this we'd see truncation
+// of THAT entry only, never of unrelated entries downstream.
 void WebManager::serveManifest(AsyncWebServerRequest* request) {
-  AsyncJsonResponse* response = new AsyncJsonResponse(false, UI_MANIFEST_BUFFER_SIZE);
-  JsonObject root = response->getRoot();
+  AsyncResponseStream* response = request->beginResponseStream("application/json");
 
-  root["schemaVersion"] = 2;
+  response->print(F("{\"schemaVersion\":2"));
 
-  JsonObject device = root.createNestedObject("device");
-  device["name"] = _deviceName;
-  device["version"] = _deviceVersion;
-
-  JsonObject bf = root.createNestedObject("buildFeatures");
-  for (const auto& b : _buildFeatures) {
-    if (b.key) bf[b.key] = b.enabled;
+  // device — small, fits trivially in 256 bytes.
+  {
+    StaticJsonDocument<256> dev;
+    JsonObject d = dev.to<JsonObject>();
+    d["name"]    = _deviceName;
+    d["version"] = _deviceVersion;
+    response->print(F(",\"device\":"));
+    serializeJson(dev, *response);
   }
 
-  JsonArray features = root.createNestedArray("features");
+  // buildFeatures — bounded by the count of FT_* registrations done in
+  // App ctor (currently ~10 keys at ~25 bytes each).
+  {
+    DynamicJsonDocument bf(1024);
+    JsonObject o = bf.to<JsonObject>();
+    for (const auto& b : _buildFeatures) {
+      if (b.key) o[b.key] = b.enabled;
+    }
+    response->print(F(",\"buildFeatures\":"));
+    serializeJson(bf, *response);
+  }
+
+  // features — the part that used to overflow. Each entry serializes
+  // into its own doc, then the doc streams into the response. No
+  // aggregate doc anywhere on the path.
+  response->print(F(",\"features\":["));
+  bool first = true;
   for (const auto& e : _entries) {
     if (!e) continue;
-    JsonObject obj = features.createNestedObject();
+    if (!first) response->print(',');
+    first = false;
+    DynamicJsonDocument doc(4096);
+    JsonObject obj = doc.to<JsonObject>();
     e->toJson(obj);
+    serializeJson(doc, *response);
   }
+  response->print(F("]}"));
 
-  response->setLength();
   request->send(response);
 }

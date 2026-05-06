@@ -19,13 +19,11 @@
 #include <WebInfoEntry.h>
 
 #define UI_MANIFEST_PATH "/rest/uiManifest"
-// 24 KB headroom for the full feature catalogue. A typical full-fleet
-// build (19 modules + actions + buildFeatures + device meta) lands around
-// 10–11 KB; the 8 KB default silently truncated the response, dropping
-// feature entries off the end and leaving menu items unreachable on the
-// frontend. AsyncJsonResponse allocates this buffer once per request,
-// so the cost is per-fetch, not steady-state RAM.
-#define UI_MANIFEST_BUFFER_SIZE 24576
+// Manifest assembly streams via AsyncResponseStream + per-entry
+// serialization (see WebManager.cpp::serveManifest), so there is no
+// aggregate buffer to size. Adding modules is free in terms of
+// transport memory — the only thing that has to fit a budget is a
+// SINGLE feature's serialized spec, capped to 4 KB inside serveManifest.
 
 class WebManager {
  public:
