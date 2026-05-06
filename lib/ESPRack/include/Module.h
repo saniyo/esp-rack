@@ -41,20 +41,35 @@ class ConfigManager;
 class WebManager;
 class WsManager;
 class SecurityManager;
+class PresenceService;
 
 namespace ESPRack {
+
+class App;
 
 // Framework singletons handed to a module during onInstall. Pointers
 // may be nullptr when the corresponding subsystem is compiled out via
 // build flag (e.g. WsManager when ESPRACK_WEBSOCKET=0). Modules MUST
 // guard against nullptr where they actually use a particular
 // subsystem.
+//
+// late-binding pointers: SecurityManager and PresenceService can be
+// installed by their respective modules during onInstall. Builder
+// refreshes the context between module installs so a module installed
+// AFTER SecurityModule sees the real SecurityManager*, not the null
+// stub. Modules at lower priority numbers run first; install
+// SecurityModule with priority 5 to make sure everyone else gets the
+// real pointer.
 struct ModuleContext {
-  AsyncWebServer*  server   {nullptr};
-  ConfigManager*   cfgMgr   {nullptr};
-  WebManager*      web      {nullptr};
-  WsManager*       ws       {nullptr};
-  SecurityManager* security {nullptr};
+  AsyncWebServer*  server         {nullptr};
+  ConfigManager*   cfgMgr         {nullptr};
+  WebManager*      web            {nullptr};
+  WsManager*       ws             {nullptr};
+  SecurityManager* security       {nullptr};
+  PresenceService* presence       {nullptr};
+  App*             app            {nullptr};
+  const char*      deviceName     {nullptr};
+  const char*      deviceVersion  {nullptr};
 };
 
 // Self-description filled in by Module::describe(). Builder consumes

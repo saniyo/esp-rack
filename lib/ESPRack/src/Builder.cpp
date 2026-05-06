@@ -144,11 +144,15 @@ std::unique_ptr<App> Builder::build() {
   auto app = std::unique_ptr<App>(new App(server_, deviceName_.c_str(), deviceVersion_.c_str()));
 
   ModuleContext ctx;
-  ctx.server   = server_;
-  ctx.cfgMgr   = app->configManager();
-  ctx.web      = app->webManager();
-  ctx.ws       = app->wsManager();
-  ctx.security = app->security();
+  ctx.server        = server_;
+  ctx.cfgMgr        = app->configManager();
+  ctx.web           = app->webManager();
+  ctx.ws            = app->wsManager();
+  ctx.security      = app->security();
+  ctx.presence      = app->presence();
+  ctx.app           = app.get();
+  ctx.deviceName    = app->deviceName();
+  ctx.deviceVersion = app->deviceVersion();
 
   // Reorder modules_ to match `order` then transfer to App.
   std::vector<std::unique_ptr<Module>> sorted;
@@ -164,9 +168,11 @@ std::unique_ptr<App> Builder::build() {
       sorted.push_back(std::move(modules_[idx]));
       rinfo("installed '%s' v%s priority=%d",
             descs[idx].id, descs[idx].version, descs[idx].priority);
-      // Modules may have replaced the SecurityManager during onInstall;
-      // refresh the context for any modules that come after.
+      // Refresh late-bound pointers for any modules that come after —
+      // security and presence may have been swapped in by the module
+      // we just installed.
       ctx.security = app->security();
+      ctx.presence = app->presence();
     }
   }
   app->adoptModules(std::move(sorted));

@@ -138,6 +138,13 @@ class WebManager {
     for (const auto& e : _entries) if (e) cb(*e);
   }
 
+  // Late-bind the SecurityManager pointer. Used by the SecurityModule
+  // to swap App's NullSecurityManager for the real PBKDF2-backed
+  // implementation during onInstall. Must be called BEFORE any other
+  // module's onInstall (priority 5 ensures this) — entries registered
+  // before this point may have captured the old pointer in lambdas.
+  void setSecurityManager(SecurityManager* sm) { _sm = sm; }
+
   // Append a tab to an existing feature entry. Primary use case: compound
   // features (e.g. the 'system' shell) filled in by multiple services —
   // each service declares its own tab in its registerManifest instead of a

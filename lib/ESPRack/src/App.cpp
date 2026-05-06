@@ -5,6 +5,10 @@
 #include <ESPAsyncWebServer.h>
 #include <WiFi.h>
 
+#ifdef PROGMEM_WWW
+#include <WWWData.h>
+#endif
+
 namespace ESPRack {
 
 namespace {
@@ -69,6 +73,55 @@ void App::begin() {
   // 6. WS keepalive — phantom-client eviction, defaults match the
   // legacy ESPReact values.
   wsManager_.beginPingPong(20, 60000);
+
+  // 7. Static-file serving for the React UI bundle. Two paths:
+  //    PROGMEM_WWW  — bundle baked into firmware as gzip-compressed
+  //                   const arrays via build_interface.py. Each entry
+  //                   gets its own GET handler; index.html is the
+  //                   onNotFound fallback so the React router handles
+  //                   client-side routes.
+  //    !PROGMEM_WWW — serve straight from /www/ on LittleFS. Requires
+  //                   the consumer to flash a data partition image
+  //                   beforehand. Useful for development iteration so
+  //                   PROGMEM_WWW rebuilds aren't on every change.
+  AsyncWebServer* srv = server_;
+#ifdef PROGMEM_WWW
+  WWWData::registerRoutes(
+      [srv](const String& uri, const String& contentType, const uint8_t* content, size_t len) {
+        ArRequestHandlerFunction handler = [contentType, content, len](AsyncWebServerRequest* req) {
+          AsyncWebServerResponse* res = req->beginResponse(200, contentType, content, len);
+          res->addHeader("Content-Encoding", "gzip");
+          req->send(res);
+        };
+        srv->on(uri.c_str(), HTTP_GET, handler);
+        if (uri.equals("/index.html")) {
+          srv->onNotFound([handler](AsyncWebServerRequest* req) {
+            if (req->method() == HTTP_GET) {
+              handler(req);
+            } else if (req->method() == HTTP_OPTIONS) {
+              req->send(200);
+            } else {
+              req->send(404);
+            }
+          });
+        }
+      });
+#else
+  srv->serveStatic("/js/",          ESPFS, "/www/js/");
+  srv->serveStatic("/css/",         ESPFS, "/www/css/");
+  srv->serveStatic("/fonts/",       ESPFS, "/www/fonts/");
+  srv->serveStatic("/app/",         ESPFS, "/www/app/");
+  srv->serveStatic("/favicon.ico",  ESPFS, "/www/favicon.ico");
+  srv->onNotFound([](AsyncWebServerRequest* req) {
+    if (req->method() == HTTP_GET) {
+      req->send(ESPFS, "/www/index.html");
+    } else if (req->method() == HTTP_OPTIONS) {
+      req->send(200);
+    } else {
+      req->send(404);
+    }
+  });
+#endif
 }
 
 void App::loop() {

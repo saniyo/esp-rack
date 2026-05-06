@@ -66,6 +66,18 @@ class App {
   // SecurityModule::onInstall(). External consumers should not call.
   void setSecurityManager(SecurityManager* sm) { security_ = sm; }
 
+  // PresenceService late-binding — set by PresenceModule during its
+  // onInstall. Subsequent modules' install order picks up the real
+  // pointer via Builder's per-step ctx refresh.
+  PresenceService* presence()                  { return presence_; }
+  void             setPresence(PresenceService* p) { presence_ = p; }
+
+  // Read-only device identity — useful for AutoUpdateModule etc. that
+  // pass these to their underlying service ctor. Set once at App
+  // construction.
+  const char* deviceName()    const { return deviceName_.c_str();    }
+  const char* deviceVersion() const { return deviceVersion_.c_str(); }
+
  private:
   // Builder is the sole authorised constructor of populated App
   // instances. It transfers the `modules_` vector into the App via
@@ -81,6 +93,7 @@ class App {
   WsManager        wsManager_;
   WebManager       webManager_;
   SecurityManager* security_ {nullptr};   // populated by SecurityModule
+  PresenceService* presence_ {nullptr};   // populated by PresenceModule
 
   std::vector<std::unique_ptr<Module>> modules_;
   bool             begun_ {false};
