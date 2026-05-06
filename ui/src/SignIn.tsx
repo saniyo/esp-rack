@@ -7,6 +7,7 @@ import ForwardIcon from '@mui/icons-material/Forward';
 
 import * as AuthenticationApi from './api/authentication';
 import { PROJECT_NAME } from './api/env';
+import { useManifest } from './contexts/manifest';
 import { SignInRequest } from './types';
 import { ValidatedTextField } from './components';
 import { SIGN_IN_REQUEST_VALIDATOR, validate } from './validators';
@@ -20,7 +21,9 @@ import { useEffect } from 'react';
 const SignIn: FC = () => {
   const authenticationContext = useContext(AuthenticationContext);
   const { features } = useContext(FeaturesContext);
+  const { manifest } = useManifest();
   const { enqueueSnackbar } = useSnackbar();
+  const brand = manifest.device?.name || PROJECT_NAME;
 
   const [signInRequest, setSignInRequest] = useState<SignInRequest>({
     username: '',
@@ -89,10 +92,10 @@ const SignIn: FC = () => {
           width: "100%"
         })}
       >
-        <Typography variant="h4">{PROJECT_NAME}</Typography>
-        {systemInfo && (
+        <Typography variant="h4">{brand}</Typography>
+        {(manifest.device?.version || systemInfo?.version) && (
           <Typography variant="subtitle2" color="textSecondary">
-            {systemInfo.version}
+            {manifest.device?.version || systemInfo?.version}
           </Typography>
         )}
         <ValidatedTextField

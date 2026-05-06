@@ -3,7 +3,8 @@
 #include <FormBuilder.h>
 #include <WebManager.h>
 
-SystemStatus::SystemStatus(AsyncWebServer* server, SecurityManager* securityManager) {
+SystemStatus::SystemStatus(AsyncWebServer* server, SecurityManager* securityManager, WebManager* web)
+    : _web(web) {
   server->on(SYSTEM_STATUS_SERVICE_PATH,
              HTTP_GET,
              securityManager->wrapRequest(std::bind(&SystemStatus::systemStatus, this, std::placeholders::_1),
@@ -70,6 +71,33 @@ void SystemStatus::buildForm(JsonObject& root) {
   String fs = String(fsUsed) + " / " + String(fsTotal) + " bytes (" + String(fsFree) + " free)";
   FormBuilder::addTextField(sta, "file_system_used_total", AF::R, fs.c_str(),
                             label("File system (used / total)"), icon("Folder"));
+
+  // Framework + module versions. Library rev (esp-rack itself) shows
+  // as a single text row; per-module versions feed a TableField
+  // populated from WebManager's module-version registry inline (rows
+  // live inside the field's own JsonObject under the field's key,
+  // matching how WiFiSettingsService fills the scan-networks table).
+  // Skipped when _web is null — defensive; SystemStatusModule always
+  // passes ctx.web post-Builder, but null-tolerant ctor stays valid.
+  if (_web) {
+    const char* fwVer = _web->frameworkVersion();
+    if (fwVer && *fwVer) {
+      String fw = String("esp-rack ") + fwVer;
+      FormBuilder::addTextField(sta, "framework_version", AF::R, fw.c_str(),
+                                label("Framework"), icon("Inventory"));
+    }
+
+    JsonObject tbl = FormBuilder::addTableField(sta, "modules", AF::R,
+        col("module",  "Module",  "text"),
+        col("version", "Version", "text"),
+        icon("Extension"));
+    JsonArray rows = tbl["modules"].as<JsonArray>();
+    _web->forEachModule([&](const char* id, const char* version) {
+      JsonObject row = rows.createNestedObject();
+      row["module"]  = id ? id : "";
+      row["version"] = version ? version : "";
+    });
+  }
 
   FormBuilder::addActionField(sta, "a_restart",      nullptr, AF::RW, actionRef("system.restart"));
   FormBuilder::addActionField(sta, "a_factoryReset", nullptr, AF::RW, actionRef("system.factoryReset"));

@@ -5,6 +5,7 @@ import { useLocation } from 'react-router-dom';
 import { Box, Toolbar } from '@mui/material';
 
 import { PROJECT_NAME } from '../../api/env';
+import { useManifest } from '../../contexts/manifest';
 import { RequiredChildrenProps } from '../../utils';
 
 import LayoutDrawer from './LayoutDrawer';
@@ -14,9 +15,11 @@ import { LayoutContext } from './context';
 export const DRAWER_WIDTH = 280;
 
 const Layout: FC<RequiredChildrenProps> = ({ children }) => {
+  const { manifest } = useManifest();
+  const brand = manifest.device?.name || PROJECT_NAME;
 
   const [mobileOpen, setMobileOpen] = useState(false);
-  const [title, setTitle] = useState(PROJECT_NAME);
+  const [title, setTitle] = useState(brand);
   const { pathname } = useLocation();
 
   const handleDrawerToggle = () => {

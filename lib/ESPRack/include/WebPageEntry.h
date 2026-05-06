@@ -23,6 +23,7 @@ class WebPageEntry : public IWebFeatureEntry {
     obj["id"] = _spec.id ? _spec.id : "";
     obj["kind"] = "page";
     obj["title"] = _spec.title ? _spec.title : "";
+    if (_spec.version) obj["version"] = _spec.version;
     obj["component"] = _spec.component ? _spec.component : "";
     obj["auth"] = webAuthLevelToStr(_spec.auth);
 

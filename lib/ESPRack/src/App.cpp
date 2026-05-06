@@ -2,6 +2,7 @@
 #include "NullSecurityManager.h"
 #include "ESPFS.h"
 #include "Features.h"
+#include "Version.h"
 #include "WebFeatureSpec.h"
 
 #include <ESPAsyncWebServer.h>
@@ -86,6 +87,20 @@ void App::adoptModules(std::vector<std::unique_ptr<Module>>&& modules) {
 void App::begin() {
   if (begun_) return;
   begun_ = true;
+
+  // 0. Publish framework + module identity into the manifest so the
+  // frontend (and audit tooling) can read the running rev set without
+  // any out-of-band query. Version pointers come from the modules'
+  // describe() implementations — by convention these are string
+  // literals embedded in module source, so they live in flash and
+  // outlive any request that reads them.
+  webManager_.setFrameworkVersion(ESPRACK_VERSION_STR);
+  for (auto& m : modules_) {
+    if (!m) continue;
+    ModuleDescriptor d;
+    m->describe(d);
+    webManager_.registerModule(d.id, d.version);
+  }
 
   // 1. Filesystem first — ConfigManager and several modules need /config
   // available before they can ensureLoaded().

@@ -59,6 +59,7 @@ class WebInfoEntry : public IWebFeatureEntry {
     obj["id"] = _spec.id ? _spec.id : "";
     obj["kind"] = "feature";
     obj["title"] = _spec.title ? _spec.title : "";
+    if (_spec.version) obj["version"] = _spec.version;
     obj["component"] = _spec.component ? _spec.component : "DynamicSettings";
     obj["auth"] = webAuthLevelToStr(_spec.auth);
 

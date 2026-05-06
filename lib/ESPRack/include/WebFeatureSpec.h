@@ -54,6 +54,12 @@ struct WebEndpointMeta {
 struct WebFeatureSpec {
   const char* id = nullptr;
   const char* title = nullptr;
+  // Service-implementation version (semver). Distinct from the wrapping
+  // Module's version — the module wrapper may stay at 1.0.0 while the
+  // underlying service iterates faster. Optional; null = not reported.
+  // Surfaced on the System / Endpoints page so operators can audit
+  // which exact service rev is responding on a given endpoint.
+  const char* version = nullptr;
   const char* component = "DynamicSettings";
   WebMenuMeta menu;
   WebAuthLevel auth = WebAuthLevel::Authenticated;
@@ -68,6 +74,7 @@ struct WebFeatureSpec {
 struct WebPageSpec {
   const char* id = nullptr;
   const char* title = nullptr;
+  const char* version = nullptr;  // optional, semver — see WebFeatureSpec::version
   const char* component = nullptr;
   WebMenuMeta menu;
   WebAuthLevel auth = WebAuthLevel::Authenticated;

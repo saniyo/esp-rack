@@ -3,6 +3,7 @@ import { FC } from 'react';
 import { Box, Divider, Drawer, Toolbar, Typography, styled, Tooltip } from '@mui/material';
 
 import { PROJECT_NAME } from '../../api/env';
+import { useManifest } from '../../contexts/manifest';
 import LayoutMenu from './LayoutMenu';
 import { DRAWER_WIDTH } from './Layout';
 import { useState, useContext, useEffect } from 'react';
@@ -27,6 +28,7 @@ interface LayoutDrawerProps {
 
 const LayoutDrawer: FC<LayoutDrawerProps> = ({ mobileOpen, onClose }) => {
   const { features } = useContext(FeaturesContext);
+  const { manifest } = useManifest();
   const [systemInfo, setSystemInfo] = useState<SystemInfo>();
 
   useEffect(() => {
@@ -37,18 +39,28 @@ const LayoutDrawer: FC<LayoutDrawerProps> = ({ mobileOpen, onClose }) => {
     }
   }, [features.system_info]);
 
-  const versionString = systemInfo?.version
-    ? (systemInfo.version.startsWith('v') ? systemInfo.version : `v${systemInfo.version}`)
-    : '';
+  // Brand: prefer manifest.device.name (the canonical Builder("...","...")
+  // value), fall back to PROJECT_NAME env (boot before manifest, or legacy
+  // builds that don't ship a manifest). One source of truth on disk;
+  // everywhere else just reads it.
+  const brand = manifest.device?.name || PROJECT_NAME;
+  // Tooltip combines firmware version + library rev so operators can
+  // audit both axes from the drawer header.
+  const fwVer = manifest.device?.version || systemInfo?.version || '';
+  const libVer = manifest.device?.frameworkVersion || '';
+  const versionString = [
+    fwVer && (fwVer.startsWith('v') ? fwVer : `v${fwVer}`),
+    libVer && `esp-rack ${libVer}`
+  ].filter(Boolean).join(' · ');
 
   const drawer = (
     <>
       <Toolbar disableGutters>
         <Box display="flex" alignItems="center" px={2} width="100%" position="relative">
-          <LayoutDrawerLogo src="/app/icon.png" alt={PROJECT_NAME} />
+          <LayoutDrawerLogo src="/app/icon.png" alt={brand} />
           <Tooltip title={versionString} arrow placement="bottom">
             <Typography variant="h6" color="textPrimary">
-              {PROJECT_NAME}
+              {brand}
             </Typography>
           </Tooltip>
         </Box>

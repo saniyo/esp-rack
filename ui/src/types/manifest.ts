@@ -38,6 +38,10 @@ export interface FeatureEntry {
   id: string;
   kind: 'feature' | 'action' | 'status' | 'page';
   title?: string;
+  // Service-implementation version (semver). Optional — services that
+  // don't set it just don't report it. Distinct from the wrapping
+  // module's own version which lives in `UiManifest.modules[]`.
+  version?: string;
   component?: string;
   route?: string | null;
   menu?: MenuMeta;
@@ -49,9 +53,19 @@ export interface FeatureEntry {
   endpoints?: EndpointMeta[];
 }
 
+export interface ModuleEntry {
+  id: string;
+  version: string;
+}
+
 export interface UiManifest {
   schemaVersion: number;
-  device?: { name?: string; version?: string };
+  // device.name / version  — consumer-app identity from Builder("...","...")
+  // device.frameworkVersion — esp-rack library rev (Version.h::ESPRACK_VERSION_STR)
+  device?: { name?: string; version?: string; frameworkVersion?: string };
   buildFeatures?: Record<string, boolean>;
+  // Module wrapper rev list, one entry per Module installed via Builder.
+  // Populated by App.begin() walking modules_ and calling describe().
+  modules?: ModuleEntry[];
   features: FeatureEntry[];
 }

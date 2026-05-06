@@ -130,6 +130,33 @@ class WebManager {
     _buildFeatures.push_back({key, enabled});
   }
 
+  // Module-version registry. App.begin() iterates installed modules,
+  // calls describe() on each, and pushes (id, version) pairs here so
+  // /rest/uiManifest.modules[] surfaces the wrapper rev independent
+  // of any per-feature WebFeatureSpec.version. Pointers are NOT
+  // copied — caller must guarantee stable lifetime (typical: string
+  // literals embedded in module source, or the descriptor's id/version
+  // const char* stored statically).
+  void registerModule(const char* id, const char* version) {
+    if (!id) return;
+    _modules.push_back({id, version ? version : ""});
+  }
+
+  // Read-only iteration over the module-version registry. Used by
+  // SystemStatus to render the "Modules" table on the System tab —
+  // same constraint as forEachEntry: never call register*() from
+  // inside the callback.
+  template <typename Fn>
+  void forEachModule(Fn cb) const {
+    for (const auto& m : _modules) cb(m.id, m.version);
+  }
+
+  // Framework version setter — App.cpp calls this once during begin()
+  // with ESPRACK_VERSION_STR so the manifest's device block carries
+  // the library rev independent of consumer-app versioning.
+  void setFrameworkVersion(const char* v) { _frameworkVersion = v ? v : ""; }
+  const char* frameworkVersion() const { return _frameworkVersion; }
+
   // ---- public iteration over registered entries ----
   // Used by WebEndpointsService to render the per-entry table in the
   // System → Endpoints tab. The callback gets a const-ref because the
@@ -181,6 +208,14 @@ class WebManager {
     bool enabled;
   };
   std::vector<BuildFeature> _buildFeatures;
+
+  struct ModuleVersion {
+    const char* id;
+    const char* version;
+  };
+  std::vector<ModuleVersion> _modules;
+
+  const char* _frameworkVersion{""};
 
   bool _begun{false};
 };

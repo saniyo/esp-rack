@@ -18,18 +18,26 @@ class WebManager;
 
 class SystemStatus {
  public:
-  SystemStatus(AsyncWebServer* server, SecurityManager* securityManager);
+  // `web` is optional — when supplied, the status form gains a Modules
+  // table populated from WebManager's module-version registry plus a
+  // framework-version row. Passing nullptr keeps the legacy hardware-
+  // only status payload (chip / heap / flash / fs).
+  SystemStatus(AsyncWebServer* server, SecurityManager* securityManager,
+               WebManager* web = nullptr);
 
-  // Contribute the 'status' tab to the compound 'system' feature. ESPReact
-  // registers the empty shell; each cooperating service adds its own tab
-  // via WebManager::addTabToFeature() in its own registerManifest().
+  // Contribute the 'status' tab to the compound 'system' feature. App
+  // registers the empty shell; each cooperating service adds its own
+  // tab via WebManager::addTabToFeature() in its own registerManifest.
   void registerManifest(WebManager* web);
 
-  // Builds the 'status' sub-form into `root`. Invoked by the status-tab
-  // endpoint handler below.
-  static void buildForm(JsonObject& root);
+  // Builds the 'status' sub-form into `root`. Non-static now because it
+  // reads the WebManager* captured at construction to surface module
+  // versions; passing _web through every call site would be noise.
+  void buildForm(JsonObject& root);
 
  private:
+  WebManager* _web{nullptr};
+
   void systemStatus(AsyncWebServerRequest* request);
   void systemStatusForm(AsyncWebServerRequest* request);
 };

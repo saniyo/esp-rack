@@ -46,11 +46,17 @@ void WebManager::serveManifest(AsyncWebServerRequest* request) {
   response->print(F("{\"schemaVersion\":2"));
 
   // device — small, fits trivially in 256 bytes.
+  // Three keys: name + version (consumer-app identity from Builder),
+  // plus frameworkVersion (esp-rack library rev from Version.h, set
+  // by App.begin() via setFrameworkVersion).
   {
     StaticJsonDocument<256> dev;
     JsonObject d = dev.to<JsonObject>();
     d["name"]    = _deviceName;
     d["version"] = _deviceVersion;
+    if (_frameworkVersion && *_frameworkVersion) {
+      d["frameworkVersion"] = _frameworkVersion;
+    }
     response->print(F(",\"device\":"));
     serializeJson(dev, *response);
   }
@@ -65,6 +71,24 @@ void WebManager::serveManifest(AsyncWebServerRequest* request) {
     }
     response->print(F(",\"buildFeatures\":"));
     serializeJson(bf, *response);
+  }
+
+  // modules — id+version per installed module. Populated by App.begin()
+  // by walking the modules vector and calling describe() on each. The
+  // System status tab renders a table of these so operators can see at
+  // a glance which framework component versions the running firmware
+  // ships with — independent of the consumer-app version (deviceVersion)
+  // and of any per-service WebFeatureSpec.version.
+  {
+    DynamicJsonDocument mods(2048);
+    JsonArray arr = mods.to<JsonArray>();
+    for (const auto& m : _modules) {
+      JsonObject o = arr.createNestedObject();
+      o["id"]      = m.id;
+      o["version"] = m.version;
+    }
+    response->print(F(",\"modules\":"));
+    serializeJson(mods, *response);
   }
 
   // features — the part that used to overflow. The doc is allocated
