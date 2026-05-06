@@ -123,7 +123,7 @@ const ManifestProgress: FC<ManifestProgressProps> = ({ loaded, manifest, error, 
             )}
 
             {phase !== 'connecting' && features.length > 0 && (
-              <List dense disablePadding sx={{ maxHeight: 320, overflowY: 'auto' }}>
+              <List dense disablePadding>
                 {features.map((f, idx) => {
                   const ready = idx < revealed;
                   return (
