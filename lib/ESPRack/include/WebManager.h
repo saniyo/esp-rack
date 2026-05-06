@@ -19,7 +19,13 @@
 #include <WebInfoEntry.h>
 
 #define UI_MANIFEST_PATH "/rest/uiManifest"
-#define UI_MANIFEST_BUFFER_SIZE 8192
+// 24 KB headroom for the full feature catalogue. A typical full-fleet
+// build (19 modules + actions + buildFeatures + device meta) lands around
+// 10–11 KB; the 8 KB default silently truncated the response, dropping
+// feature entries off the end and leaving menu items unreachable on the
+// frontend. AsyncJsonResponse allocates this buffer once per request,
+// so the cost is per-fetch, not steady-state RAM.
+#define UI_MANIFEST_BUFFER_SIZE 24576
 
 class WebManager {
  public:
