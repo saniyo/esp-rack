@@ -1,0 +1,91 @@
+#pragma once
+#ifndef ESPRACK_APP_H
+#define ESPRACK_APP_H
+
+// App — the running framework. Built by ESPRack::Builder, owns the
+// installed Modules + framework singletons (ConfigManager, WebManager,
+// WsManager, etc.) and drives the lifecycle.
+//
+// Consumer flow:
+//
+//   AsyncWebServer server(80);
+//   std::unique_ptr<ESPRack::App> app;
+//
+//   void setup() {
+//     app = ESPRack::Builder(&server, "MyDevice", "v1.0.0")
+//       .core()
+//       .install<MyModule>(args)
+//       .build();
+//     app->begin();
+//   }
+//
+//   void loop() { app->loop(); }
+//
+// App is NOT a singleton — multiple instances are unusual but legal.
+// Its destructor calls shutdown() if begin() ran.
+
+#include <Arduino.h>
+#include <memory>
+#include <vector>
+
+#include "Module.h"
+#include "ConfigManager.h"
+#include "WsManager.h"
+#include "WebManager.h"
+
+class AsyncWebServer;
+
+namespace ESPRack {
+
+class App {
+ public:
+  App(AsyncWebServer* server,
+      const char* deviceName,
+      const char* deviceVersion);
+  ~App();
+
+  // Lifecycle — see Module.h for phase semantics. Each method is
+  // idempotent: calling begin() twice is a no-op after the first.
+  void begin();
+  void loop();
+  void shutdown();
+
+  // Framework singleton access. Modules normally receive these via
+  // ModuleContext during onInstall — these getters are for the rare
+  // consumer that needs to reach into the framework from main loop
+  // code (e.g. broadcasting a custom WS message from a non-module
+  // origin).
+  AsyncWebServer*    server()        { return server_; }
+  ConfigManager*     configManager() { return &configManager_; }
+  WebManager*        webManager()    { return &webManager_; }
+  WsManager*         wsManager()     { return &wsManager_; }
+  SecurityManager*   security()      { return security_; }
+
+  // Allows the Security module to register its SecurityManager
+  // implementation pointer once installed. Builder invokes this from
+  // SecurityModule::onInstall(). External consumers should not call.
+  void setSecurityManager(SecurityManager* sm) { security_ = sm; }
+
+ private:
+  // Builder is the sole authorised constructor of populated App
+  // instances. It transfers the `modules_` vector into the App via
+  // adoptModules() then disowns it.
+  friend class Builder;
+  void adoptModules(std::vector<std::unique_ptr<Module>>&& modules);
+
+  AsyncWebServer*  server_ {nullptr};
+  String           deviceName_;
+  String           deviceVersion_;
+
+  ConfigManager    configManager_;
+  WsManager        wsManager_;
+  WebManager       webManager_;
+  SecurityManager* security_ {nullptr};   // populated by SecurityModule
+
+  std::vector<std::unique_ptr<Module>> modules_;
+  bool             begun_ {false};
+};
+
+}  // namespace ESPRack
+
+#endif  // ESPRACK_APP_H
