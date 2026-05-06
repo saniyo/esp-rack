@@ -67,16 +67,21 @@ void WebManager::serveManifest(AsyncWebServerRequest* request) {
     serializeJson(bf, *response);
   }
 
-  // features — the part that used to overflow. Each entry serializes
-  // into its own doc, then the doc streams into the response. No
-  // aggregate doc anywhere on the path.
+  // features — the part that used to overflow. The doc is allocated
+  // ONCE outside the loop and cleared between iterations: an N-entry
+  // manifest used to do N*4 KB of malloc/free per request, which after
+  // ~hundreds of frontend polls fragmented the heap badly enough to
+  // surface as multi_heap poison-pattern crashes 5+ min into uptime.
+  // Single allocation + clear() drops the per-request heap traffic to
+  // a flat 4 KB regardless of entry count.
   response->print(F(",\"features\":["));
   bool first = true;
+  DynamicJsonDocument doc(4096);
   for (const auto& e : _entries) {
     if (!e) continue;
     if (!first) response->print(',');
     first = false;
-    DynamicJsonDocument doc(4096);
+    doc.clear();
     JsonObject obj = doc.to<JsonObject>();
     e->toJson(obj);
     serializeJson(doc, *response);

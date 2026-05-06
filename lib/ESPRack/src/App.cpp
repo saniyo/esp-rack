@@ -29,11 +29,22 @@ App::App(AsyncWebServer* server, const char* deviceName, const char* deviceVersi
     deviceVersion_{deviceVersion ? deviceVersion : ""},
     configManager_{&ESPFS},
     wsManager_    {server, 10},
+    // CRITICAL: pass our OWN deviceName_/deviceVersion_ buffers to
+    // WebManager, not the ctor parameters. The caller's pointers
+    // (typically Builder::deviceName_.c_str()) become dangling the
+    // moment Builder goes out of scope — using them later was the
+    // root cause of (a) garbled `device.name` in /rest/uiManifest
+    // ("΂@" pattern), (b) corrupted JSON breaking the manifest fetch
+    // and emptying the menu, and (c) multi_heap poison-pattern
+    // crashes ~minutes into uptime as the freed bytes got reused by
+    // unrelated allocations. Member-init order (deviceName_ before
+    // webManager_, see App.h declaration order) guarantees the
+    // String is fully constructed when we read its c_str() here.
     webManager_   {server,
                    &nullSecurity(),
                    &wsManager_,
-                   deviceName,
-                   deviceVersion},
+                   deviceName_.c_str(),
+                   deviceVersion_.c_str()},
     security_     {&nullSecurity()} {
   // Framework-owned UI shell — registered BEFORE Builder runs module
   // onInstall, so that modules calling addTabToFeature("system", ...)
