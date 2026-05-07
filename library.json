@@ -1,25 +1,59 @@
 {
   "name": "ESPRack",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Modular firmware framework for ESP32 (Arduino 3.x / IDF 5+) — plug-and-play modules via Builder, manifest-driven React UI, encryption-at-rest. Single-library bundle for git-pull consumption: lib_deps = https://github.com/saniyo/esp-rack.git#v0.1.0",
-  "keywords": ["esp32", "arduino", "framework", "modular", "react", "asyncwebserver", "manifest-driven"],
+  "keywords": [
+    "esp32",
+    "arduino",
+    "framework",
+    "modular",
+    "react",
+    "asyncwebserver",
+    "manifest-driven"
+  ],
   "homepage": "https://github.com/saniyo/esp-rack",
   "repository": {
     "type": "git",
     "url": "https://github.com/saniyo/esp-rack.git"
   },
   "authors": [
-    { "name": "Oleksandr Stolyar", "email": "saniyo.ua@gmail.com", "maintainer": true }
+    {
+      "name": "Oleksandr Stolyar",
+      "email": "saniyo.ua@gmail.com",
+      "maintainer": true
+    }
   ],
   "license": "MIT",
-  "frameworks": ["arduino"],
-  "platforms": ["espressif32"],
+  "frameworks": [
+    "arduino"
+  ],
+  "platforms": [
+    "espressif32"
+  ],
   "dependencies": [
-    { "name": "ArduinoJson", "owner": "bblanchon", "version": "^6.21.6" },
-    { "name": "AsyncTCP", "owner": "mathieucarbou", "version": "^3.3.2" },
-    { "name": "ESPAsyncWebServer", "owner": "mathieucarbou", "version": "^3.6.0" },
-    { "name": "AsyncMqttClient", "version": "^0.9.0" },
-    { "name": "UniversalTelegramBot", "version": "https://github.com/saniyo/Universal-Arduino-Telegram-Bot.git" }
+    {
+      "name": "ArduinoJson",
+      "owner": "bblanchon",
+      "version": "^6.21.6"
+    },
+    {
+      "name": "AsyncTCP",
+      "owner": "mathieucarbou",
+      "version": "^3.3.2"
+    },
+    {
+      "name": "ESPAsyncWebServer",
+      "owner": "mathieucarbou",
+      "version": "^3.6.0"
+    },
+    {
+      "name": "AsyncMqttClient",
+      "version": "^0.9.0"
+    },
+    {
+      "name": "UniversalTelegramBot",
+      "version": "https://github.com/saniyo/Universal-Arduino-Telegram-Bot.git"
+    }
   ],
   "build": {
     "srcDir": ".",

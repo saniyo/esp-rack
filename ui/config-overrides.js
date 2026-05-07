@@ -1,7 +1,22 @@
+const path = require('path');
 const { WebpackManifestPlugin } = require('webpack-manifest-plugin');
 const MiniCssExtractPlugin = require('mini-css-extract-plugin');
 const ProgmemGenerator = require('./progmem-generator.js');
 const TerserPlugin = require('terser-webpack-plugin');
+
+// Where to write the baked WWWData.h. The consumer's sync_ui.py
+// resolves the active esp-rack library location (sibling clone vs
+// PIO-cloned at .pio/libdeps/<env>/ESPRack/) and exports the include
+// path via ESPRACK_INCLUDE_DIR. We honor that env var; the relative-
+// path fallback is the legacy local-dev hardcode and only fires when
+// somebody runs `npm run build` outside the PIO-driven flow (rare).
+function resolveProgmemOutputPath() {
+  const fromEnv = process.env.ESPRACK_INCLUDE_DIR;
+  if (fromEnv) {
+    return path.join(fromEnv, 'WWWData.h');
+  }
+  return '../../esp-rack/lib/ESPRack/include/WWWData.h';
+}
 
 module.exports = function override(config, env) {
   if (env === "production") {
@@ -25,7 +40,7 @@ module.exports = function override(config, env) {
     // App.cpp's `#include <WWWData.h>` resolves. The library's .gitignore
     // excludes WWWData.h so it never gets committed.
     config.plugins.push(new ProgmemGenerator({
-      outputPath: "../../esp-rack/lib/ESPRack/include/WWWData.h",
+      outputPath: resolveProgmemOutputPath(),
       bytesPerLine: 20,
     }));
   }

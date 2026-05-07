@@ -1,6 +1,6 @@
 {
   "name": "FactoryResetModule",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "ESPRack module: factory-reset (Phase 1 thin wrapper around legacy service).",
   "license": "MIT",
   "frameworks": [
