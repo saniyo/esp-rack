@@ -20,13 +20,22 @@ export interface WebSocketPayloadMessage<D> {
 export type WebSocketMessage<D> = WebSocketIdMessage | WebSocketPayloadMessage<D>;
 
 // How long to wait for a payload message on a `live=true` tab before
-// declaring the connection stale and forcing a reconnect. Background
-// streams (LightState chart at default 100 ms cadence, NTP clock at 1 Hz,
-// MQTT status echoes at ~1 Hz) all comfortably fit this window. Inbound
-// data on a quiet status tab (no chart) is fine — we only arm the
-// watchdog when a payload has actually arrived once, so a tab that's
-// silent by design never trips it.
-const STALE_WATCHDOG_MS = 30_000;
+// declaring the connection stale and forcing a reconnect. Originally
+// 30s, which false-triggered relentlessly on event-driven tabs
+// (Telegram pushes only on send/queue change; MQTT only on broker
+// state flip; NTP on clock refresh) — quiet periods are NORMAL, the
+// watchdog kept reconnecting against a healthy socket and slot-leaking
+// the AsyncWebSocket pool until the server refused new clients (then
+// even a hard browser refresh couldn't get a Live indicator back).
+//
+// The browser's own onclose path already detects truly dead sockets
+// via TCP keepalive + AsyncWebSocket's beginPingPong (20s ping / 60s
+// pong timeout). The watchdog only adds value for the rare server-
+// side deadlock where the task is hung but TCP is still alive — a
+// 10-minute window catches that without firing on any normal idle
+// pattern. Light's 10Hz chart still trips the alarm in ~6000 missed
+// frames if it ever genuinely freezes.
+const STALE_WATCHDOG_MS = 600_000;
 
 // Sockette retry cap. The legacy 10 was reached within ~50 s and then
 // the socket died for the lifetime of the page; long-running operator

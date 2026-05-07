@@ -29,7 +29,18 @@ App::App(AsyncWebServer* server, const char* deviceName, const char* deviceVersi
     deviceName_   {deviceName ? deviceName : ""},
     deviceVersion_{deviceVersion ? deviceVersion : ""},
     configManager_{&ESPFS},
-    wsManager_    {server, 10},
+    // 32 slot ceiling for AsyncWebSocket clients across all WS paths.
+    // Originally 10, which got exhausted in two real-world scenarios:
+    //   * operator opens 2-3 browser tabs against different live tabs
+    //     (Light + Telegram + NTP) → 6+ active clients steady state;
+    //   * useWs's stale-watchdog reconnect cycle leaks half-closed
+    //     clients faster than beginPingPong can evict them (~80s).
+    // Once the pool is full, ALL new WS handshakes fail until the
+    // server drops zombies — which presented to the operator as
+    // "WS lost Live and refresh doesn't help". 32 gives ~4× headroom
+    // for the typical 4-5 concurrent live-tab use case; bumping
+    // further is cheap (each slot is small, mostly a few pointers).
+    wsManager_    {server, 32},
     // CRITICAL: pass our OWN deviceName_/deviceVersion_ buffers to
     // WebManager, not the ctor parameters. The caller's pointers
     // (typically Builder::deviceName_.c_str()) become dangling the
