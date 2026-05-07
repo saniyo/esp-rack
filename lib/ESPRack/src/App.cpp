@@ -49,19 +49,13 @@ App::App(AsyncWebServer* server, const char* deviceName, const char* deviceVersi
     security_     {&nullSecurity()} {
   // Framework-owned UI shell — registered BEFORE Builder runs module
   // onInstall, so that modules calling addTabToFeature("system", ...)
-  // find a parent. buildFeatures map exposed via /rest/uiManifest is
-  // populated here so the manifest payload reflects build-time gates
-  // even if no module touches them.
-  webManager_.registerBuildFeature("project",         FT_ENABLED(FT_PROJECT));
-  webManager_.registerBuildFeature("security",        FT_ENABLED(FT_SECURITY));
-  webManager_.registerBuildFeature("websocket",       FT_ENABLED(FT_WEBSOCKET));
-  webManager_.registerBuildFeature("mqtt",            FT_ENABLED(FT_MQTT));
-  webManager_.registerBuildFeature("ntp",             FT_ENABLED(FT_NTP));
-  webManager_.registerBuildFeature("ota",             FT_ENABLED(FT_OTA));
-  webManager_.registerBuildFeature("upload_firmware", FT_ENABLED(FT_UPLOAD_FIRMWARE));
-  webManager_.registerBuildFeature("telegram",        FT_ENABLED(FT_TELEGRAM));
-  webManager_.registerBuildFeature("auto_update",     FT_ENABLED(FT_AUTO_UPDATE));
-  webManager_.registerBuildFeature("system_info",     FT_ENABLED(FT_SYSTEM_INFO));
+  // find a parent. The buildFeatures map (exposed via /rest/uiManifest)
+  // is populated later in App::begin() once modules_ is filled — keys
+  // are derived from each installed Module's describe().id, so the
+  // manifest reflects "what's installed" rather than a hardcoded
+  // FT_*-driven list. The single non-module flag — FT_PROJECT (gates
+  // the consumer's own service) — is registered there too as a
+  // special case.
 
   WebFeatureSpec sys;
   sys.id            = "system";
@@ -90,16 +84,29 @@ void App::begin() {
 
   // 0. Publish framework + module identity into the manifest so the
   // frontend (and audit tooling) can read the running rev set without
-  // any out-of-band query. Version pointers come from the modules'
-  // describe() implementations — by convention these are string
-  // literals embedded in module source, so they live in flash and
-  // outlive any request that reads them.
+  // any out-of-band query. Each installed module contributes:
+  //   * an entry in modules[] (id + version) — the module rev list
+  //   * a buildFeatures[id] = true entry — the install map
+  // Modules NOT installed via Builder().install<>() are simply absent
+  // from both lists, so manifest.buildFeatures becomes a faithful
+  // mirror of the .install<>() chain in main.cpp. No more drift
+  // between FT_* macros and what the consumer actually wired up.
+  //
+  // FT_PROJECT remains a special case — it's a consumer-side toggle
+  // (gates the consumer's own service body) and isn't tied to any
+  // library Module. Registered explicitly so the frontend can still
+  // hide consumer-specific UI pieces when the consumer ships a
+  // framework-only build. Pointers come from describe() implementations,
+  // by convention string literals embedded in module source — they live
+  // in flash and outlive any request that reads them.
   webManager_.setFrameworkVersion(ESPRACK_VERSION_STR);
+  webManager_.registerBuildFeature("project", FT_ENABLED(FT_PROJECT));
   for (auto& m : modules_) {
     if (!m) continue;
     ModuleDescriptor d;
     m->describe(d);
     webManager_.registerModule(d.id, d.version);
+    webManager_.registerBuildFeature(d.id, true);
   }
 
   // 1. Filesystem first — ConfigManager and several modules need /config

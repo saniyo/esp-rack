@@ -1,6 +1,6 @@
 {
   "name": "WiFiModule",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "ESPRack module: WiFi STA + AP scan + dual-network credentials with smart-slot fallback. Wraps the legacy WiFiSettingsService as ESPRack::Module.",
   "keywords": [
     "esp32",
