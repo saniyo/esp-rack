@@ -40,3 +40,9 @@ const char* TelegramSubscription::serviceName() const {
   if (!valid()) return "";
   return provider_->subscriptionName(id_);
 }
+
+bool TelegramSubscription::active() const {
+  if (!valid()) return false;
+  if (!provider_->subscriptionEnabled(id_)) return false;
+  return provider_->connectionState() != ESPRack::MessagingConnectionState::Disabled;
+}

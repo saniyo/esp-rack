@@ -111,8 +111,8 @@ void ConfigManager::begin() {
     if (dir) dir.close();
   }
 
-  Serial.printf("[ConfigManager] tmpRoot=%s bakRoot=%s (snapshot mode)\n",
-                _tmpRoot.c_str(), _bakRoot.c_str());
+  // tmpRoot/bakRoot diagnostic was useful while the snapshot mode
+  // was new; it's stable now and just adds noise on every boot.
 }
 
 void ConfigManager::lock() {
@@ -327,18 +327,9 @@ bool ConfigManager::readJsonFile(const char* path, DynamicJsonDocument& doc) {
     return false;
   }
 
-  size_t sz = f.size();
-  // Dump the first 256 bytes so we can see whether the write actually
-  // landed on disk in the expected shape (especially the closing brace).
-  String head;
-  head.reserve(sz < 256 ? sz : 256);
-  while (head.length() < 256 && f.available()) {
-    head += (char)f.read();
-  }
-  f.seek(0, SeekSet);
-  Serial.printf("[CFG] readJsonFile %s size=%u head=\"%s\"\r\n",
-                path, (unsigned)sz, head.c_str());
-
+  // No head-dump on success — leaks ENC: ciphertext, JWT secret hash,
+  // and other sensitive bytes into the serial console where they
+  // survive in scrollback. Only failures stay verbose.
   DeserializationError err = deserializeJson(doc, f);
   if (err) {
     Serial.printf("[CFG] readJsonFile %s deserialize err=%s\r\n", path, err.c_str());

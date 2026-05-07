@@ -37,7 +37,6 @@ static String computeHwSuffix() {
 #ifdef ESP32
   uint32_t psramBytes = ESP.getPsramSize();
   psramMB = (int)((psramBytes + 512UL * 1024UL) / (1024UL * 1024UL));
-  Serial.printf("[AutoUpdate] PSRAM: %u bytes (%d MB)\n", psramBytes, psramMB);
 #endif
 
   String suffix = chip + "-n" + String(flashMB);
@@ -123,13 +122,10 @@ void AutoUpdateService::begin() {
   baseLower.toLowerCase();
   _state.effectivePlatformId = baseLower + "-" + _state.hwSuffix;
 
-  Serial.println(F("[AutoUpdate] ===== Config ====="));
-  Serial.printf("  Device: %s  Ver: %s\n", _state.deviceName.c_str(), _state.currentVersion.c_str());
-  Serial.printf("  HW: %s  PlatformID: %s\n", _state.hwSuffix.c_str(), _state.effectivePlatformId.c_str());
-  Serial.printf("  Enabled: %s  Interval: %d min  Timeout: %d sec\n",
-                _state.enabled ? "yes" : "no", _state.checkInterval, _state.updateTimeoutSec);
-  Serial.printf("  Primary: %s\n  Fallback: %s\n", HARD_UPDATE_SERVER_URL, _state.serverUrl.c_str());
-  Serial.println(F("[AutoUpdate] ================"));
+  // Boot-time config dump removed — full state is visible on the
+  // OTA tab in the UI; serial spam at every reboot just adds noise.
+  // Functional logs (check fired, OTA progress, success/fail) stay
+  // — they trigger only on real events.
 }
 
 // ====================================================

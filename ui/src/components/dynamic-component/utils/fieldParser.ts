@@ -26,7 +26,7 @@ export const fieldConfigurations = {
   //                       rowFill / rowNav dispatch on row click either way.
   table: { options: ['r', 'rw', 'cols', 'icon', 'color', 'mode', 'maxRows', 'rowFill', 'rowFillFallback', 'rowNav', 'layout', 'primary', 'secondary', 'avatar', 'badge', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const },
   datetime: { options: ['r', 'rw', 'dtmode', 'icon', 'color', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const },
-  action: { options: ['r', 'rw', 'url', 'method', 'confirm', 'color', 'icon', 'ref', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const },
+  action: { options: ['r', 'rw', 'url', 'method', 'confirm', 'color', 'icon', 'ref', 'withFields', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const },
   message: { options: ['r', 'rw', 'level', 'icon', 'color', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const },
   timezones: { options: ['r', 'rw', 'icon', 'color', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const },
   ip: { options: ['r', 'rw', 'pl', 'icon', 'color', 'colorMap', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const }
@@ -43,6 +43,14 @@ export interface ShowIfSpec {
 export interface RowFillPair {
   target: string;
   col: string;
+}
+
+// ActionField `withFields` pair — `param` is the URL query-string key
+// the backend handler reads via request->arg(...), `field` is the live
+// formState field whose value gets interpolated.
+export interface WithFieldsPair {
+  param: string;
+  field: string;
 }
 
 export interface BadgeSpec {
@@ -62,6 +70,7 @@ export interface ParsedFieldOption {
     | number
     | ShowIfSpec
     | RowFillPair[]
+    | WithFieldsPair[]
     | BadgeSpec
     | ColorMap
     | undefined;
@@ -254,6 +263,26 @@ const optionParsers: Record<string, (option: string) => ParsedFieldOption> = {
   // Router navigation target — paired with rowFill. On row click, TableField
   // navigates to this path carrying the filled values as location state.
   rowNav: (opt) => ({ key: 'rowNav', value: getAfter(opt, 'rowNav').trim() }),
+
+  // ActionField extension: pairs of `param=field` that the button
+  // interpolates from live formState into the request URL's query
+  // string when fired. Same syntax as rowFill — solves the gap
+  // where rowFill updates frontend state but ActionField POSTs
+  // empty body, leaving backend with stale `_state.<field>`.
+  withFields: (opt) => {
+    const raw = getAfter(opt, 'withFields');
+    const pairs = raw
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .map((pair) => {
+        const eq = pair.indexOf('=');
+        if (eq < 0) return null;
+        return { param: pair.slice(0, eq).trim(), field: pair.slice(eq + 1).trim() };
+      })
+      .filter((x): x is WithFieldsPair => x !== null);
+    return { key: 'withFields', value: pairs };
+  },
 
   // table `layout=grid|cards` picks between data-grid and avatar-card list.
   layout: (opt) => ({ key: 'layout', value: getAfter(opt, 'layout').trim() }),

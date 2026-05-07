@@ -63,8 +63,27 @@ void TelegramSettings::buildForm(TelegramSettings& s, JsonObject& root) {
   // ── STATUS ────────────────────────────────────────────────────────
   JsonArray sta = FormBuilder::createForm(root, "status", "Telegram bot status");
 
+  // Status avatar: success (green) when the service is enabled and the
+  // last send succeeded — mirrors the NTP "Active/Inactive" pattern so
+  // operators get the same at-a-glance health cue across feature tabs.
+  // Reasoning matches connectionState() in TelegramService.cpp:
+  //   Disabled         → info     (operator chose to mute)
+  //   queue >0         → warning  (sending in progress, no result yet)
+  //   last send fail   → error
+  //   last send ok     → success
+  //   no sends yet     → info     (idle but armed)
+  const char* statusColor;
+  if (!s.enabled) {
+    statusColor = "info";
+  } else if (s.qSize > 0) {
+    statusColor = "warning";
+  } else if (s.lastSendAt_s > 0) {
+    statusColor = s.lastSendOk ? "success" : "error";
+  } else {
+    statusColor = "info";
+  }
   FormBuilder::addTextField(sta, "status", AF::R, s.statusLabel.c_str(),
-                            label("Status"), icon("Cable"));
+                            label("Status"), icon("Cable"), color(statusColor));
   FormBuilder::addNumberField(sta, "qsize", AF::R, (double)s.qSize,
                               label("Queue depth"), unit("msgs"), format("0"),
                               icon("Inventory2"));

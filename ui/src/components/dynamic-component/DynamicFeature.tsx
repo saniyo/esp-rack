@@ -105,13 +105,28 @@ const DynamicTabPanel: FC<DynamicTabPanelProps> = ({ tab, ws }) => {
     return out;
   }, [formData]);
 
+  // Live-edit ref backing the context's getLiveValue/setLiveValue
+  // pair. DynamicContentHandler writes into this on every
+  // handleInputChange (typing into a TextField, rowFill from a
+  // TableField, etc.); ActionField's `withFields` reads from it at
+  // click time. We use a ref + stable getter/setter pair (instead of
+  // a state map in the context value) so per-keystroke edits don't
+  // create a new ctx object and force every consumer to re-render.
+  const liveValuesRef = useRef<Record<string, any>>({});
+  const setLiveValue = useCallback((label: string, value: any) => {
+    liveValuesRef.current[label] = value;
+  }, []);
+  const getLiveValue = useCallback((label: string) => liveValuesRef.current[label], []);
+
   const ctx: DynamicFormCtx = useMemo(() => ({
     refetch: (opts) => { void loadData(opts); },
     isPending,
     markPending,
     clearPending,
     formState: flattenedFormState,
-  }), [loadData, isPending, markPending, clearPending, flattenedFormState]);
+    getLiveValue,
+    setLiveValue,
+  }), [loadData, isPending, markPending, clearPending, flattenedFormState, getLiveValue, setLiveValue]);
 
   const handleUpdateData = useCallback(
     (newData: Partial<any>) => {

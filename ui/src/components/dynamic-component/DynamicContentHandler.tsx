@@ -1,4 +1,4 @@
-import React, { FC, useEffect, useState } from 'react';
+import React, { FC, useEffect, useRef, useState } from 'react';
 import {
   Box,
   Card,
@@ -33,6 +33,7 @@ import MessageField from './elements/MessageField';
 import TimeZones from './elements/TimeZones';
 import IPAddressField from './elements/IPAddressField';
 import DefaultComponent from './elements/DefaultComponent';
+import { useDynamicForm } from './DynamicFormContext';
 
 interface DynamicContentHandlerProps {
   title: string;
@@ -74,19 +75,69 @@ const DynamicContentHandler: FC<DynamicContentHandlerProps> = ({
 }) => {
   const [formState, setFormState] = useState<Record<string, any>>({});
 
+  // Track the field.value we last applied per label. On every fields-prop
+  // update we adopt the server's new value ONLY for labels whose
+  // field.value actually changed since the previous render — that way
+  // user edits in formState (typing into a TextField, or rowFill from a
+  // sibling TableField) survive WS-driven re-renders of UNRELATED fields.
+  // Without this guard, every WS push (status text, live table tick,
+  // anything mutating field.value somewhere on the form) reset the
+  // ENTIRE formState back to field.value, wiping pending row-click
+  // selections / mid-typing input on every tick of a busy stream.
+  const prevFieldValuesRef = useRef<Record<string, any>>({});
+
   useEffect(() => {
-    const initialState: Record<string, any> = {};
-    fields.forEach((field) => {
-      initialState[field.label] = field.value;
+    setFormState((prev) => {
+      const next: Record<string, any> = { ...prev };
+      let changed = false;
+      fields.forEach((field) => {
+        const recorded = prevFieldValuesRef.current[field.label];
+        const incoming = field.value;
+        // First-render seed (no recorded prior value AND no formState
+        // entry yet) — adopt server's value verbatim.
+        if (recorded === undefined && !(field.label in prev)) {
+          next[field.label] = incoming;
+          changed = true;
+        } else if (incoming !== recorded) {
+          // Server pushed a new value for this field since last render
+          // — adopt it. (This is intentionally aggressive: for fields
+          // the operator was editing AT THE EXACT MOMENT the server
+          // pushed, the server still wins. TextField's internal
+          // isEditing flag handles the typing case for itself; this
+          // path only matters for non-text widgets that read formState
+          // directly without buffering.)
+          next[field.label] = incoming;
+          changed = true;
+        }
+        // else: server didn't change this field's value → keep prev
+        // (which may carry a user edit not yet pushed to backend).
+      });
+
+      // Refresh the ref AFTER computing next so subsequent renders
+      // compare against the values we just observed.
+      fields.forEach((field) => {
+        prevFieldValuesRef.current[field.label] = field.value;
+      });
+
+      return changed ? next : prev;
     });
-    setFormState(initialState);
   }, [fields]);
+
+  // Mirror handleInputChange writes into the form-level live ref so
+  // sibling components (notably ActionField under the same
+  // DynamicFormContext) can read the operator's CURRENT input —
+  // including transient row-click selections — at fire-time. Without
+  // this the context's `formState` only reflects the last server
+  // GET, and `withFields` ships an empty string the moment an action
+  // button is clicked after a row pick.
+  const { setLiveValue } = useDynamicForm();
 
   const handleInputChange = (label: string, value: any) => {
     setFormState((prevState) => ({
       ...prevState,
       [label]: value,
     }));
+    setLiveValue?.(label, value);
     onInputChange && onInputChange(label, value);
   };
 
@@ -95,6 +146,7 @@ const DynamicContentHandler: FC<DynamicContentHandlerProps> = ({
       ...prevState,
       [label]: value,
     }));
+    setLiveValue?.(label, value);
     onFieldBlur && onFieldBlur(label, value);
   };
 

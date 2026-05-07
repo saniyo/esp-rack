@@ -56,6 +56,15 @@ class TelegramSubscription {
   bool enabled() const;
   void setEnabled(bool on);
 
+  // Composite "ready to actually deliver" gate. Returns true only when
+  // the handle is valid AND its mute flag is on AND the bot transport
+  // itself isn't Disabled. Consumers gate their cyclic sends on this
+  // to avoid filling the activity log with "skip: bot disabled" lines
+  // each tick — without it, a service ticking every minute against a
+  // disabled bot accumulates wasted log rows that push the real
+  // activity off the visible window.
+  bool active() const;
+
   // Release the slot in the provider's registry. Idempotent. After
   // calling, valid() returns false.
   void unsubscribe();

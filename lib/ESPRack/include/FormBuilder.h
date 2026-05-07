@@ -151,6 +151,20 @@ inline ShowIfTag showIf(const char* depField, const char* depValue) { return Sho
 struct RowFillTag { const char* spec; };
 inline RowFillTag rowFill(const char* spec) { return RowFillTag{spec}; }
 
+// ActionField extension — let the action POST carry CURRENT form-
+// field values as query-string params. Spec syntax mirrors rowFill:
+//   "<param>=<field>,<param>=<field>,..."
+// On button click, ActionField interpolates each <field> from the
+// live frontend formState and appends `?param=val&param2=...` to
+// the action URL before firing. Backend handler reads the value via
+// `request->arg("param")`. Solves the "rowFill updated formState
+// but action POSTs empty body, so backend sees stale _state" gap.
+// Example: addActionField(..., actionRef("mqtt.attachTopic"),
+//                         withFields("topic=selected_topic"))
+//   click "Attach" → POST /rest/.../attach?topic=<selectedTopic>.
+struct WithFieldsTag { const char* spec; };
+inline WithFieldsTag withFields(const char* spec) { return WithFieldsTag{spec}; }
+
 // Smart-slot fallback for row-click. When set together with rowFill, the
 // frontend inspects the CURRENT value of the FIRST target in `rowFill`
 // (e.g. "ssid"). If that field is empty → use the primary rowFill spec.
@@ -1027,6 +1041,13 @@ class FormBuilder {
     if (r.spec && r.spec[0] != '\0') {
       String o = field["o"].as<String>();
       o += ";rowFill="; o += r.spec;
+      field["o"] = o;
+    }
+  }
+  static void applyExtra(JsonObject& field, WithFieldsTag w) {
+    if (w.spec && w.spec[0] != '\0') {
+      String o = field["o"].as<String>();
+      o += ";withFields="; o += w.spec;
       field["o"] = o;
     }
   }

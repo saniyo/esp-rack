@@ -505,10 +505,6 @@ void WiFiSettingsService::reconfigureWiFiConnection() {
   s_activeAp = _activeAp;
   _apAttempts = 0;
 
-  Serial.printf_P(PSTR("[wifi] reconfigure: activeAp=%u primary='%s' secondary='%s' freeHeap=%u\r\n"),
-                  _activeAp, _state.ssid.c_str(), _state.ssid2.c_str(),
-                  (unsigned)ESP.getFreeHeap());
-
 #ifdef ESP32
   WiFi.disconnect(false, true);
   _stopping = false;

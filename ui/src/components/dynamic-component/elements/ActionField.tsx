@@ -17,7 +17,7 @@ import { extractErrorMessage } from '../../../utils';
 import { resolveIcon } from '../utils/iconRegistry';
 import { useManifest } from '../../../contexts/manifest';
 import { useDynamicForm } from '../DynamicFormContext';
-import { ShowIfSpec } from '../utils/fieldParser';
+import { ShowIfSpec, WithFieldsPair } from '../utils/fieldParser';
 
 // Polling schedule (ms from click) driven when a field carries
 // refetchForm=1. The first refetch is intentionally delayed past the
@@ -52,7 +52,7 @@ const ActionField: FC<ActionFieldProps> = ({ field, value }) => {
   const { readableLabel, optionMap } = useFieldParser(field.label, field.o || '');
   const { enqueueSnackbar } = useSnackbar();
   const { findFeature } = useManifest();
-  const { refetch, markPending, clearPending, isPending, formState } = useDynamicForm();
+  const { refetch, markPending, clearPending, isPending, formState, getLiveValue } = useDynamicForm();
 
   const refetchAfter = !!((optionMap as any).refetchForm?.value);
 
@@ -123,7 +123,34 @@ const ActionField: FC<ActionFieldProps> = ({ field, value }) => {
     setBusy(true);
     try {
       if (!resolved.url) throw new Error(`action "${refId || field.label}" has no url`);
-      const axiosPath = toAxiosPath(resolved.url);
+
+      // withFields: interpolate sibling form-field values into the
+      // URL's query string so the backend handler can read them via
+      // `request->arg("<param>")`. Solves the rowFill→action gap
+      // where the frontend has the value but ActionField POSTs an
+      // empty body. Empty / missing values are sent as empty
+      // strings — backend can decide whether that's a no-op.
+      const withFields = ((optionMap as any).withFields?.value
+        ?? []) as WithFieldsPair[];
+      let url = resolved.url;
+      if (withFields.length > 0) {
+        const qs = withFields
+          .map((p) => {
+            // Prefer the live (uncommitted) value from the context's
+            // mutable ref — it tracks rowFill picks and per-keystroke
+            // edits made between the last GET and this click. Fall
+            // back to the server-side formState snapshot only when
+            // nothing live exists for the field (initial render
+            // before any user interaction).
+            const live = getLiveValue ? getLiveValue(p.field) : undefined;
+            const v = live !== undefined ? live : formState[p.field];
+            return `${encodeURIComponent(p.param)}=${encodeURIComponent(v == null ? '' : String(v))}`;
+          })
+          .join('&');
+        url = url + (url.includes('?') ? '&' : '?') + qs;
+      }
+
+      const axiosPath = toAxiosPath(url);
       if (resolved.method === 'GET') await AXIOS.get(axiosPath);
       else if (resolved.method === 'DELETE') await AXIOS.delete(axiosPath);
       else if (resolved.method === 'PUT') await AXIOS.put(axiosPath, {});

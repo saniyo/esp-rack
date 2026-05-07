@@ -35,7 +35,7 @@
 
 class AsyncWebServer;
 class ITelegramProvider;   // forward — populated by TelegramModule
-class IMqttDispatcher;     // forward — populated by MqttModule (TBD subscription model)
+class IMqttProvider;       // forward — populated by MqttModule
 
 namespace ESPRack {
 
@@ -83,6 +83,12 @@ class App {
   ITelegramProvider* telegram()                  { return telegram_; }
   void               setTelegram(ITelegramProvider* p) { telegram_ = p; }
 
+  // IMqttProvider late-binding — same pattern as telegram(). Set by
+  // MqttModule::onInstall. Consumers that want to publish/subscribe
+  // through the broker pull through this pointer in their onBegin.
+  IMqttProvider*     mqtt()                  { return mqtt_; }
+  void               setMqtt(IMqttProvider* p) { mqtt_ = p; }
+
   // Read-only device identity — useful for AutoUpdateModule etc. that
   // pass these to their underlying service ctor. Set once at App
   // construction.
@@ -106,6 +112,7 @@ class App {
   SecurityManager*    security_ {nullptr};   // populated by SecurityModule
   PresenceService*    presence_ {nullptr};   // populated by PresenceModule
   ITelegramProvider*  telegram_ {nullptr};   // populated by TelegramModule
+  IMqttProvider*      mqtt_     {nullptr};   // populated by MqttModule
 
   std::vector<std::unique_ptr<Module>> modules_;
   bool             begun_ {false};

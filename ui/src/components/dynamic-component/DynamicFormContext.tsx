@@ -22,6 +22,19 @@ export interface DynamicFormCtx {
   // TableField loadingIf) read from here instead of plumbing formState
   // through every DynamicContentHandler prop.
   formState: Record<string, any>;
+
+  // Live (uncommitted) field values, keyed by label. Populated by
+  // DynamicContentHandler on every handleInputChange — typing into a
+  // TextField, rowFill from a TableField click, etc. Reflects the
+  // operator's CURRENT intent before any Save/Action POST. ActionField
+  // reads this first for `withFields` interpolation: the server-side
+  // formState is a stale snapshot of the last GET, while the operator
+  // may have just clicked a row half a second ago. Without this,
+  // `?topic=` ships empty because formState['selected_topic'] is "".
+  // Implemented as a getter (backed by a MutableRef) so per-keystroke
+  // edits don't trigger context re-renders.
+  getLiveValue?: (label: string) => any;
+  setLiveValue?: (label: string, value: any) => void;
 }
 
 const noop = () => {};
@@ -32,6 +45,8 @@ export const DynamicFormContext = createContext<DynamicFormCtx>({
   markPending: noop,
   clearPending: noop,
   formState: {},
+  getLiveValue: () => undefined,
+  setLiveValue: noop,
 });
 
 export const useDynamicForm = () => useContext(DynamicFormContext);

@@ -1,7 +1,7 @@
 {
   "name": "MqttModule",
-  "version": "0.1.8",
-  "description": "ESPRack module: mqtt (Phase 1 thin wrapper around legacy service).",
+  "version": "2.0.0",
+  "description": "ESPRack module: mqtt — IMqttProvider subscription model with publish/inbound dispatch, sliding-window rate limit, Subscriptions UI tab.",
   "license": "MIT",
   "frameworks": [
     "arduino"
