@@ -1,6 +1,6 @@
 {
   "name": "WebEndpointsModule",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "ESPRack module: web-endpoints (Phase 1 thin wrapper around legacy service).",
   "license": "MIT",
   "frameworks": [

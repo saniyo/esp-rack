@@ -1,6 +1,6 @@
 {
   "name": "ConfigManagerUiModule",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "ESPRack module: config-manager-ui (Phase 1 thin wrapper around legacy service).",
   "license": "MIT",
   "frameworks": [
