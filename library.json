@@ -1,0 +1,91 @@
+{
+  "name": "ESPRack",
+  "version": "0.1.0",
+  "description": "Modular firmware framework for ESP32 (Arduino 3.x / IDF 5+) — plug-and-play modules via Builder, manifest-driven React UI, encryption-at-rest. Single-library bundle for git-pull consumption: lib_deps = https://github.com/saniyo/esp-rack.git#v0.1.0",
+  "keywords": ["esp32", "arduino", "framework", "modular", "react", "asyncwebserver", "manifest-driven"],
+  "homepage": "https://github.com/saniyo/esp-rack",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/saniyo/esp-rack.git"
+  },
+  "authors": [
+    { "name": "Oleksandr Stolyar", "email": "saniyo.ua@gmail.com", "maintainer": true }
+  ],
+  "license": "MIT",
+  "frameworks": ["arduino"],
+  "platforms": ["espressif32"],
+  "dependencies": [
+    { "name": "ArduinoJson", "owner": "bblanchon", "version": "^6.21.6" },
+    { "name": "AsyncTCP", "owner": "mathieucarbou", "version": "^3.3.2" },
+    { "name": "ESPAsyncWebServer", "owner": "mathieucarbou", "version": "^3.6.0" },
+    { "name": "AsyncMqttClient", "version": "^0.9.0" },
+    { "name": "UniversalTelegramBot", "version": "https://github.com/saniyo/Universal-Arduino-Telegram-Bot.git" }
+  ],
+  "build": {
+    "srcDir": ".",
+    "srcFilter": [
+      "+<lib/ESPRack/src/>",
+      "+<modules/ap/src/>",
+      "+<modules/auto-update/src/>",
+      "+<modules/config-manager-ui/src/>",
+      "+<modules/factory-reset/src/>",
+      "+<modules/features/src/>",
+      "+<modules/filesystem/src/>",
+      "+<modules/mqtt/src/>",
+      "+<modules/ntp/src/>",
+      "+<modules/ota/src/>",
+      "+<modules/presence/src/>",
+      "+<modules/restart/src/>",
+      "+<modules/security/src/>",
+      "+<modules/system-status/src/>",
+      "+<modules/telegram/src/>",
+      "+<modules/ui-dyn/src/>",
+      "+<modules/upload-firmware/src/>",
+      "+<modules/web-endpoints/src/>",
+      "+<modules/wifi/src/>",
+      "+<modules/ws-diag/src/>"
+    ],
+    "flags": [
+      "-Ilib/ESPRack/include",
+      "-Imodules/ap/include",
+      "-Imodules/auto-update/include",
+      "-Imodules/config-manager-ui/include",
+      "-Imodules/factory-reset/include",
+      "-Imodules/features/include",
+      "-Imodules/filesystem/include",
+      "-Imodules/mqtt/include",
+      "-Imodules/ntp/include",
+      "-Imodules/ota/include",
+      "-Imodules/presence/include",
+      "-Imodules/restart/include",
+      "-Imodules/security/include",
+      "-Imodules/system-status/include",
+      "-Imodules/telegram/include",
+      "-Imodules/ui-dyn/include",
+      "-Imodules/upload-firmware/include",
+      "-Imodules/web-endpoints/include",
+      "-Imodules/wifi/include",
+      "-Imodules/ws-diag/include"
+    ]
+  },
+  "export": {
+    "include": [
+      "library.json",
+      "LICENSE",
+      "README.md",
+      "ROADMAP.md",
+      "lib/**",
+      "modules/**",
+      "ui/**"
+    ],
+    "exclude": [
+      "lib/**/build",
+      "lib/**/.pio",
+      "modules/**/build",
+      "modules/**/.pio",
+      "ui/node_modules",
+      "ui/build",
+      "ui/.cache"
+    ]
+  }
+}

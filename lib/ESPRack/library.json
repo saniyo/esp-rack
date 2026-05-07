@@ -1,23 +1,47 @@
 {
   "name": "ESPRack",
-  "version": "0.1.0-pre",
+  "version": "0.1.0",
   "description": "Modular firmware framework for ESP32 (Arduino 3.x / IDF 5+) — plug-and-play modules, manifest-driven UI, encryption-at-rest. Core library; pair with modules/* peers to unlock features.",
-  "keywords": ["esp32", "arduino", "framework", "modular", "react", "asyncwebserver"],
+  "keywords": [
+    "esp32",
+    "arduino",
+    "framework",
+    "modular",
+    "react",
+    "asyncwebserver"
+  ],
   "homepage": "https://github.com/saniyo/esp-rack",
   "repository": {
     "type": "git",
     "url": "https://github.com/saniyo/esp-rack.git"
   },
   "authors": [
-    { "name": "Oleksandr Stolyar", "email": "saniyo.ua@gmail.com", "maintainer": true }
+    {
+      "name": "Oleksandr Stolyar",
+      "email": "saniyo.ua@gmail.com",
+      "maintainer": true
+    }
   ],
   "license": "MIT",
-  "frameworks": ["arduino"],
-  "platforms": ["espressif32"],
+  "frameworks": [
+    "arduino"
+  ],
+  "platforms": [
+    "espressif32"
+  ],
   "dependencies": [
-    { "name": "ESP Async WebServer", "version": "^3.6.0" },
-    { "name": "AsyncTCP", "version": "^3.3.2" },
-    { "name": "ArduinoJson", "version": "^6.21.6" }
+    {
+      "name": "ESP Async WebServer",
+      "version": "^3.6.0"
+    },
+    {
+      "name": "AsyncTCP",
+      "version": "^3.3.2"
+    },
+    {
+      "name": "ArduinoJson",
+      "version": "^6.21.6"
+    }
   ],
   "build": {
     "srcDir": "src",
