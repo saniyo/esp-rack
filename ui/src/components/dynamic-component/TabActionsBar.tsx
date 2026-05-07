@@ -25,9 +25,13 @@ interface TabActionsBarProps {
   // When provided, renders LiveIndicator alongside the reload button.
   // Pass `connected` for WS-bound tabs; omit for REST-only tabs.
   liveConnected?: boolean;
+  // Heartbeat counter from useWs — bumped on every inbound frame.
+  // Threaded through to LiveIndicator so the pulse animation fires
+  // once per message rather than running unconditionally.
+  messageTick?: number;
 }
 
-const TabActionsBar: FC<TabActionsBarProps> = ({ liveConnected }) => {
+const TabActionsBar: FC<TabActionsBarProps> = ({ liveConnected, messageTick }) => {
   const { refetch } = useDynamicForm();
   const showLive = liveConnected !== undefined;
 
@@ -46,7 +50,7 @@ const TabActionsBar: FC<TabActionsBarProps> = ({ liveConnected }) => {
           <RefreshIcon />
         </IconButton>
       </Tooltip>
-      {showLive && <LiveIndicator connected={!!liveConnected} />}
+      {showLive && <LiveIndicator connected={!!liveConnected} messageTick={messageTick} />}
     </>
   );
 };

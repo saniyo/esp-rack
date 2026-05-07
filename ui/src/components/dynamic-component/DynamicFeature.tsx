@@ -31,6 +31,9 @@ interface DynamicTabPanelProps {
     originId: string;
     updateWsData: any;
     disconnect: () => void;
+    // Counter that bumps on every inbound WS frame. Drives the
+    // LiveIndicator's per-message pulse animation — see TabActionsBar.
+    messageTick: number;
   };
 }
 
@@ -150,6 +153,7 @@ const DynamicTabPanel: FC<DynamicTabPanelProps> = ({ tab, ws }) => {
           setData={handleUpdateData}
           disconnect={ws.disconnect}
           updateWsData={ws.updateWsData}
+          messageTick={ws.messageTick}
         />
       </DynamicFormContext.Provider>
     );
@@ -193,7 +197,7 @@ const DynamicFeature: FC<DynamicFeatureProps> = ({ featureId, fallback }) => {
     return WEB_SOCKET_ROOT + entry.ws.replace(/^\/ws\//, '');
   }, [entry?.ws]);
 
-  const { connected, wsData, updateData: updateWsData, disconnect } = useWs<any>(wsUrl ?? '');
+  const { connected, wsData, updateData: updateWsData, disconnect, messageTick } = useWs<any>(wsUrl ?? '');
 
   const [originId, setOriginId] = useState<string>('');
   useEffect(() => {
@@ -201,7 +205,7 @@ const DynamicFeature: FC<DynamicFeatureProps> = ({ featureId, fallback }) => {
   }, [wsData]);
 
   const wsBundle = wsUrl
-    ? { connected, wsData, originId, updateWsData, disconnect }
+    ? { connected, wsData, originId, updateWsData, disconnect, messageTick }
     : undefined;
 
   if (!entry) return <FormLoader message="Loading feature…" />;

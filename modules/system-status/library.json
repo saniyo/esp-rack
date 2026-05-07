@@ -1,6 +1,6 @@
 {
   "name": "SystemStatusModule",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "ESPRack module: system-status (Phase 1 thin wrapper around legacy service).",
   "license": "MIT",
   "frameworks": [

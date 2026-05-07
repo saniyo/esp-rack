@@ -48,6 +48,12 @@ export const useWs = <D>(
   const [connected, setConnected] = useState<boolean>(false);
   const [originId, setOriginId] = useState<string>('');
   const [wsData, setWsData] = useState<D | undefined>();
+  // Bumps on every inbound frame. Consumers (LiveIndicator) can use
+  // it as an animation trigger — re-keying off the counter restarts a
+  // one-shot pulse so the dot blinks per real heartbeat instead of
+  // pulsing constantly while connected. Bounded by uint counter
+  // semantics; React's state diff is value-based so wraparound is fine.
+  const [messageTick, setMessageTick] = useState<number>(0);
 
   // Outgoing-state coordination flags (see updateData).
   const [transmit, setTransmit] = useState<boolean>(false);
@@ -61,6 +67,11 @@ export const useWs = <D>(
         // Stamp on EVERY message including 'id' frames so the watchdog
         // doesn't false-trigger between connect and the first 'p'.
         lastMessageAt.current = Date.now();
+        // Heartbeat tick — bumped on every inbound frame regardless of
+        // type so any subscribed UI element (currently LiveIndicator)
+        // can re-key its animation off it. Counter value itself is
+        // not meaningful, only the change triggers re-render.
+        setMessageTick((n) => (n + 1) | 0);
         switch (message.type) {
           case 'id':
             clientId.current = message.id;
@@ -231,5 +242,6 @@ export const useWs = <D>(
     updateData,
     disconnect,
     forceReconnect,
+    messageTick,
   } as const;
 };

@@ -18,11 +18,15 @@ interface DynamicStatusProps {
   setData: (d: any) => void;
   disconnect: () => void;
   updateWsData: (d: React.SetStateAction<any>, tx?: boolean, clr?: boolean) => void;
+  // Per-message heartbeat counter from useWs — bumped on every inbound
+  // frame. Forwarded to LiveIndicator so its dot pulses once per
+  // received message instead of pulsing constantly while connected.
+  messageTick?: number;
 }
 
 const DynamicStatus: FC<DynamicStatusProps> = ({
   formName, data, wsData, connected,
-  originId, updateWsData
+  originId, updateWsData, messageTick
 }) => {
 
   const [formState, setFormState] = useState<Form>({
@@ -214,7 +218,7 @@ const DynamicStatus: FC<DynamicStatusProps> = ({
     <SectionContent
       title={formState.title || 'Status'}
       titleGutter
-      actions={<TabActionsBar liveConnected={connected} />}
+      actions={<TabActionsBar liveConnected={connected} messageTick={messageTick} />}
     >
       <DynamicContentHandler
         title={formState.title}
