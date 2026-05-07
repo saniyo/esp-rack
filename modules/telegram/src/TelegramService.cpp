@@ -133,15 +133,18 @@ void TelegramService::registerManifest(WebManager* web) {
     }
   };
 
-  // 12k REST buffer to fit Status (50-row log) + Subscriptions (≤32
-  // rows of stats) + Settings; WS stays at 8k since it pushes only
-  // status+log, not the subscription table (subscriptions don't
-  // change at WS-push frequency — REST refresh on tab switch is fine).
+  // 24k REST buffer — earlier 12KB was on the edge once the chat log
+  // saturated, leading to silent JSON truncation that made the
+  // Status tab hang in "Loading…" forever after a few service
+  // sends filled the log. 24KB leaves comfortable headroom for log
+  // (capped at 30 rows) + subs table + settings form. WS stays at
+  // 8k since it pushes only status+log (no subs), and is throttled
+  // by the action cadence anyway.
   _feature = web->registerFeature<TelegramSettings>(
       std::move(spec), this,
       fullReader,                 TelegramSettings::upd,
       TelegramSettings::staRead,  TelegramSettings::staUpd,
-      12288, 8192);
+      24576, 8192);
 }
 
 void TelegramService::begin() {
@@ -235,12 +238,19 @@ ESPRack::MessagingSendId TelegramService::doSend(
   m.chatOverride   = !explicitTo.chatId.isEmpty()  ? explicitTo.chatId  : rec->cfg.defaultChatId;
   m.topicOverride  = !explicitTo.topicId.isEmpty() ? explicitTo.topicId : rec->cfg.defaultTopicId;
 
-  // Apply tag prefix. Empty tagPrefix → use "[<name>] " auto-prefix
-  // so operator can still tell who's screaming. Caller wanting NO
-  // prefix can set cfg.tagPrefix = " " (space) explicitly.
+  // Apply tag prefix. Empty tagPrefix → use "<name>: " auto-prefix
+  // (Markdown-safe — brackets [...] would be interpreted as the
+  // start of a `[text](url)` link in parseMode=Markdown and
+  // Telegram returns 400 "can't parse entities", silently
+  // swallowing the message. Bot users saw no traffic from any
+  // service that auto-prefixed; manual sends — without a prefix —
+  // worked. Colon-style prefix is safe across all parseModes
+  // (None / Markdown / MarkdownV2 / HTML), so consumers don't
+  // need to think about formatting just to identify themselves.
+  // Caller wanting NO prefix sets cfg.tagPrefix = " " explicitly.
   String prefix = rec->cfg.tagPrefix;
   if (prefix.length() == 0) {
-    prefix = String("[") + rec->name + "] ";
+    prefix = rec->name + String(": ");
   }
   m.text = prefix + text;
 

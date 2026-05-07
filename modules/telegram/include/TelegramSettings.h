@@ -56,8 +56,13 @@ struct TelegramSettings {
   // ── Rolling chat log (Status tab table) ──────────────────────────────
   // Bounded to LOG_MAX entries; oldest evicted on overflow. Surfaced
   // as a TableField in the Status form so each row's stage / time /
-  // text are individually addressable.
-  static constexpr size_t LOG_MAX = 50;
+  // text are individually addressable. 30 chosen as the largest count
+  // that comfortably fits the Status tab's 24KB REST envelope along
+  // with the manualText composer + settings/subs sub-forms — at 50 the
+  // serialized response was hitting the buffer ceiling once the log
+  // saturated and the form would silently truncate, leaving the tab
+  // stuck on "Loading Status…" indefinitely.
+  static constexpr size_t LOG_MAX = 30;
   std::vector<TelegramLogEntry> chatLog;
 
   // ── Static glue for ConfigDelegate + WebFeatureEntry ─────────────────
