@@ -1,6 +1,6 @@
 {
   "name": "ESPRack",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "Modular firmware framework for ESP32 (Arduino 3.x / IDF 5+) — plug-and-play modules via Builder, manifest-driven React UI, encryption-at-rest. Single-library bundle for git-pull consumption: lib_deps = https://github.com/saniyo/esp-rack.git#v0.1.0",
   "keywords": [
     "esp32",

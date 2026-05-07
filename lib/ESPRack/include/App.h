@@ -34,6 +34,8 @@
 #include "WebManager.h"
 
 class AsyncWebServer;
+class ITelegramProvider;   // forward — populated by TelegramModule
+class IMqttDispatcher;     // forward — populated by MqttModule (TBD subscription model)
 
 namespace ESPRack {
 
@@ -72,6 +74,15 @@ class App {
   PresenceService* presence()                  { return presence_; }
   void             setPresence(PresenceService* p) { presence_ = p; }
 
+  // ITelegramProvider late-binding — populated by TelegramModule's
+  // onInstall via setTelegram(svc.get()). Consuming services that
+  // want to stream into Telegram subscribe through this pointer in
+  // their onBegin(). Returns nullptr when TelegramModule wasn't
+  // installed; consumer code must null-check (matches the optional-
+  // dependency pattern used for security/presence).
+  ITelegramProvider* telegram()                  { return telegram_; }
+  void               setTelegram(ITelegramProvider* p) { telegram_ = p; }
+
   // Read-only device identity — useful for AutoUpdateModule etc. that
   // pass these to their underlying service ctor. Set once at App
   // construction.
@@ -92,8 +103,9 @@ class App {
   ConfigManager    configManager_;
   WsManager        wsManager_;
   WebManager       webManager_;
-  SecurityManager* security_ {nullptr};   // populated by SecurityModule
-  PresenceService* presence_ {nullptr};   // populated by PresenceModule
+  SecurityManager*    security_ {nullptr};   // populated by SecurityModule
+  PresenceService*    presence_ {nullptr};   // populated by PresenceModule
+  ITelegramProvider*  telegram_ {nullptr};   // populated by TelegramModule
 
   std::vector<std::unique_ptr<Module>> modules_;
   bool             begun_ {false};

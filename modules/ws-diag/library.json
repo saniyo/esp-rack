@@ -1,6 +1,6 @@
 {
   "name": "WsDiagModule",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "ESPRack module: ws-diag (Phase 1 thin wrapper around legacy service).",
   "license": "MIT",
   "frameworks": [

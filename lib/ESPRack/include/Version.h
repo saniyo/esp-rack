@@ -19,8 +19,8 @@
 // even if every consumer keeps the same Builder("..., vX.Y.Z").
 
 #define ESPRACK_VERSION_MAJOR 0
-#define ESPRACK_VERSION_MINOR 1
-#define ESPRACK_VERSION_PATCH 7
+#define ESPRACK_VERSION_MINOR 2
+#define ESPRACK_VERSION_PATCH 0
 
 #define ESPRACK_VERSION_STR_HELPER(MA, MI, PA) #MA "." #MI "." #PA
 #define ESPRACK_VERSION_STR_EXPAND(MA, MI, PA) ESPRACK_VERSION_STR_HELPER(MA, MI, PA)
