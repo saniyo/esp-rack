@@ -1,6 +1,6 @@
 {
   "name": "TelegramModule",
-  "version": "2.0.3",
+  "version": "2.1.0",
   "description": "ESPRack module: telegram (Phase 1 thin wrapper around legacy service).",
   "license": "MIT",
   "frameworks": [

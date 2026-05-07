@@ -20,16 +20,30 @@ TelegramService::TelegramService(ConfigManager* cfgMgr)
     _cli(),
     _bot("", _cli),
     _botTokenInBot("") {
-  _q = xQueueCreate(TEL_QUEUE_DEPTH, sizeof(TelegramQueuedMessage));
-  // Reserve modest registry capacity so the first ~8 subscribers
-  // don't trigger vector reallocs (which would invalidate any
-  // in-flight pointers from findSub() — kept short & sweet).
+  // Queue holds POINTERS to heap-allocated TelegramQueuedMessage. We
+  // can't memcpy the struct by value because it carries Arduino String
+  // members — the FreeRTOS queue's bitwise copy duplicates the
+  // String's internal buffer pointer but the source object's
+  // destructor runs at scope exit and frees that buffer, leaving the
+  // queued copy with a dangling pointer that the worker eventually
+  // dereferences (manifested as "manual send works, scheduled
+  // subscription sends silently corrupt or never deliver" — heap
+  // reuse timing made the bug intermittent in early testing).
+  _q = xQueueCreate(TEL_QUEUE_DEPTH, sizeof(TelegramQueuedMessage*));
   _subs.reserve(8);
 }
 
 TelegramService::~TelegramService() {
   if (_task) vTaskDelete(_task);
-  if (_q)    vQueueDelete(_q);
+  if (_q) {
+    // Drain any messages that didn't make it to the worker before we
+    // tear down — without this their heap buffers leak.
+    TelegramQueuedMessage* m = nullptr;
+    while (xQueueReceive(_q, &m, 0) == pdPASS) {
+      delete m;
+    }
+    vQueueDelete(_q);
+  }
 }
 
 // ─── manifest + action endpoint ─────────────────────────────────────
@@ -228,33 +242,27 @@ ESPRack::MessagingSendId TelegramService::doSend(
     return ESPRack::InvalidMessagingSendId;
   }
 
-  TelegramQueuedMessage m;
-  m.subId          = rec->id;
-  m.parseMode      = opt.parseMode;
-  m.silent         = opt.silent;
-  // Routing precedence: explicit per-call > subscription default >
-  // bot global default. Empty fields propagate down through the
-  // worker which falls back to _state.{chatId,topicId,botToken}.
-  m.chatOverride   = !explicitTo.chatId.isEmpty()  ? explicitTo.chatId  : rec->cfg.defaultChatId;
-  m.topicOverride  = !explicitTo.topicId.isEmpty() ? explicitTo.topicId : rec->cfg.defaultTopicId;
+  // Heap-owned message — see queue comment in ctor for why we can't
+  // pass by value. delete-on-consume in the worker (and on dtor for
+  // any remaining queue entries) covers the lifetime.
+  auto* m = new TelegramQueuedMessage();
+  m->subId          = rec->id;
+  m->parseMode      = opt.parseMode;
+  m->silent         = opt.silent;
+  m->chatOverride   = !explicitTo.chatId.isEmpty()  ? explicitTo.chatId  : rec->cfg.defaultChatId;
+  m->topicOverride  = !explicitTo.topicId.isEmpty() ? explicitTo.topicId : rec->cfg.defaultTopicId;
 
   // Apply tag prefix. Empty tagPrefix → use "<name>: " auto-prefix
   // (Markdown-safe — brackets [...] would be interpreted as the
-  // start of a `[text](url)` link in parseMode=Markdown and
-  // Telegram returns 400 "can't parse entities", silently
-  // swallowing the message. Bot users saw no traffic from any
-  // service that auto-prefixed; manual sends — without a prefix —
-  // worked. Colon-style prefix is safe across all parseModes
-  // (None / Markdown / MarkdownV2 / HTML), so consumers don't
-  // need to think about formatting just to identify themselves.
-  // Caller wanting NO prefix sets cfg.tagPrefix = " " explicitly.
+  // start of a `[text](url)` link in parseMode=Markdown).
   String prefix = rec->cfg.tagPrefix;
   if (prefix.length() == 0) {
     prefix = rec->name + String(": ");
   }
-  m.text = prefix + text;
+  m->text = prefix + text;
 
   if (xQueueSend(_q, &m, 0) != pdTRUE) {
+    delete m;
     rec->stats.dropped++;
     logLine(false, "drop", String("[") + rec->name + "] queue full");
     callUpdateHandlers("sta");
@@ -332,16 +340,17 @@ void TelegramService::enqueueMessage(const String& chatId,
                                      const String& tokenOverride) {
   if (text.isEmpty()) return;
 
-  TelegramQueuedMessage m;
-  m.subId          = 0;  // legacy path — no subscription accounting
-  m.chatOverride   = chatId;
-  m.topicOverride  = topicId;
-  m.tokenOverride  = tokenOverride;
-  m.text           = text;
-  m.parseMode      = opt.parseMode;
-  m.silent         = opt.silent;
+  auto* m = new TelegramQueuedMessage();
+  m->subId          = 0;  // legacy path — no subscription accounting
+  m->chatOverride   = chatId;
+  m->topicOverride  = topicId;
+  m->tokenOverride  = tokenOverride;
+  m->text           = text;
+  m->parseMode      = opt.parseMode;
+  m->silent         = opt.silent;
 
   if (xQueueSend(_q, &m, 0) != pdTRUE) {
+    delete m;
     logLine(false, "drop", String("[manual] queue full: ") + text);
     callUpdateHandlers("sta");
     return;
@@ -526,10 +535,16 @@ void TelegramService::logLine(bool ok, const char* stage, const String& text) {
 }
 
 void TelegramService::updateStatusLabel() {
+  // ASCII only — non-ASCII glyphs (ellipsis, middle dot) in source
+  // round-trip badly when the .cpp is saved as anything other than
+  // UTF-8 (Windows cp1252 default sometimes lands here), producing
+  // standalone invalid UTF-8 bytes in WS text frames. Browser then
+  // rejects every frame with "Could not decode a text frame as UTF-8"
+  // and the LiveIndicator goes into a reconnect loop.
   if (!_state.enabled) {
     _state.statusLabel = "Disabled";
   } else if (_state.qSize > 0) {
-    _state.statusLabel = String("Sending… (") + _state.qSize + " queued)";
+    _state.statusLabel = String("Sending... (") + _state.qSize + " queued)";
   } else if (_state.lastSendAt_s > 0) {
     _state.statusLabel = _state.lastSendOk
         ? String("Last send OK at ") + _state.lastSendAt_s + "s"
@@ -555,18 +570,18 @@ void TelegramService::taskTrampoline(void* pv) {
 }
 
 void TelegramService::runWorker() {
-  TelegramQueuedMessage m;
+  TelegramQueuedMessage* m = nullptr;
   for (;;) {
-    if (xQueueReceive(_q, &m, pdMS_TO_TICKS(50)) != pdPASS) {
+    if (xQueueReceive(_q, &m, pdMS_TO_TICKS(50)) != pdPASS || !m) {
       vTaskDelay(pdMS_TO_TICKS(20));
       continue;
     }
 
-    const String token = !m.tokenOverride.isEmpty() ? m.tokenOverride : _state.botToken;
-    const String chat  = !m.chatOverride.isEmpty()  ? m.chatOverride  : _state.chatId;
-    const String topic = !m.topicOverride.isEmpty() ? m.topicOverride : _state.topicId;
-    const int    pm    = (m.parseMode >= 0)         ? m.parseMode     : _state.parseMode;
-    const bool   silent= m.silent || _state.silentDefault;
+    const String token = !m->tokenOverride.isEmpty() ? m->tokenOverride : _state.botToken;
+    const String chat  = !m->chatOverride.isEmpty()  ? m->chatOverride  : _state.chatId;
+    const String topic = !m->topicOverride.isEmpty() ? m->topicOverride : _state.topicId;
+    const int    pm    = (m->parseMode >= 0)         ? m->parseMode     : _state.parseMode;
+    const bool   silent= m->silent || _state.silentDefault;
 
     bool ok = false;
     if (!_state.enabled || chat.isEmpty() || token.isEmpty()) {
@@ -575,24 +590,24 @@ void TelegramService::runWorker() {
             : chat.isEmpty()  ? "No chat configured"
             :                   "No token configured");
     } else {
-      ok = sendDirect(token, chat, topic, m.text, pm, silent);
+      ok = sendDirect(token, chat, topic, m->text, pm, silent);
       if (!ok) {
-        // Different TLS path — saniyo's UTB fork can sometimes connect
-        // when raw POST struggles with handshake. Properly checked
-        // return value (no longer "true if didn't crash").
-        ok = sendViaUtb(token, chat, topic, m.text, pm);
+        // UTB fallback — different TLS path that can sometimes
+        // succeed when raw POST struggles with handshake.
+        ok = sendViaUtb(token, chat, topic, m->text, pm);
       }
-      logLine(ok, ok ? "ok" : "fail", m.text);
+      logLine(ok, ok ? "ok" : "fail", m->text);
       if (ok) _lastSendOkAt_s = (uint32_t)(millis() / 1000);
     }
 
-    // Update per-subscription error counter on failure (sent already
-    // optimistically incremented at enqueue time).
-    if (m.subId != 0) {
-      if (auto* rec = findSub(m.subId)) {
+    if (m->subId != 0) {
+      if (auto* rec = findSub(m->subId)) {
         if (!ok) rec->stats.errors++;
       }
     }
+
+    delete m;
+    m = nullptr;
 
     _state.qSize = uxQueueMessagesWaiting(_q);
     updateStatusLabel();
