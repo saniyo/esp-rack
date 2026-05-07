@@ -10,6 +10,7 @@ import {
   DialogTitle,
 } from '@mui/material';
 import DynamicContentHandler from './DynamicContentHandler';
+import TabActionsBar from './TabActionsBar';
 import { SectionContent } from '../../components';
 import FormLoader from '../loading/FormLoader';
 import SubmitButton from './elements/SubmitButton';
@@ -315,6 +316,7 @@ const DynamicSettings: FC<DynamicSettingsProps> = ({ formName, data, saveData, s
 
   return (
     <SectionContent title={formState.title || 'Settings'} titleGutter>
+      <TabActionsBar />
       <DynamicContentHandler
         title={formState.title || 'Settings'}
         description={formState.description || ''}

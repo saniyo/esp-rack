@@ -1,6 +1,6 @@
 {
   "name": "NTPModule",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "ESPRack module: ntp (Phase 1 thin wrapper around legacy service).",
   "license": "MIT",
   "frameworks": [

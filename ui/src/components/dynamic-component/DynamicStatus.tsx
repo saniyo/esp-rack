@@ -1,8 +1,7 @@
 // DynamicStatus.tsx
 import React, { FC, useEffect, useState, useCallback, useRef } from 'react';
-import { Box } from '@mui/material';
 import DynamicContentHandler from './DynamicContentHandler';
-import LiveIndicator from './LiveIndicator';
+import TabActionsBar from './TabActionsBar';
 import { SectionContent } from '../../components';
 import FormLoader from '../loading/FormLoader';
 import { Form, Field } from './types';
@@ -213,9 +212,7 @@ const DynamicStatus: FC<DynamicStatusProps> = ({
   // snapshot even though it was already in hand.
   return (
     <SectionContent title={formState.title || 'Status'} titleGutter>
-      <Box sx={{ display: 'flex', justifyContent: 'flex-end', mb: 1 }}>
-        <LiveIndicator connected={connected} />
-      </Box>
+      <TabActionsBar liveConnected={connected} />
       <DynamicContentHandler
         title={formState.title}
         description={formState.description}
