@@ -150,6 +150,25 @@ void TelegramService::begin() {
   ensureBotToken(_state.botToken);
   updateStatusLabel();
 
+  // Persistence + UI sync handler — fires on every state change
+  // (REST POST, WS staUpd, internal mutations from worker / send-
+  // result accounting). Two responsibilities:
+  //   1. _cfg.saveIfChanged(origin) — commits dirty config to disk.
+  //      Without it, REST Save in the form only updates RAM and
+  //      reboot wipes everything (which is exactly what the user
+  //      hit on the first round of testing).
+  //   2. Refresh statusLabel + broadcast WS — operator toggling
+  //      "Enabled" should see status flip from "Disabled" → "Idle"
+  //      immediately, not only after the first message tries to
+  //      send. ensureBotToken catches token edits so the UTB
+  //      fallback uses the new value next time.
+  addUpdateHandler([this](const String& origin) {
+    ensureBotToken(_state.botToken);
+    updateStatusLabel();
+    _cfg.saveIfChanged(origin);
+    if (_feature) _feature->broadcastWs(origin);
+  }, false);
+
 #if defined(CONFIG_FREERTOS_UNICORE) && CONFIG_FREERTOS_UNICORE
   xTaskCreate(taskTrampoline, "TelTask", 6144, this, 1, &_task);
 #else
