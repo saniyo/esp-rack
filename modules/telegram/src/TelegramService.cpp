@@ -405,6 +405,16 @@ void TelegramService::applyDefaults(const TelegramSubscriptionRecord& rec,
 }
 
 // ─── transport ──────────────────────────────────────────────────────
+//
+// IMPORTANT: every blocking call here MUST have an explicit timeout.
+// Earlier we relied on Arduino's defaults — and on flaky / blocked
+// networks (corporate proxies, ISP filtering of telegram.org, mobile
+// hotspots with deep TLS inspection) the worker would stall forever
+// inside _cli.connect() or readStringUntil(). qSize stuck at 1, no
+// log entry written, AsyncWS clients on the same Wi-Fi radio
+// starving for transmit windows → LiveIndicator flickering. Adding
+// timeouts converts an unbounded stall into a clean "fail" log line
+// + queue drain in ≤8s worst case.
 bool TelegramService::sendDirect(const String& token,
                                  const String& chatId,
                                  const String& topicId,
@@ -415,7 +425,24 @@ bool TelegramService::sendDirect(const String& token,
 
   const char* host = "api.telegram.org";
   const int   port = 443;
-  if (!_cli.connect(host, port)) return false;
+
+  // Guarantee a clean socket state — a previous abandoned connect
+  // (timeout mid-handshake) can leave _cli in a half-open state where
+  // the next connect()'s underlying lwIP socket fails to acquire and
+  // hangs. stop() is idempotent on a closed socket.
+  _cli.stop();
+
+  // TLS-handshake timeout — argument is SECONDS for setHandshakeTimeout.
+  // 8s covers slow handshakes on weak Wi-Fi without giving up too early.
+  _cli.setHandshakeTimeout(8);
+  // Read-operation timeout in milliseconds. readStringUntil
+  // / read() / available() polls won't block past this.
+  _cli.setTimeout(5000);
+
+  // Connect with explicit 5s wall clock. Without this overload Arduino
+  // uses its global socket timeout which on ESP-IDF 5 is effectively
+  // unbounded for some lwIP configurations.
+  if (!_cli.connect(host, port, 5000)) return false;
 
   StaticJsonDocument<1024> body;
   body["chat_id"] = chatId;
@@ -442,7 +469,19 @@ bool TelegramService::sendDirect(const String& token,
   String statusLine = _cli.readStringUntil('\n');
   bool ok = statusLine.indexOf(" 200 ") >= 0;
 
-  while (_cli.connected() || _cli.available()) (void)_cli.read();
+  // Drain the rest with a wall clock — readStringUntil could leave
+  // bytes in the buffer; without a bounded loop we'd spin until the
+  // remote closes. setTimeout above already caps individual read()s,
+  // and `available()` returns 0 when the FIN+RST has landed, so this
+  // loop terminates.
+  uint32_t drainStart = millis();
+  while ((_cli.connected() || _cli.available()) && (millis() - drainStart < 2000)) {
+    if (_cli.available()) {
+      (void)_cli.read();
+    } else {
+      delay(5);
+    }
+  }
   _cli.stop();
   return ok;
 }
