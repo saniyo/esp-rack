@@ -315,8 +315,11 @@ const DynamicSettings: FC<DynamicSettingsProps> = ({ formName, data, saveData, s
   }
 
   return (
-    <SectionContent title={formState.title || 'Settings'} titleGutter>
-      <TabActionsBar />
+    <SectionContent
+      title={formState.title || 'Settings'}
+      titleGutter
+      actions={<TabActionsBar />}
+    >
       <DynamicContentHandler
         title={formState.title || 'Settings'}
         description={formState.description || ''}

@@ -211,8 +211,11 @@ const DynamicStatus: FC<DynamicStatusProps> = ({
   // panel with "Waiting for WebSocket connection..." which hid the REST
   // snapshot even though it was already in hand.
   return (
-    <SectionContent title={formState.title || 'Status'} titleGutter>
-      <TabActionsBar liveConnected={connected} />
+    <SectionContent
+      title={formState.title || 'Status'}
+      titleGutter
+      actions={<TabActionsBar liveConnected={connected} />}
+    >
       <DynamicContentHandler
         title={formState.title}
         description={formState.description}

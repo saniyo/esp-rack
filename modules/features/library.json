@@ -1,6 +1,6 @@
 {
   "name": "FeaturesModule",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "ESPRack module: features (Phase 1 thin wrapper around legacy service).",
   "license": "MIT",
   "frameworks": [
