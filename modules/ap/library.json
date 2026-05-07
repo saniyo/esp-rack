@@ -1,6 +1,6 @@
 {
   "name": "APModule",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "ESPRack module: ap (Phase 1 thin wrapper around legacy service).",
   "license": "MIT",
   "frameworks": [

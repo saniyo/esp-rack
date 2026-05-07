@@ -41,7 +41,16 @@ const ManifestLoader: FC<RequiredChildrenProps> = (props) => {
     try {
       const response = await ManifestApi.readManifest();
       const data = response.data;
-      const next = data && Array.isArray(data.features) ? data : EMPTY_MANIFEST;
+      // Backend always emits valid JSON. Anonymous (stub) response
+      // omits `features` — coerce to empty list so the UI renders the
+      // brand without crashing on undefined; the stub still carries
+      // schemaVersion + device + buildFeatures + authenticated:false.
+      const next: UiManifest = data
+        ? {
+            ...data,
+            features: Array.isArray(data.features) ? data.features : [],
+          }
+        : EMPTY_MANIFEST;
       setManifest(next);
       applyManifest(next);
       setLoaded(true);
@@ -63,8 +72,8 @@ const ManifestLoader: FC<RequiredChildrenProps> = (props) => {
   );
 
   const value: ManifestContextValue = useMemo(
-    () => ({ manifest, loaded, error, findFeature }),
-    [manifest, loaded, error, findFeature]
+    () => ({ manifest, loaded, error, findFeature, reload: loadManifest }),
+    [manifest, loaded, error, findFeature, loadManifest]
   );
 
   return (

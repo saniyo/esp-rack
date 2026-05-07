@@ -1,6 +1,6 @@
 {
   "name": "PresenceModule",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "ESPRack module: presence (Phase 1 thin wrapper around legacy service).",
   "license": "MIT",
   "frameworks": [

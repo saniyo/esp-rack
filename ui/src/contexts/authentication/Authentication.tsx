@@ -9,10 +9,12 @@ import { LoadingSpinner } from '../../components';
 import { Me } from '../../types';
 
 import { FeaturesContext } from '../features';
+import { useManifest } from '../manifest';
 import { AuthenticationContext } from './context';
 
 const Authentication: FC<RequiredChildrenProps> = ({ children }) => {
   const { features } = useContext(FeaturesContext);
+  const { reload: reloadManifest } = useManifest();
   const navigate = useNavigate();
   const { enqueueSnackbar } = useSnackbar();
 
@@ -25,6 +27,12 @@ const Authentication: FC<RequiredChildrenProps> = ({ children }) => {
       const decodedMe = AuthenticationApi.decodeMeJWT(accessToken);
       setMe(decodedMe);
       enqueueSnackbar(`Logged in as ${decodedMe.username}`, { variant: 'success' });
+      // Token now in localStorage → axios attaches it on every request.
+      // Re-fetch the manifest so the route table + module list flip
+      // from the anonymous stub to the full authenticated payload.
+      // Awaited fire-and-forget — no need to block the UI on it; the
+      // routes that depend on full content render once state lands.
+      void reloadManifest();
     } catch (error: any) {
       setMe(undefined);
       throw new Error("Failed to parse JWT " + error.message);
@@ -34,6 +42,11 @@ const Authentication: FC<RequiredChildrenProps> = ({ children }) => {
   const signOut = (redirect: boolean) => {
     AuthenticationApi.clearAccessToken();
     setMe(undefined);
+    // Token cleared → manifest backend will now return the anonymous
+    // stub. Re-fetch so the in-memory state matches what we'd get on
+    // a fresh page load — prevents stale route entries lingering after
+    // logout.
+    void reloadManifest();
     if (redirect) {
       navigate('/');
     }

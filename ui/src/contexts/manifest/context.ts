@@ -7,6 +7,10 @@ export interface ManifestContextValue {
   loaded: boolean;
   error?: string;
   findFeature: (id: string) => FeatureEntry | undefined;
+  // Re-fetch /rest/uiManifest. Used by Authentication.signIn() after
+  // the JWT lands so the stub manifest (anonymous response containing
+  // brand only) gets swapped for the full authenticated map.
+  reload: () => Promise<void>;
 }
 
 const EMPTY_MANIFEST: UiManifest = {
@@ -17,7 +21,8 @@ const EMPTY_MANIFEST: UiManifest = {
 const ManifestContextDefaultValue: ManifestContextValue = {
   manifest: EMPTY_MANIFEST,
   loaded: false,
-  findFeature: () => undefined
+  findFeature: () => undefined,
+  reload: async () => {}
 };
 
 export const ManifestContext = React.createContext<ManifestContextValue>(ManifestContextDefaultValue);

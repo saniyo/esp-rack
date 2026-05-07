@@ -18,8 +18,18 @@ void WebManager::begin() {
     if (e) e->registerEndpoints(_server, _sm);
   }
 
-  // Manifest is public — the frontend fetches it before sign-in to build the route
-  // set. Per-entry handlers still enforce their own auth predicate.
+  // Manifest endpoint is two-tier (auth-aware) — it ALWAYS responds, but
+  // the payload depends on whether the request carries a valid JWT:
+  //   * Anonymous → minimal stub: schemaVersion + device.{name,version,
+  //     frameworkVersion} + buildFeatures.security. Enough for the
+  //     SignIn page to render the right brand and decide whether to show
+  //     a login form, no leak of the endpoint inventory.
+  //   * Authenticated → full manifest: features[], modules[], all
+  //     buildFeatures, action endpoints, etc. The whole map.
+  // Per-entry endpoints continue to enforce their own predicates; the
+  // manifest just controls how much *map* is exposed to anonymous
+  // observers. ManifestLoader on the frontend re-fetches after sign-in
+  // to swap stub for full content (see ManifestContext.reload()).
   ArRequestHandlerFunction handler =
       [this](AsyncWebServerRequest* request) { this->serveManifest(request); };
   _server->on(UI_MANIFEST_PATH, HTTP_GET, handler);
@@ -41,6 +51,17 @@ void WebManager::begin() {
 // headroom; if a single entry ever exceeded this we'd see truncation
 // of THAT entry only, never of unrelated entries downstream.
 void WebManager::serveManifest(AsyncWebServerRequest* request) {
+  // Auth probe — ALWAYS replies, never 401s here. The result decides
+  // payload depth: anonymous = stub; authenticated = full. Real
+  // endpoints behind the manifest still 401 on their own.
+  bool authed = true;  // defaults to authed when SecurityManager isn't wired
+                       // (NullSecurityManager or null pointer — both treat
+                       // every request as admin in the legacy semantic).
+  if (_sm) {
+    Authentication auth = _sm->authenticateRequest(request);
+    authed = auth.authenticated;
+  }
+
   AsyncResponseStream* response = request->beginResponseStream("application/json");
 
   response->print(F("{\"schemaVersion\":2"));
@@ -49,6 +70,8 @@ void WebManager::serveManifest(AsyncWebServerRequest* request) {
   // Three keys: name + version (consumer-app identity from Builder),
   // plus frameworkVersion (esp-rack library rev from Version.h, set
   // by App.begin() via setFrameworkVersion).
+  // ALWAYS in the response — the SignIn page needs the device name
+  // for branding before the user has a token.
   {
     StaticJsonDocument<256> dev;
     JsonObject d = dev.to<JsonObject>();
@@ -61,8 +84,11 @@ void WebManager::serveManifest(AsyncWebServerRequest* request) {
     serializeJson(dev, *response);
   }
 
-  // buildFeatures — bounded by the count of FT_* registrations done in
-  // App ctor (currently ~10 keys at ~25 bytes each).
+  // buildFeatures — exposed in BOTH tiers because the SignIn shell
+  // needs to know whether `security` is enabled (decides whether to
+  // render the login form at all). Other build flags are not
+  // sensitive — they're compile-time on/off knobs that any reverse-
+  // engineer of the firmware binary can also see.
   {
     DynamicJsonDocument bf(1024);
     JsonObject o = bf.to<JsonObject>();
@@ -72,6 +98,16 @@ void WebManager::serveManifest(AsyncWebServerRequest* request) {
     response->print(F(",\"buildFeatures\":"));
     serializeJson(bf, *response);
   }
+
+  // Anonymous tier ends here. Authenticated tier continues with
+  // modules + features (the actual endpoint map). The closing brace
+  // is shared so the response is valid JSON either way.
+  if (!authed) {
+    response->print(F(",\"authenticated\":false}"));
+    request->send(response);
+    return;
+  }
+  response->print(F(",\"authenticated\":true"));
 
   // modules — id+version per installed module. Populated by App.begin()
   // by walking the modules vector and calling describe() on each. The
