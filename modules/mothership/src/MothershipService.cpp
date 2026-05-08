@@ -240,14 +240,41 @@ void MothershipService::checkinTaskTramp(void* arg) {
 
 void MothershipService::runCheckinLoop() {
   Serial.println("[mship] check-in task started");
+  uint32_t loopIter = 0;
 
   while (true) {
+    loopIter++;
     // Re-evaluate gates each iteration.
-    bool wantTick = _state.enabled
-                    && _cert && _cert->hasValidCert()
-                    && WiFi.isConnected();
+    bool en   = _state.enabled;
+    bool hasC = _cert && _cert->hasValidCert();
+    bool wlan = WiFi.isConnected();
+    bool wantTick = en && hasC && wlan;
+
+    // Diagnostic every 6 iterations (=30s) so we can see the task
+    // is alive and what's gating it. Also fires immediately at iter 1.
+    if (loopIter == 1 || (loopIter % 6) == 0) {
+      Serial.printf("[mship.loop iter=%u] enabled=%d hasCert=%d wifi=%d "
+                    "wantTick=%d nextAt=%u nowAt=%u url-len=%u\n",
+                    (unsigned)loopIter, (int)en, (int)hasC, (int)wlan,
+                    (int)wantTick,
+                    (unsigned)_state.next_checkin_at_s,
+                    (unsigned)(millis() / 1000),
+                    (unsigned)_state.checkin_url.length());
+    }
+
     if (!wantTick) {
       vTaskDelay(pdMS_TO_TICKS(5000));   // recheck every 5s when paused
+      continue;
+    }
+
+    // First-tick optimisation: if next_checkin_at_s is 0 (never
+    // scheduled) OR in the past, fire immediately. Otherwise wait
+    // until it elapses.
+    uint32_t cur_s = (uint32_t)(millis() / 1000);
+    if (_state.next_checkin_at_s != 0 && cur_s < _state.next_checkin_at_s) {
+      // Sleep until next_checkin_at_s; wake every 5s to pick up an
+      // operator pause / interval change without waiting full duration.
+      vTaskDelay(pdMS_TO_TICKS(5000));
       continue;
     }
 
@@ -295,15 +322,9 @@ void MothershipService::runCheckinLoop() {
     // have changed independently of the tick — boot, form save.
     if (_feature) _feature->broadcastWs("mship.tick");
 
-    // Block until the next scheduled check-in. Re-check every 5
-    // seconds so an early wake (operator toggling enabled, or
-    // Phase 2.3 burst signal) lands quickly.
-    while (true) {
-      vTaskDelay(pdMS_TO_TICKS(5000));
-      uint32_t cur_s = (uint32_t)(millis() / 1000);
-      if (cur_s >= _state.next_checkin_at_s) break;
-      if (!_state.enabled) break;   // operator paused — recheck gates
-    }
+    // Top-of-loop check (next iteration) handles the wait until the
+    // next scheduled check-in via vTaskDelay(5000) + cur_s vs
+    // next_checkin_at_s comparison. No explicit inner-wait needed.
   }
 }
 
