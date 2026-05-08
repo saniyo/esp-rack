@@ -46,6 +46,22 @@ class ICertProvider {
   // Cert serial as hex string (e.g. "0a:5f:..."). Empty when no cert.
   // Useful for operator-side device identification in audit logs.
   virtual const char* serialHex() const = 0;
+
+  // Phase 4a — proactive cert rotation. Spawns a FreeRTOS task that:
+  //   1. generates a fresh keypair + CSR (reuses Phase 1 primitives)
+  //   2. POSTs to `renewUrl` via mTLS using the CURRENT cert as
+  //      client identity — server doesn't need a bootstrap token
+  //      because mutual auth already proves device identity
+  //   3. on response, atomic-swaps the new cert+key into TLSContext
+  //      and persists to disk; old cert kept in TLS context for one
+  //      generation so in-flight handshakes don't break
+  //   4. on any failure, leaves the existing cert+key untouched
+  //
+  // Returns true if the rotate task was spawned, false if a rotate
+  // is already in flight or the device has no current cert / mTLS
+  // is not available. Mothership client invokes this from its
+  // `renewCert` action handler.
+  virtual bool rotate(const String& renewUrl) = 0;
 };
 
 #endif  // ESPRACK_ICERT_PROVIDER_H

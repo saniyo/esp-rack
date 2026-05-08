@@ -531,10 +531,20 @@ String MothershipService::actionUpdate(JsonObjectConst params) {
 }
 
 String MothershipService::actionRenewCert(JsonObjectConst params) {
-  // Phase 4 wires this into CertManagerService::rotate(). For now
-  // ack so the dispatcher logs work end-to-end.
-  (void)params;
-  return "deferred to phase 4";
+  // Phase 4a — proactive rotation. Server picks the renewUrl based
+  // on its own naming convention; device just acts on whatever URL
+  // shows up in the action params. ICertProvider::rotate spawns a
+  // FreeRTOS task and returns immediately so this dispatcher doesn't
+  // block on the keypair gen + handshake (~5-15s).
+  if (!_cert) return "no cert provider";
+  String renewUrl = params["renewUrl"].as<String>();
+  if (renewUrl.length() == 0) {
+    return "missing renewUrl param";
+  }
+  if (!_cert->rotate(renewUrl)) {
+    return "rotate kick failed (already running, no cert, or no URL)";
+  }
+  return "rotation started";
 }
 
 String MothershipService::actionOpenTunnel(JsonObjectConst params) {
