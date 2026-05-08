@@ -276,7 +276,15 @@ CertManagerService::CertManagerService(ConfigManager* cfgMgr,
       _cfg(cfgMgr,
            "certManager",
            CERT_MANAGER_FILE,
-           4096,
+           // 8 KB JSON buffer: four ENC: blobs (cert+key+ca+recovery)
+           // each ~2x plaintext after hex-encoding the IV + ciphertext.
+           // Worst-case totals ~2.7 KB of strings + housekeeping +
+           // ArduinoJson per-key overhead. The PREVIOUS 4 KB sometimes
+           // wasn't enough — encryptSecretsInPlace's last LARGE expand
+           // (typically ca_bundle_pem) silently failed mid-assignment
+           // when the doc pool was exhausted, leaving the on-disk JSON
+           // with ca_bundle_pem: null. 8 KB gives 5 KB headroom.
+           8192,
            this,
            CertManagerSettings::readConfig,
            CertManagerSettings::update,
