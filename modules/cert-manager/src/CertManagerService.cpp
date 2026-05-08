@@ -2,6 +2,20 @@
 #include <ITLSProvider.h>
 #include <WebManager.h>
 
+// mbedtls bindings for ECDSA-P256 keypair + PKCS#10 CSR. arduino-
+// esp32 ships with mbedtls compiled in; these headers come from
+// the framework's bundled mbedtls and don't need a lib_deps entry.
+#include <mbedtls/pk.h>
+#include <mbedtls/ecp.h>
+#include <mbedtls/ctr_drbg.h>
+#include <mbedtls/entropy.h>
+#include <mbedtls/x509_csr.h>
+#include <mbedtls/error.h>
+
+#if defined(ESP32)
+#include <esp_mac.h>   // esp_read_mac for MAC-based CN derivation
+#endif
+
 // ===== Persistence (ConfigDelegate) =====
 
 void CertManagerSettings::readConfig(CertManagerSettings& s, JsonObject& root) {
@@ -316,4 +330,187 @@ void CertManagerService::refreshRuntimeState() {
     case S::GrayZone:         _state.status_label = "GrayZone";         break;
     case S::EnrollmentFailed: _state.status_label = "EnrollmentFailed"; break;
   }
+}
+
+// ===== Phase 1.3 — ECDSA-P256 keypair generation =====
+//
+// mbedtls flow:
+//   1. seed CTR_DRBG from mbedtls_entropy (ESP32 has hw RNG via
+//      esp_random under the entropy func), with a per-device
+//      personalisation string for extra forward-uniqueness
+//   2. mbedtls_pk_init + setup as MBEDTLS_PK_ECKEY
+//   3. mbedtls_ecp_gen_key on the ECKEY context with curve P-256
+//   4. mbedtls_pk_write_key_pem to serialise as "EC PRIVATE KEY" PEM
+//   5. always free contexts on every exit (success or failure)
+//
+// Return: true with outKeyPem populated on success; false otherwise.
+// Failures Serial-log the mbedtls error string for the operator.
+
+bool CertManagerService::generateEcdsaKeyPair(String& outKeyPem) {
+  outKeyPem = String();
+
+  mbedtls_pk_context       pk;
+  mbedtls_entropy_context  entropy;
+  mbedtls_ctr_drbg_context drbg;
+
+  mbedtls_pk_init(&pk);
+  mbedtls_entropy_init(&entropy);
+  mbedtls_ctr_drbg_init(&drbg);
+
+  // Personalisation string: short stable per-device ID. Mixes into
+  // CTR_DRBG seed so two devices with identical entropy snapshots
+  // (very unlikely, but defence-in-depth) land on different keys.
+  // Subject CN is "device-<mac>" — same source.
+  String pers = String("esprack-cert-") + deviceSubjectCN();
+
+  bool ok = false;
+  do {
+    int rc = mbedtls_ctr_drbg_seed(
+        &drbg, mbedtls_entropy_func, &entropy,
+        (const unsigned char*)pers.c_str(), pers.length());
+    if (rc != 0) {
+      Serial.printf("[cert.gen] ctr_drbg_seed failed: -0x%04x\n", -rc);
+      break;
+    }
+
+    rc = mbedtls_pk_setup(&pk,
+        mbedtls_pk_info_from_type(MBEDTLS_PK_ECKEY));
+    if (rc != 0) {
+      Serial.printf("[cert.gen] pk_setup failed: -0x%04x\n", -rc);
+      break;
+    }
+
+    rc = mbedtls_ecp_gen_key(MBEDTLS_ECP_DP_SECP256R1,
+                             mbedtls_pk_ec(pk),
+                             mbedtls_ctr_drbg_random, &drbg);
+    if (rc != 0) {
+      Serial.printf("[cert.gen] ecp_gen_key failed: -0x%04x\n", -rc);
+      break;
+    }
+
+    // PEM output buffer — 1024 B comfortably holds an EC P-256
+    // private key PEM block (~250 B real content + base64 overhead).
+    unsigned char pem_buf[1024];
+    rc = mbedtls_pk_write_key_pem(&pk, pem_buf, sizeof(pem_buf));
+    if (rc != 0) {
+      Serial.printf("[cert.gen] pk_write_key_pem failed: -0x%04x\n", -rc);
+      break;
+    }
+
+    outKeyPem = String((const char*)pem_buf);
+    Serial.printf("[cert.gen] keypair generated, PEM=%u B\n",
+                  (unsigned)outKeyPem.length());
+    ok = true;
+  } while (false);
+
+  mbedtls_pk_free(&pk);
+  mbedtls_entropy_free(&entropy);
+  mbedtls_ctr_drbg_free(&drbg);
+  return ok;
+}
+
+// ===== Phase 1.4 — PKCS#10 CSR build =====
+//
+// mbedtls flow:
+//   1. parse the just-generated EC private key PEM back into a
+//      pk context (the keypair lives only in PEM at this stage —
+//      generate, store, then re-parse for CSR signing keeps the
+//      lifetime simple)
+//   2. mbedtls_x509write_csr_init + set_subject_name + set_md_alg
+//      (SHA-256) + set_key + signature
+//   3. mbedtls_x509write_csr_pem to serialise
+//
+// The CSR is a one-shot artefact — sent to mothership in the
+// enrollment POST body, then discarded. Server's response carries
+// the signed cert which we persist alongside the key.
+
+bool CertManagerService::buildCsr(const String& keyPem,
+                                  String& outCsrPem) {
+  outCsrPem = String();
+  if (keyPem.length() == 0) {
+    Serial.println("[cert.csr] empty keyPem");
+    return false;
+  }
+
+  mbedtls_pk_context       pk;
+  mbedtls_x509write_csr    csr;
+  mbedtls_entropy_context  entropy;
+  mbedtls_ctr_drbg_context drbg;
+
+  mbedtls_pk_init(&pk);
+  mbedtls_x509write_csr_init(&csr);
+  mbedtls_entropy_init(&entropy);
+  mbedtls_ctr_drbg_init(&drbg);
+
+  bool ok = false;
+  do {
+    // Re-seed for the signature randomness. mbedtls ECDSA signing
+    // is deterministic when configured (RFC 6979) but the API still
+    // requires an RNG context for the call signature.
+    int rc = mbedtls_ctr_drbg_seed(
+        &drbg, mbedtls_entropy_func, &entropy,
+        (const unsigned char*)"esprack-csr", 11);
+    if (rc != 0) {
+      Serial.printf("[cert.csr] drbg seed failed: -0x%04x\n", -rc);
+      break;
+    }
+
+    // mbedtls_pk_parse_key wants length INCLUDING the trailing NUL.
+    rc = mbedtls_pk_parse_key(&pk,
+        (const unsigned char*)keyPem.c_str(),
+        keyPem.length() + 1,
+        nullptr, 0,
+        mbedtls_ctr_drbg_random, &drbg);
+    if (rc != 0) {
+      Serial.printf("[cert.csr] pk_parse_key failed: -0x%04x\n", -rc);
+      break;
+    }
+
+    String subject = String("CN=") + deviceSubjectCN();
+    rc = mbedtls_x509write_csr_set_subject_name(&csr, subject.c_str());
+    if (rc != 0) {
+      Serial.printf("[cert.csr] set_subject failed: -0x%04x\n", -rc);
+      break;
+    }
+
+    mbedtls_x509write_csr_set_md_alg(&csr, MBEDTLS_MD_SHA256);
+    mbedtls_x509write_csr_set_key(&csr, &pk);
+
+    unsigned char pem_buf[1024];
+    rc = mbedtls_x509write_csr_pem(
+        &csr, pem_buf, sizeof(pem_buf),
+        mbedtls_ctr_drbg_random, &drbg);
+    if (rc != 0) {
+      Serial.printf("[cert.csr] write_csr_pem failed: -0x%04x\n", -rc);
+      break;
+    }
+
+    outCsrPem = String((const char*)pem_buf);
+    Serial.printf("[cert.csr] CSR built, PEM=%u B, subject=%s\n",
+                  (unsigned)outCsrPem.length(), subject.c_str());
+    ok = true;
+  } while (false);
+
+  mbedtls_pk_free(&pk);
+  mbedtls_x509write_csr_free(&csr);
+  mbedtls_entropy_free(&entropy);
+  mbedtls_ctr_drbg_free(&drbg);
+  return ok;
+}
+
+// Subject CN = "device-<mac-hex-lowercase-no-sep>". Stable per-device,
+// matches what server-side admin UI shows when reviewing pending
+// enrollments. Used by buildCsr and exposed as a status field once
+// the cert is signed.
+String CertManagerService::deviceSubjectCN() const {
+#if defined(ESP32)
+  uint8_t mac[6] = {0};
+  esp_read_mac(mac, ESP_MAC_WIFI_STA);
+  char buf[24];
+  snprintf(buf, sizeof(buf), "device-%02x%02x%02x%02x%02x%02x",
+           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+  return String(buf);
+#else
+  return String("device-unknown");
+#endif
 }

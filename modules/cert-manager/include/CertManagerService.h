@@ -99,6 +99,30 @@ class CertManagerService : public StatefulService<CertManagerSettings>,
   // Recompute runtime_state from on-disk fields after every load /
   // mutation. Runs in begin() and after successful enroll/rotate.
   void refreshRuntimeState();
+
+  // ── Phase 1.3+1.4 crypto helpers (mbedtls bindings) ──
+  //
+  // Generate a fresh ECDSA-P256 keypair. Outputs PEM strings via the
+  // out parameters (private key as "-----BEGIN EC PRIVATE KEY-----"
+  // ~250 B; public key not needed externally — embedded in the CSR).
+  // Uses esp_random as the RNG seed (hardware on every supported
+  // ESP32 family). Returns true on success.
+  //
+  // Defined here so Phase 4 rotate() and Phase 1.5 enroll() share
+  // the same primitive; on non-ESP host builds the body is a stub
+  // that fails predictably.
+  bool generateEcdsaKeyPair(String& outKeyPem);
+
+  // Build a PKCS#10 CSR from `keyPem` with subject "CN=device-<MAC>".
+  // Signed with SHA-256. Returns the CSR PEM (~480 B) on success.
+  // The CSR carries the public half of `keyPem` and a signature
+  // proving possession; mothership signs it into a real cert.
+  bool buildCsr(const String& keyPem, String& outCsrPem);
+
+  // Helper: derive the canonical subject CN from this device's
+  // base MAC ("device-aabbccddeeff" lowercased, no separators).
+  // Used by buildCsr; exposed for the enroll-status display.
+  String deviceSubjectCN() const;
 };
 
 #endif  // CertManagerService_h
