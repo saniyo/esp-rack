@@ -36,7 +36,8 @@
 class AsyncWebServer;
 class ITelegramProvider;   // forward — populated by TelegramModule
 class IMqttProvider;       // forward — populated by MqttModule
-class ITLSProvider;        // forward — populated by core App ctor (Phase 1.1+)
+class ITLSProvider;        // forward — populated by core App ctor
+class TLSContextService;   // forward — concrete impl, owned by App
 class ICertProvider;       // forward — populated by CertManagerModule
 class IMothershipProvider; // forward — populated by MothershipModule
 
@@ -138,7 +139,12 @@ class App {
   PresenceService*    presence_ {nullptr};   // populated by PresenceModule
   ITelegramProvider*  telegram_ {nullptr};   // populated by TelegramModule
   IMqttProvider*      mqtt_     {nullptr};   // populated by MqttModule
-  ITLSProvider*       tls_      {nullptr};   // populated by App ctor (Phase 1.1+)
+  // TLS context is App-owned (not module-supplied) because it's a
+  // framework primitive every HTTPS-using module needs. unique_ptr +
+  // forward decl keeps App.h light — only App.cpp needs the heavy
+  // TLSContextService.h pull.
+  std::unique_ptr<TLSContextService> tlsContext_;
+  ITLSProvider*       tls_      {nullptr};   // points at tlsContext_.get()
   ICertProvider*      cert_     {nullptr};   // populated by CertManagerModule
   IMothershipProvider* mothership_ {nullptr}; // populated by MothershipModule
 

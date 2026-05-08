@@ -4,6 +4,7 @@
 #include "Features.h"
 #include "Version.h"
 #include "WebFeatureSpec.h"
+#include "TLSContextService.h"
 
 #include <ESPAsyncWebServer.h>
 #include <WiFi.h>
@@ -57,7 +58,14 @@ App::App(AsyncWebServer* server, const char* deviceName, const char* deviceVersi
                    &wsManager_,
                    deviceName_.c_str(),
                    deviceVersion_.c_str()},
-    security_     {&nullSecurity()} {
+    security_     {&nullSecurity()},
+    // tlsContext_ + tls_ have to follow security_ in init order to
+    // match the declaration sequence in App.h (telegram_/mqtt_ between
+    // are pointer defaults from the header initialiser, no init-list
+    // entry needed). C++ runs ctors in declaration order regardless
+    // of init-list sequence; -Wreorder fires if these don't match.
+    tlsContext_   {std::unique_ptr<TLSContextService>(new TLSContextService())},
+    tls_          {tlsContext_.get()} {
   // Framework-owned UI shell — registered BEFORE Builder runs module
   // onInstall, so that modules calling addTabToFeature("system", ...)
   // find a parent. The buildFeatures map (exposed via /rest/uiManifest)
