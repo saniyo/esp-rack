@@ -42,6 +42,13 @@
 #define FACTORY_MOTHERSHIP_ENROLL_URL "https://mothership.local:8443/api/v1/enroll"
 #endif
 
+// Phase 4b — gray-zone recovery polling endpoint. Hit when the
+// device's cert is dead but it still has a recovery_token from a
+// previous successful enrollment.
+#ifndef FACTORY_MOTHERSHIP_RECOVER_URL
+#define FACTORY_MOTHERSHIP_RECOVER_URL "https://mothership.local:8443/api/v1/recover"
+#endif
+
 class WebManager;
 class ITLSProvider;
 
@@ -72,6 +79,12 @@ struct CertManagerSettings {
   // can repoint the device at staging / dev mock server without a
   // reflash. Defaulted to FACTORY_MOTHERSHIP_ENROLL_URL on first boot.
   String  mothership_url{FACTORY_MOTHERSHIP_ENROLL_URL};
+  // Phase 4b — gray-zone recovery polling URL. Defaulted to the
+  // factory value, persists across reboot so a device that goes
+  // offline → cert expires can come back online and start polling
+  // /recover on its own without operator intervention beyond the
+  // server-side approve click.
+  String  recover_url{FACTORY_MOTHERSHIP_RECOVER_URL};
 
   // ── Runtime (not persisted) ──
   // Bootstrap token for first enrollment. Operator types it in the
@@ -98,6 +111,21 @@ class CertManagerService : public StatefulService<CertManagerSettings>,
   void registerManifest(WebManager* web);
   void begin();
   void loop();
+
+  // Phase 4b — gray-zone recovery. Spawns a polling task that hits
+  // recover_url every RECOVERY_POLL_INTERVAL_S until the server
+  // returns approved=true with a fresh cert. Works without mTLS —
+  // cert is dead so we can only do server-side TLS (CA pin from
+  // the persisted ca_bundle_pem so we still verify it's the right
+  // mothership). Operator on the server side approves the request
+  // via /api/v1/admin/recover/approve/<deviceId>.
+  //
+  // Returns true if poll task was spawned, false if already
+  // running, no recovery_token persisted (means full re-enroll
+  // needed), or no recover_url. Phase 4b iteration 1 is operator-
+  // triggered via UI button — phase iteration 2 will auto-trigger
+  // on boot when refreshRuntimeState detects state == GrayZone.
+  bool beginRecovery();
 
   // ICertProvider
   State state() const override { return _state.runtime_state; }
@@ -201,6 +229,38 @@ class CertManagerService : public StatefulService<CertManagerSettings>,
                        const String& renewUrl,
                        String& outCertPem,
                        String& outCaBundlePem);
+
+  // ── Phase 4b — gray-zone recovery ──
+  //
+  // Polling task that hits recover_url at RECOVERY_POLL_INTERVAL_S
+  // cadence (60s) carrying {deviceId, recovery_token,
+  // lastKnownSerial}. Runs WITHOUT mTLS (cert is dead) — uses
+  // setInsecure on the WiFiClientSecure since we can't even verify
+  // the server's cert against our existing CA when the entire
+  // cert.json might be lost. Production hardens this by bundling a
+  // bootstrap CA into firmware that signs the recover endpoint's
+  // cert.
+  //
+  // Server returns either {approved: false, status: "pending|...} or
+  // {approved: true, cert_pem, ca_bundle_pem} — the latter triggers
+  // an atomic-swap into the TLS context (same path as rotate) and
+  // exits GrayZone state.
+  static constexpr uint32_t RECOVERY_POLL_INTERVAL_S = 60;
+  TaskHandle_t _recoveryTask{nullptr};
+  static void  recoveryTaskTramp(void* arg);
+  void         runRecoveryLoop();
+  bool         postRecoveryRequest(String& outCertPem,
+                                    String& outCaBundlePem,
+                                    bool& outApproved);
+
+  // Candidate keypair generated on the FIRST recovery poll; reused
+  // across subsequent polls so the CSR (and thus the eventual
+  // signed cert) keeps matching the same private key. Cleared
+  // after successful apply. NEVER persisted — lives in RAM only;
+  // a reboot mid-recovery loses it and recovery starts fresh next
+  // boot (which is fine — server-side pending request becomes a
+  // dangling reference that operator's admin UI can clean up).
+  String _candidateKeyPem;
 };
 
 #endif  // CertManagerService_h

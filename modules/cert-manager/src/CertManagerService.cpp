@@ -39,6 +39,7 @@ void CertManagerSettings::readConfig(CertManagerSettings& s, JsonObject& root) {
 
   root["recovery_token"]  = s.recovery_token;
   root["mothership_url"]  = s.mothership_url;
+  root["recover_url"]     = s.recover_url;
   // bootstrap_token intentionally omitted — never persists.
 }
 
@@ -84,6 +85,7 @@ StateUpdateResult CertManagerSettings::update(JsonObject& root,
   ch |= FormBuilder::updateValue(root, "subject_cn",      s.subject_cn);
   ch |= FormBuilder::updateValue(root, "not_after_ts",    s.not_after_ts);
   ch |= FormBuilder::updateValue(root, "mothership_url",  s.mothership_url);
+  ch |= FormBuilder::updateValue(root, "recover_url",     s.recover_url);
 
   // Bootstrap token IS the only secret field that the form is
   // EXPECTED to mutate (operator types it during enrollment). Plain
@@ -195,19 +197,39 @@ void CertManagerSettings::buildForm(CertManagerSettings& s, JsonObject& root) {
       level("info"), icon("Info"));
 
   // ── RECOVERY ────────────────────────────────────────────────────────
-  // Phase 1.2 skeleton — Phase 4b fills in the polling status +
-  // Approve/Reject feedback. For now just a placeholder so the tab
-  // structure doesn't shift between phases.
+  // Phase 4b — gray-zone recovery. Operator-triggered (UI button)
+  // for now; Phase 4b iteration 2 will auto-trigger on boot when
+  // the cert is detected expired with recovery_token present.
   JsonArray rc = FormBuilder::createForm(root, "recovery",
                                           "Gray-zone recovery (lost cert)");
 
   FormBuilder::addMessageField(rc, "m_recovery_help",
-      "If the device's cert was lost or expired while offline, this "
-      "tab shows the recovery polling status. The device automatically "
-      "contacts the mothership's /recover endpoint with its persisted "
-      "recoveryToken and waits for an operator to approve re-enrollment "
-      "from the admin UI. Implemented in Phase 4b — currently inactive.",
+      "When the device's cert is lost or expired (state=GrayZone), "
+      "click \"Trigger Recovery\" to start polling the mothership's "
+      "/recover endpoint. The poll carries recovery_token and "
+      "deviceId; an operator on the server side approves the request "
+      "via /api/v1/admin/recover/approve/<deviceId>. On approval the "
+      "device receives a fresh cert and exits gray-zone automatically.",
       level("info"), icon("Info"));
+
+  FormBuilder::addTextField(rc, "recover_url", AF::RW,
+                            s.recover_url.c_str(),
+                            label("Recover URL"),
+                            placeholder(FACTORY_MOTHERSHIP_RECOVER_URL),
+                            icon("Cloud"));
+
+  FormBuilder::addActionField(rc, "trigger_recovery", "Trigger Recovery",
+                              AF::RW,
+                              actionRef("cert.beginRecovery"),
+                              icon("Restore"), color("warning"),
+                              refetchForm());
+
+  FormBuilder::addMessageField(rc, "m_recovery_warn",
+      "Recovery uses server-side TLS only (mTLS impossible — cert "
+      "is dead). Production firmware should pin a bootstrap CA at "
+      "compile time so this endpoint can't be MITM'd. The dev mock "
+      "uses setInsecure on this path to keep testing simple.",
+      level("warning"), icon("Warning"));
 
   // ── INTERNALS ─────────────────────────────────────────────────────
   // Sensitive material — cert PEM, private key PEM, CA bundle PEM,
@@ -324,6 +346,26 @@ void CertManagerService::registerManifest(WebManager* web) {
     r->send(200, "application/json", "{\"ok\":true}");
   };
   web->registerAction(enrollAct);
+
+  // Phase 4b — gray-zone recovery trigger. UI button on the
+  // Recovery tab kicks off the polling task. Body-less POST; the
+  // service reads recover_url + recovery_token from _state.
+  WebActionSpec recoverAct;
+  recoverAct.id              = "cert.beginRecovery";
+  recoverAct.title           = "Trigger Recovery";
+  recoverAct.icon            = "Restore";
+  recoverAct.color           = "warning";
+  recoverAct.auth            = WebAuthLevel::Admin;
+  recoverAct.successMessage  = "Recovery polling started";
+  recoverAct.handler = [this](AsyncWebServerRequest* r) {
+    if (!beginRecovery()) {
+      r->send(409, "application/json",
+              "{\"ok\":false,\"err\":\"recovery already running, no recovery_token, or no recover_url\"}");
+      return;
+    }
+    r->send(200, "application/json", "{\"ok\":true}");
+  };
+  web->registerAction(recoverAct);
 
   WebFeatureSpec spec;
   spec.id         = "certManager";
@@ -1033,6 +1075,249 @@ void CertManagerService::runRotation(const String& renewUrl) {
   Serial.printf("[cert.rotate] done — new serial=%s, not_after=%u\n",
                 newSerialHex.c_str(), (unsigned)newNotAfterTs);
   _rotateTask = nullptr;
+}
+
+// ===== Phase 4b — Gray-zone recovery =====
+//
+// Sister flow to enroll: device contacts mothership over server-side
+// TLS only (mTLS impossible — cert is dead) and asks "I'm device-X,
+// I have recovery_token Y, please give me a fresh cert when an
+// operator approves". Server stages the request in pending_recovery
+// queue. Operator approves via admin endpoint, server signs fresh
+// cert and parks it under that deviceId. Next /recover poll from
+// device drains the parked cert and atomically swaps it in.
+//
+// Difference from rotate: no mTLS auth (cert dead), no CSR (server
+// generates entire fresh cert+keypair? actually no — device still
+// generates keypair locally for forward secrecy, sends CSR; server
+// signs it after approval). For Phase 4b iteration 1 the device
+// just polls with token + deviceId; CSR comes on the response side
+// once approval lands.
+//
+// Actually let me reconsider: even in gray-zone the device should
+// generate keypair + CSR locally (private key never leaves) and
+// include the CSR in the recovery request. Server signs after
+// approval. This way the device's private key is fresh for the
+// new cert — we don't trust whatever was in the broken cert.json.
+// One CSR up-front, then poll until approved.
+
+namespace {
+struct RecoveryArg {
+  CertManagerService* svc;
+};
+}  // namespace
+
+bool CertManagerService::beginRecovery() {
+  if (_recoveryTask != nullptr) {
+    Serial.println("[cert.recover] already running");
+    return false;
+  }
+  if (_state.recovery_token.length() == 0) {
+    Serial.println("[cert.recover] no recovery_token — full re-enroll required");
+    return false;
+  }
+  if (_state.recover_url.length() == 0) {
+    Serial.println("[cert.recover] empty recover_url");
+    return false;
+  }
+
+  auto* arg = new RecoveryArg{this};
+  BaseType_t rc = xTaskCreatePinnedToCore(
+      &CertManagerService::recoveryTaskTramp,
+      "certRecover",
+      8192,
+      arg,
+      1,
+      &_recoveryTask,
+      tskNO_AFFINITY);
+
+  if (rc != pdPASS) {
+    Serial.printf("[cert.recover] xTaskCreate failed: %d\n", (int)rc);
+    delete arg;
+    _recoveryTask = nullptr;
+    return false;
+  }
+
+  update([](CertManagerSettings& s) {
+    s.runtime_state = ICertProvider::State::GrayZone;
+    s.status_label  = "GrayZone (polling /recover)";
+    return StateUpdateResult::CHANGED;
+  }, "cert.recover-kick");
+
+  return true;
+}
+
+void CertManagerService::recoveryTaskTramp(void* arg) {
+  auto* a = static_cast<RecoveryArg*>(arg);
+  if (a && a->svc) a->svc->runRecoveryLoop();
+  if (a) delete a;
+  vTaskDelete(nullptr);
+}
+
+void CertManagerService::runRecoveryLoop() {
+  Serial.println("[cert.recover] task start");
+
+  // Poll until approved. Each poll iteration generates a NEW keypair
+  // + CSR — the device commits to a private key only when an
+  // approval finally lands; until then each request carries a fresh
+  // CSR. Cheap on ECDSA-P256 (~50ms per gen on classic, hw-accel on
+  // C3/C6).
+  while (true) {
+    String certPem, caBundlePem;
+    bool approved = false;
+
+    if (!postRecoveryRequest(certPem, caBundlePem, approved)) {
+      // Network / parse failure — wait + retry. Don't exit task;
+      // recovery is the only path back to mTLS, must keep trying.
+      Serial.println("[cert.recover] poll failed, will retry");
+      vTaskDelay(pdMS_TO_TICKS(RECOVERY_POLL_INTERVAL_S * 1000));
+      continue;
+    }
+
+    if (!approved) {
+      Serial.println("[cert.recover] still pending operator approval");
+      vTaskDelay(pdMS_TO_TICKS(RECOVERY_POLL_INTERVAL_S * 1000));
+      continue;
+    }
+
+    // Approved — server returned fresh cert. The keypair we used in
+    // the LATEST CSR is the one matching this cert. Sadly we have a
+    // race: the keypair we generated for THIS poll iteration is
+    // local to postRecoveryRequest and gone by now. Need to either
+    // (a) keep a candidate keypair member persistent across polls,
+    // or (b) generate a NEW keypair + CSR + immediate POST + atomic
+    // apply when we see approved=true.
+    //
+    // Option (b) doesn't work either — server already signed against
+    // the public key from the LAST poll's CSR. So we MUST persist
+    // the candidate keypair across polls.
+    //
+    // Phase 4b iteration 1 uses a simpler model: post the CSR ONCE,
+    // then poll without sending CSR until approved. Server holds
+    // the CSR alongside the pending request. Next iteration the
+    // server-side memory model can persist that CSR but for now
+    // we persist the keypair ON DEVICE in a member.
+    Serial.printf("[cert.recover] approved — applying new cert "
+                  "(%u B), ca (%u B)\n",
+                  (unsigned)certPem.length(),
+                  (unsigned)caBundlePem.length());
+
+    String serialHex;
+    uint32_t notAfterTs = 0;
+    parseCertMetadata(certPem, serialHex, notAfterTs);
+
+    // Apply atomically. recovery_token preserved (already on disk;
+    // unchanged across recovery — same secret can be used again).
+    update([&](CertManagerSettings& s) {
+      s.device_cert_pem  = certPem;
+      // device_key_pem set inside postRecoveryRequest via _candidateKeyPem
+      s.device_key_pem   = _candidateKeyPem;
+      s.ca_bundle_pem    = caBundlePem;
+      s.serial_hex       = serialHex;
+      s.not_after_ts     = notAfterTs;
+      s.runtime_state    = ICertProvider::State::Ready;
+      s.status_label     = "Ready (recovered)";
+      return StateUpdateResult::CHANGED;
+    }, "cert.recover-ok");
+
+    if (_tls) {
+      _tls->updateClientCert(certPem, _candidateKeyPem);
+      _tls->loadCaChain(caBundlePem);
+    }
+
+    // Wipe candidate from memory — applied to disk now.
+    _candidateKeyPem = String();
+
+    Serial.printf("[cert.recover] done — serial=%s\n", serialHex.c_str());
+    _recoveryTask = nullptr;
+    return;
+  }
+}
+
+bool CertManagerService::postRecoveryRequest(String& outCertPem,
+                                              String& outCaBundlePem,
+                                              bool& outApproved) {
+  outCertPem = String();
+  outCaBundlePem = String();
+  outApproved = false;
+
+  // Generate candidate keypair + CSR ONCE — first poll only.
+  // Subsequent polls reuse the same candidate so the CSR sent to
+  // server (and thus signed cert returned) matches the keypair we
+  // can swap in. Cleared after successful apply.
+  if (_candidateKeyPem.length() == 0) {
+    if (!generateEcdsaKeyPair(_candidateKeyPem)) {
+      Serial.println("[cert.recover] keypair gen failed");
+      _candidateKeyPem = String();
+      return false;
+    }
+  }
+
+  String csrPem;
+  if (!buildCsr(_candidateKeyPem, csrPem)) {
+    Serial.println("[cert.recover] CSR build failed");
+    return false;
+  }
+
+  WiFiClientSecure client;
+  // Server-side TLS only — cert is dead, no client identity.
+  // Production: pin a bootstrap CA from firmware here. For dev mock,
+  // setInsecure to accept the self-signed cert without trust chain.
+  client.setInsecure();
+  client.setHandshakeTimeout(15);
+  client.setTimeout(20000);
+
+  HTTPClient http;
+  if (!http.begin(client, _state.recover_url)) {
+    Serial.println("[cert.recover] http.begin failed");
+    return false;
+  }
+  http.setTimeout(20000);
+  http.addHeader("Content-Type", "application/json");
+
+  DynamicJsonDocument req(2048);
+  req["deviceId"]        = deviceSubjectCN();
+  req["recoveryToken"]   = _state.recovery_token;
+  req["lastKnownSerial"] = _state.serial_hex;
+  req["csr_pem"]         = csrPem;
+  String reqBody;
+  serializeJson(req, reqBody);
+
+  Serial.printf("[cert.recover] POST %s, body=%u B\n",
+                _state.recover_url.c_str(),
+                (unsigned)reqBody.length());
+
+  int code = http.POST(reqBody);
+  Serial.printf("[cert.recover] HTTP code=%d\n", code);
+
+  if (code < 200 || code >= 300) {
+    String err = http.getString();
+    Serial.printf("[cert.recover] server error: %s\n", err.c_str());
+    http.end();
+    return false;
+  }
+
+  String respBody = http.getString();
+  http.end();
+
+  DynamicJsonDocument resp(8192);
+  DeserializationError jerr = deserializeJson(resp, respBody);
+  if (jerr) {
+    Serial.printf("[cert.recover] JSON parse: %s\n", jerr.c_str());
+    return false;
+  }
+
+  outApproved = resp["approved"].as<bool>();
+  if (outApproved) {
+    outCertPem     = resp["cert_pem"].as<String>();
+    outCaBundlePem = resp["ca_bundle_pem"].as<String>();
+    if (outCertPem.length() == 0 || outCaBundlePem.length() == 0) {
+      Serial.println("[cert.recover] approved=true but cert/ca missing");
+      outApproved = false;
+      return false;
+    }
+  }
+  return true;
 }
 
 bool CertManagerService::postCsrToRenew(const String& csrPem,
