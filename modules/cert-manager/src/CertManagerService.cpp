@@ -400,13 +400,22 @@ void CertManagerService::begin() {
   (void)_cfg.ensureLoaded();
   refreshRuntimeState();
 
-  // Phase 1.1: push loaded cert into TLS context so all subsequent
-  // attachToClient() calls get the chain. For now no-op.
+  // Push loaded material into the TLS context so every subsequent
+  // attachToClient() in any module gets the right chain. Without
+  // this, Phase 2 mothership /checkin would always run without
+  // mTLS — the cert is on disk but the TLS layer never sees it.
+  // Order matters: loadCaChain first (server trust), then
+  // updateClientCert (client identity); attachToClient binds both.
+  if (_tls && _state.ca_bundle_pem.length() > 0) {
+    _tls->loadCaChain(_state.ca_bundle_pem);
+    Serial.printf("[cert.begin] loaded CA bundle (%u B) into TLS context\n",
+                  (unsigned)_state.ca_bundle_pem.length());
+  }
   if (_tls && hasValidCert()) {
     _tls->updateClientCert(_state.device_cert_pem, _state.device_key_pem);
-  }
-  if (_tls && _state.ca_bundle_pem.length() > 0) {
-    // _tls->loadCaChain(_state.ca_bundle_pem);  // wired in Phase 1.1 via concrete TLSContextService
+    Serial.printf("[cert.begin] loaded client cert (%u B) + key (%u B) into TLS context\n",
+                  (unsigned)_state.device_cert_pem.length(),
+                  (unsigned)_state.device_key_pem.length());
   }
 
   if (_feature) _feature->broadcastWs("boot");

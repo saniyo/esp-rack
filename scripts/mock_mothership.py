@@ -43,6 +43,16 @@ import sys
 import tempfile
 from typing import Tuple
 
+# Windows console defaults to cp1252 which can't encode the em-dashes
+# / arrows / other non-ASCII chars sprinkled across this file's
+# print() calls. Force UTF-8 with replace-on-unencodable so the
+# server doesn't silently 500 mid-handler when its log line contains
+# a non-ASCII byte.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 try:
     from cryptography import x509
     from cryptography.hazmat.primitives import hashes, serialization
@@ -54,11 +64,46 @@ except ImportError:
     sys.exit(1)
 
 
+# ----- Per-device action queue (Phase 2 check-in command channel) -----
+# Operator stages actions via POST /api/v1/admin/queue/<deviceId>; the
+# next /api/v1/checkin from that device drains the queue (FIFO) into
+# its response. In-memory only — restart wipes pending actions.
+COMMAND_QUEUE: dict = {}
+
+
 # ----- root CA generation (in-memory, fresh each run) -----
 
+def _ca_path() -> Tuple[str, str]:
+    """Persistent CA storage paths — alongside the script. Once a CA
+    is generated it survives mock-server restarts so devices that
+    enrolled against it keep their CA bundle valid for mTLS handshake.
+    Without this every server restart would force re-enrollment of
+    every test device."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    return (os.path.join(here, ".mock_ca.pem"),
+            os.path.join(here, ".mock_ca.key"))
+
+
 def make_root_ca() -> Tuple[x509.Certificate, ec.EllipticCurvePrivateKey]:
-    """Self-signed ECDSA-P256 CA — 10 year validity. Lives only in
-    process memory; killed when this script stops."""
+    """Self-signed ECDSA-P256 CA — 10 year validity. Persisted to
+    .mock_ca.{pem,key} alongside the script so successive mock
+    restarts present the same CA to enrolled devices.
+
+    Delete those two files (or pass --reset-ca) to force a fresh CA
+    on the next start (will require re-enrolling every test device)."""
+    cert_path, key_path = _ca_path()
+
+    if os.path.exists(cert_path) and os.path.exists(key_path):
+        try:
+            with open(cert_path, "rb") as f:
+                cert = x509.load_pem_x509_certificate(f.read())
+            with open(key_path, "rb") as f:
+                key = serialization.load_pem_private_key(f.read(), password=None)
+            print(f"[ca] loaded persisted CA from {cert_path}")
+            return cert, key
+        except Exception as e:
+            print(f"[ca] persisted CA load failed ({e}); regenerating")
+
     key = ec.generate_private_key(ec.SECP256R1())
     name = x509.Name([
         x509.NameAttribute(NameOID.COMMON_NAME, "esprack-mock-mothership-CA"),
@@ -86,30 +131,96 @@ def make_root_ca() -> Tuple[x509.Certificate, ec.EllipticCurvePrivateKey]:
                        critical=True)
         .sign(key, hashes.SHA256())
     )
+
+    # Persist for future runs.
+    try:
+        with open(cert_path, "wb") as f:
+            f.write(cert.public_bytes(serialization.Encoding.PEM))
+        with open(key_path, "wb") as f:
+            f.write(key.private_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PrivateFormat.TraditionalOpenSSL,
+                encryption_algorithm=serialization.NoEncryption(),
+            ))
+        print(f"[ca] persisted new CA to {cert_path}")
+    except OSError as e:
+        print(f"[ca] WARNING: failed to persist CA ({e}); next start "
+              f"will regenerate and break enrolled devices")
+
     return cert, key
+
+
+def _detect_lan_ips() -> list:
+    """Best-effort enumerate every IPv4 address bound on this host.
+    Devices typically connect by raw IP (192.168.x.y) and mbedtls
+    rejects the cert if that IP isn't in the SAN — even if CN matches
+    the operator's input. By adding every local interface to SAN at
+    cert-gen time, the typical 'oops forgot --cn 192.168.x.y' case
+    is invisible to the operator: the cert covers all the addresses
+    the host could possibly be reached at."""
+    import socket
+    ips = set()
+    # Hostname → IP (catches the primary one).
+    try:
+        for r in socket.getaddrinfo(socket.gethostname(), None,
+                                      family=socket.AF_INET):
+            ips.add(r[4][0])
+    except OSError:
+        pass
+    # 'all interfaces' route trick — open a UDP socket to a bogus
+    # external host, then ask the OS what local IP would be used.
+    # No packets actually sent. Catches the LAN-side IP even when
+    # the hostname resolves to something else (e.g. mDNS quirks).
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 53))
+        ips.add(s.getsockname()[0])
+        s.close()
+    except OSError:
+        pass
+    ips.discard("127.0.0.1")  # added separately as DNS+IP
+    return sorted(ips)
 
 
 def make_server_cert(ca_cert: x509.Certificate,
                      ca_key: ec.EllipticCurvePrivateKey,
                      hostname: str
                      ) -> Tuple[x509.Certificate, ec.EllipticCurvePrivateKey]:
-    """ECDSA-P256 server cert signed by our mock CA. SAN includes the
-    hostname the operator types into the device + 'localhost' + a
-    127.0.0.1 IP for convenience."""
+    """ECDSA-P256 server cert signed by our mock CA. SAN includes:
+      - the operator's --cn value (DNS or IP)
+      - "localhost" + 127.0.0.1
+      - "mothership.local"
+      - every IPv4 the host has bound on any interface
+
+    The last entry is what makes the typical "operator typed
+    192.168.x.y in the device's Check-in URL" case work without
+    a special --cn flag."""
+    import ipaddress as _ipaddr
     key = ec.generate_private_key(ec.SECP256R1())
     name = x509.Name([
         x509.NameAttribute(NameOID.COMMON_NAME, hostname),
     ])
     now = datetime.datetime.now(datetime.timezone.utc)
-    san = [x509.DNSName(hostname), x509.DNSName("localhost"),
-           x509.DNSName("mothership.local")]
-    # If hostname is an IP, also add IP SAN — covers operator typing
-    # the LAN IP directly into the device's Enroll URL.
+
+    san: list = [
+        x509.DNSName(hostname),
+        x509.DNSName("localhost"),
+        x509.DNSName("mothership.local"),
+        x509.IPAddress(_ipaddr.ip_address("127.0.0.1")),
+    ]
+    # If hostname is itself an IP, add as IP SAN (DNSName above is a
+    # near-duplicate but harmless — some clients only look at one).
     try:
-        import ipaddress
-        san.append(x509.IPAddress(ipaddress.ip_address(hostname)))
+        san.append(x509.IPAddress(_ipaddr.ip_address(hostname)))
     except ValueError:
         pass
+    # Every local LAN IP — primary fix for the "device hits us by
+    # raw IP, cert was issued for a hostname" mismatch.
+    for ip_str in _detect_lan_ips():
+        try:
+            san.append(x509.IPAddress(_ipaddr.ip_address(ip_str)))
+        except ValueError:
+            pass
 
     cert = (
         x509.CertificateBuilder()
@@ -168,10 +279,32 @@ class EnrollHandler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_POST(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
-        if self.path != "/api/v1/enroll":
-            self._send_json(404, {"err": "not found"})
-            return
+        try:
+            if self.path == "/api/v1/enroll":
+                self._handle_enroll()
+            elif self.path == "/api/v1/checkin":
+                self._handle_checkin()
+            elif self.path.startswith("/api/v1/admin/queue/"):
+                # /api/v1/admin/queue/<deviceId> — operator-side endpoint
+                # for staging actions to be delivered on the device's next
+                # check-in. Body is the action payload as-is. NOT secured
+                # in this mock — production server has admin auth.
+                self._handle_admin_queue()
+            else:
+                self._send_json(404, {"err": "not found"})
+        except Exception as e:
+            # Catch-all so a bug in the handler doesn't drop the TLS
+            # connection mid-flight (schannel:close_notify error on the
+            # client side); always send something HTTP-shaped back.
+            import traceback
+            sys.stderr.write(f"[mock] handler exception: {e}\n")
+            traceback.print_exc(file=sys.stderr)
+            try:
+                self._send_json(500, {"err": str(e)})
+            except Exception:
+                pass
 
+    def _handle_enroll(self) -> None:
         # Bearer token check — must match what device pasted in UI.
         auth = self.headers.get("Authorization", "")
         if not auth.startswith("Bearer "):
@@ -220,6 +353,76 @@ class EnrollHandler(http.server.BaseHTTPRequestHandler):
             "recovery_token": recovery_token,
         })
 
+    def _handle_checkin(self) -> None:
+        # Phase 2.2 — mTLS check-in. Production server validates the
+        # client cert against its allow-list, here we accept any
+        # client cert presented (Python http.server doesn't easily
+        # surface peer cert to handlers, so this mock is "anyone who
+        # got past TLS handshake passes"). The deviceId in the
+        # request body identifies which device's command queue to
+        # drain.
+        length = int(self.headers.get("Content-Length", "0"))
+        if length <= 0 or length > 16384:
+            self._send_json(400, {"err": "bad content-length"})
+            return
+        raw = self.rfile.read(length)
+        try:
+            req = json.loads(raw.decode("utf-8"))
+        except json.JSONDecodeError as e:
+            self._send_json(400, {"err": f"json parse: {e}"})
+            return
+
+        device_id  = req.get("deviceId", "")
+        uptime_sec = req.get("uptimeSec", 0)
+        free_heap  = req.get("freeHeap", 0)
+        fw         = req.get("fwVer", "?")
+        hw         = req.get("hwVer", "?")
+
+        # Drain the per-device action queue (FIFO).
+        actions = COMMAND_QUEUE.pop(device_id, [])
+        if actions:
+            print(f"[checkin] {device_id} fw={fw} up={uptime_sec}s "
+                  f"heap={free_heap} -> DELIVERING {len(actions)} actions: "
+                  + ", ".join(a.get("type", "?") for a in actions))
+        else:
+            print(f"[checkin] {device_id} fw={fw} up={uptime_sec}s "
+                  f"heap={free_heap} -> no pending actions")
+
+        self._send_json(200, {
+            "actions":         actions,
+            "nextCheckInSec":  300,  # device ignores this for now
+        })
+
+    def _handle_admin_queue(self) -> None:
+        # /api/v1/admin/queue/<deviceId>  — POST a single action.
+        # Stages it for delivery on the device's next checkin.
+        device_id = self.path[len("/api/v1/admin/queue/"):]
+        if not device_id:
+            self._send_json(400, {"err": "missing deviceId in path"})
+            return
+
+        length = int(self.headers.get("Content-Length", "0"))
+        if length <= 0 or length > 16384:
+            self._send_json(400, {"err": "bad content-length"})
+            return
+        raw = self.rfile.read(length)
+        try:
+            action = json.loads(raw.decode("utf-8"))
+        except json.JSONDecodeError as e:
+            self._send_json(400, {"err": f"json parse: {e}"})
+            return
+
+        if "type" not in action:
+            self._send_json(400, {"err": "action missing 'type'"})
+            return
+
+        COMMAND_QUEUE.setdefault(device_id, []).append(action)
+        print(f"[admin] queued action {action.get('type')} for {device_id}")
+        self._send_json(202, {
+            "ok":     True,
+            "queued": len(COMMAND_QUEUE[device_id]),
+        })
+
     def log_message(self, format: str, *args) -> None:  # noqa: A002
         # quieter than the default
         sys.stderr.write(f"[mock] {self.address_string()} - {format % args}\n")
@@ -241,7 +444,18 @@ def main() -> int:
                     help="Server cert CN / primary SAN (default: "
                          "mothership.local — set to your LAN IP if "
                          "device can't resolve mDNS)")
+    ap.add_argument("--reset-ca", action="store_true",
+                    help="Delete the persisted CA before start. Every "
+                         "previously enrolled device will need to "
+                         "re-enroll because their CA bundle won't match.")
     args = ap.parse_args()
+
+    if args.reset_ca:
+        cp, kp = _ca_path()
+        for p in (cp, kp):
+            if os.path.exists(p):
+                os.unlink(p)
+                print(f"[ca] reset: removed {p}")
 
     print("=" * 60)
     print("ESPRack mock mothership — DEV ONLY, no persistence")
@@ -253,6 +467,10 @@ def main() -> int:
           "enrollment) ---")
     print(ca_pem)
 
+    detected_ips = _detect_lan_ips()
+    if detected_ips:
+        print(f"\n[srv] auto-adding LAN IPs to server cert SAN: "
+              f"{', '.join(detected_ips)}")
     srv_cert, srv_key = make_server_cert(ca_cert, ca_key, args.cn)
     srv_cert_pem = srv_cert.public_bytes(serialization.Encoding.PEM)
     srv_key_pem  = srv_key.private_bytes(
@@ -282,13 +500,26 @@ def main() -> int:
         ctx.minimum_version = ssl.TLSVersion.TLSv1_2
         server.socket = ctx.wrap_socket(server.socket, server_side=True)
 
-        print(f"\nListening on https://{args.host}:{args.port}/api/v1/enroll")
-        print(f"Bootstrap token (paste into device PKI Enrollment tab):")
+        print(f"\nListening on https://{args.host}:{args.port}/")
+        print(f"Endpoints:")
+        print(f"  POST /api/v1/enroll                  bootstrap-token CSR signing")
+        print(f"  POST /api/v1/checkin                 mTLS device check-in")
+        print(f"  POST /api/v1/admin/queue/<deviceId>  stage action for next checkin")
+        print(f"\nBootstrap token (paste into device PKI Enrollment tab):")
         print(f"  {args.token}")
-        print(f"\nDevice's `Enroll URL` should be:")
-        print(f"  https://<your-LAN-ip>:{args.port}/api/v1/enroll")
-        print(f"  (or https://{args.cn}:{args.port}/api/v1/enroll if "
-              f"the device can resolve mDNS)\n")
+        print(f"\nOperator action examples:")
+        print(f"  # Schedule reboot on the next check-in:")
+        print(f"  curl -k -X POST -H 'Content-Type: application/json' \\")
+        print(f"    -d '{{\"type\":\"reboot\"}}' \\")
+        print(f"    https://{args.cn}:{args.port}/api/v1/admin/queue/device-<MAC>")
+        print(f"")
+        print(f"  # Send a log line to device's serial console:")
+        print(f"  curl -k -X POST -H 'Content-Type: application/json' \\")
+        print(f"    -d '{{\"type\":\"log\",\"params\":{{\"level\":\"info\",\"msg\":\"hi from server\"}}}}' \\")
+        print(f"    https://{args.cn}:{args.port}/api/v1/admin/queue/device-<MAC>")
+        print(f"\nDevice config:")
+        print(f"  Enroll URL  : https://<LAN-ip>:{args.port}/api/v1/enroll")
+        print(f"  Checkin URL : https://<LAN-ip>:{args.port}/api/v1/checkin\n")
 
         try:
             server.serve_forever()
