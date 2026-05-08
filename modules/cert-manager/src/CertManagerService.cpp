@@ -1260,10 +1260,6 @@ struct RecoveryArg {
 }  // namespace
 
 bool CertManagerService::beginRecovery() {
-  if (_recoveryTask != nullptr) {
-    Serial.println("[cert.recover] already running");
-    return false;
-  }
   if (_state.recovery_token.length() == 0) {
     Serial.println("[cert.recover] no recovery_token — full re-enroll required");
     return false;
@@ -1272,6 +1268,17 @@ bool CertManagerService::beginRecovery() {
     Serial.println("[cert.recover] no recover URL — pick a Mothership "
                     "profile (or set PKI Base URL on the Settings tab)");
     return false;
+  }
+  // If a polling task is already running (e.g. operator clicked
+  // Trigger Recovery with a wrong URL, then fixed it and re-clicked),
+  // wake it up so it polls the NEW URL immediately instead of
+  // sleeping out the 60s interval. xTaskNotifyGive bumps the
+  // task's notification value; the poll loop's
+  // ulTaskNotifyTake-with-timeout returns early on the bump.
+  if (_recoveryTask != nullptr) {
+    Serial.println("[cert.recover] task already running — waking up for early poll");
+    xTaskNotifyGive(_recoveryTask);
+    return true;
   }
 
   auto* arg = new RecoveryArg{this};
@@ -1322,14 +1329,19 @@ void CertManagerService::runRecoveryLoop() {
     if (!postRecoveryRequest(certPem, caBundlePem, approved)) {
       // Network / parse failure — wait + retry. Don't exit task;
       // recovery is the only path back to mTLS, must keep trying.
+      // Sleep is interruptible via xTaskNotifyGive — operator
+      // clicking Trigger Recovery again wakes us up immediately
+      // so a URL fix can be tested without waiting full 60s.
       Serial.println("[cert.recover] poll failed, will retry");
-      vTaskDelay(pdMS_TO_TICKS(RECOVERY_POLL_INTERVAL_S * 1000));
+      ulTaskNotifyTake(pdTRUE,
+          pdMS_TO_TICKS(RECOVERY_POLL_INTERVAL_S * 1000));
       continue;
     }
 
     if (!approved) {
       Serial.println("[cert.recover] still pending operator approval");
-      vTaskDelay(pdMS_TO_TICKS(RECOVERY_POLL_INTERVAL_S * 1000));
+      ulTaskNotifyTake(pdTRUE,
+          pdMS_TO_TICKS(RECOVERY_POLL_INTERVAL_S * 1000));
       continue;
     }
 
