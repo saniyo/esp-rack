@@ -46,13 +46,20 @@ class TLSContextService : public ITLSProvider {
   void clearClientCert() override;
 
  private:
-  // PEM-encoded material — kept as String for simplicity; mbedtls
-  // structures are built on the fly inside attachToClient (so a
-  // cert swap mid-session takes effect on the NEXT client built,
-  // not retroactively).
+  // PEM-encoded material — kept as String for simplicity. arduino-
+  // esp32 NetworkClientSecure stores raw const char* (not a copy),
+  // so PEM Strings must outlive any WiFiClientSecure they were
+  // attached to. _prev* / _prevPrev* slots keep the previous one or
+  // two PEM blobs alive across cert swaps so already-running
+  // handshakes don't dereference freed memory; by the third swap
+  // any old client is long-since closed.
   String _caBundlePem;
   String _clientCertPem;
   String _clientKeyPem;
+  String _prevClientCertPem;
+  String _prevClientKeyPem;
+  String _prevPrevClientCertPem;
+  String _prevPrevClientKeyPem;
 };
 
 #endif  // ESPRACK_TLS_CONTEXT_SERVICE_H
