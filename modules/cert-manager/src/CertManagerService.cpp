@@ -45,15 +45,53 @@ void CertManagerSettings::readConfig(CertManagerSettings& s, JsonObject& root) {
 StateUpdateResult CertManagerSettings::update(JsonObject& root,
                                               CertManagerSettings& s) {
   bool ch = false;
-  ch |= FormBuilder::updateValue(root, "device_cert_pem", s.device_cert_pem);
-  ch |= FormBuilder::updateValue(root, "device_key_pem",  s.device_key_pem);
-  ch |= FormBuilder::updateValue(root, "ca_bundle_pem",   s.ca_bundle_pem);
+
+  // ── Sensitive fields (cert / key / CA / recovery token) ────────
+  // These have DUAL parsers because update() is invoked both at
+  // boot (ConfigDelegate apply JSON-from-disk → state) AND on every
+  // form POST (UI form Save → state). At boot we MUST adopt the
+  // saved value. On form POST the readonly SecretFields might come
+  // through as null/empty (frontend behaviour for AF::R) and would
+  // otherwise clobber a real loaded PEM.
+  //
+  // Rule: adopt only if the incoming JSON has the key AND its value
+  // is non-empty. Empty / missing → keep existing state. The boot
+  // path (where state is freshly default-constructed) sees the
+  // populated PEM in JSON and adopts; the form-POST path either
+  // doesn't include the key (frontend omits AF::R) or includes it
+  // as the same plaintext from the previous GET (no real change).
+  // No way to wipe a sensitive field through the form — the only
+  // path that sets these to empty is runEnrollment / rotate /
+  // factory-reset, which mutate state directly.
+  auto setIfNonEmpty = [&](const char* key, String& dst) {
+    if (!root.containsKey(key)) return;
+    JsonVariant v = root[key];
+    if (v.isNull()) return;
+    String incoming = v.as<String>();
+    if (incoming.length() == 0) return;
+    if (incoming != dst) {
+      dst = incoming;
+      ch = true;
+    }
+  };
+  setIfNonEmpty("device_cert_pem", s.device_cert_pem);
+  setIfNonEmpty("device_key_pem",  s.device_key_pem);
+  setIfNonEmpty("ca_bundle_pem",   s.ca_bundle_pem);
+  setIfNonEmpty("recovery_token",  s.recovery_token);
+
+  // ── Plain non-sensitive housekeeping ──
   ch |= FormBuilder::updateValue(root, "serial_hex",      s.serial_hex);
   ch |= FormBuilder::updateValue(root, "subject_cn",      s.subject_cn);
   ch |= FormBuilder::updateValue(root, "not_after_ts",    s.not_after_ts);
-  ch |= FormBuilder::updateValue(root, "recovery_token",  s.recovery_token);
-  ch |= FormBuilder::updateValue(root, "bootstrap_token", s.bootstrap_token);
   ch |= FormBuilder::updateValue(root, "mothership_url",  s.mothership_url);
+
+  // Bootstrap token IS the only secret field that the form is
+  // EXPECTED to mutate (operator types it during enrollment). Plain
+  // updateValue here so empty submits genuinely clear it (e.g. the
+  // success path explicitly wipes via runEnrollment, but operator
+  // could also clear by hand).
+  ch |= FormBuilder::updateValue(root, "bootstrap_token", s.bootstrap_token);
+
   return ch ? StateUpdateResult::CHANGED : StateUpdateResult::UNCHANGED;
 }
 
