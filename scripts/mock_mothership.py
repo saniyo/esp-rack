@@ -150,27 +150,77 @@ def make_root_ca() -> Tuple[x509.Certificate, ec.EllipticCurvePrivateKey]:
     return cert, key
 
 
+def _detect_lan_ips() -> list:
+    """Best-effort enumerate every IPv4 address bound on this host.
+    Devices typically connect by raw IP (192.168.x.y) and mbedtls
+    rejects the cert if that IP isn't in the SAN — even if CN matches
+    the operator's input. By adding every local interface to SAN at
+    cert-gen time, the typical 'oops forgot --cn 192.168.x.y' case
+    is invisible to the operator: the cert covers all the addresses
+    the host could possibly be reached at."""
+    import socket
+    ips = set()
+    # Hostname → IP (catches the primary one).
+    try:
+        for r in socket.getaddrinfo(socket.gethostname(), None,
+                                      family=socket.AF_INET):
+            ips.add(r[4][0])
+    except OSError:
+        pass
+    # 'all interfaces' route trick — open a UDP socket to a bogus
+    # external host, then ask the OS what local IP would be used.
+    # No packets actually sent. Catches the LAN-side IP even when
+    # the hostname resolves to something else (e.g. mDNS quirks).
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 53))
+        ips.add(s.getsockname()[0])
+        s.close()
+    except OSError:
+        pass
+    ips.discard("127.0.0.1")  # added separately as DNS+IP
+    return sorted(ips)
+
+
 def make_server_cert(ca_cert: x509.Certificate,
                      ca_key: ec.EllipticCurvePrivateKey,
                      hostname: str
                      ) -> Tuple[x509.Certificate, ec.EllipticCurvePrivateKey]:
-    """ECDSA-P256 server cert signed by our mock CA. SAN includes the
-    hostname the operator types into the device + 'localhost' + a
-    127.0.0.1 IP for convenience."""
+    """ECDSA-P256 server cert signed by our mock CA. SAN includes:
+      - the operator's --cn value (DNS or IP)
+      - "localhost" + 127.0.0.1
+      - "mothership.local"
+      - every IPv4 the host has bound on any interface
+
+    The last entry is what makes the typical "operator typed
+    192.168.x.y in the device's Check-in URL" case work without
+    a special --cn flag."""
+    import ipaddress as _ipaddr
     key = ec.generate_private_key(ec.SECP256R1())
     name = x509.Name([
         x509.NameAttribute(NameOID.COMMON_NAME, hostname),
     ])
     now = datetime.datetime.now(datetime.timezone.utc)
-    san = [x509.DNSName(hostname), x509.DNSName("localhost"),
-           x509.DNSName("mothership.local")]
-    # If hostname is an IP, also add IP SAN — covers operator typing
-    # the LAN IP directly into the device's Enroll URL.
+
+    san: list = [
+        x509.DNSName(hostname),
+        x509.DNSName("localhost"),
+        x509.DNSName("mothership.local"),
+        x509.IPAddress(_ipaddr.ip_address("127.0.0.1")),
+    ]
+    # If hostname is itself an IP, add as IP SAN (DNSName above is a
+    # near-duplicate but harmless — some clients only look at one).
     try:
-        import ipaddress
-        san.append(x509.IPAddress(ipaddress.ip_address(hostname)))
+        san.append(x509.IPAddress(_ipaddr.ip_address(hostname)))
     except ValueError:
         pass
+    # Every local LAN IP — primary fix for the "device hits us by
+    # raw IP, cert was issued for a hostname" mismatch.
+    for ip_str in _detect_lan_ips():
+        try:
+            san.append(x509.IPAddress(_ipaddr.ip_address(ip_str)))
+        except ValueError:
+            pass
 
     cert = (
         x509.CertificateBuilder()
@@ -417,6 +467,10 @@ def main() -> int:
           "enrollment) ---")
     print(ca_pem)
 
+    detected_ips = _detect_lan_ips()
+    if detected_ips:
+        print(f"\n[srv] auto-adding LAN IPs to server cert SAN: "
+              f"{', '.join(detected_ips)}")
     srv_cert, srv_key = make_server_cert(ca_cert, ca_key, args.cn)
     srv_cert_pem = srv_cert.public_bytes(serialization.Encoding.PEM)
     srv_key_pem  = srv_key.private_bytes(
