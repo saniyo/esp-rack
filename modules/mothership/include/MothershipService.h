@@ -95,6 +95,41 @@ class MothershipService : public StatefulService<MothershipSettings>,
   // CertProvider readiness. Runs in begin(), after every update,
   // and at the end of every check-in attempt.
   void refreshRuntimeState();
+
+  // ── Phase 2.2 check-in scheduling ──
+  //
+  // FreeRTOS task that runs the actual HTTPS POST loop. Spawned in
+  // begin() if enabled+cert ready, also re-spawned on enabled flip.
+  // One task ever — task self-destructs and clears _task on exit.
+  // Uses a binary semaphore for "wake up early" (used by Phase 2.3
+  // adaptive cadence after burst-trigger actions land).
+  TaskHandle_t   _task{nullptr};
+  static void    checkinTaskTramp(void* arg);
+  void           runCheckinLoop();
+
+  // Single check-in iteration: build request → POST → parse →
+  // dispatch actions → return success bool. Caller updates
+  // success/fail counters + next-checkin timestamp + state.
+  bool           performOneCheckin();
+
+  // ── Phase 2.3 action dispatcher ──
+  //
+  // Walks the actions[] array in the response and routes each item
+  // to its handler. Unknown action types are logged and skipped
+  // (forward-compat with future server-side action additions).
+  // Returns true if ANY action was dispatched (used by adaptive
+  // cadence to trigger 10s burst follow-up).
+  bool           dispatchActions(JsonArrayConst actions);
+
+  // Per-action handlers. Each takes the action's `params` JSON
+  // object and returns a brief result string (logged in serial,
+  // surfaced via WS in Phase 2.4 command log).
+  String         actionUpdate(JsonObjectConst params);
+  String         actionRenewCert(JsonObjectConst params);
+  String         actionOpenTunnel(JsonObjectConst params);
+  String         actionSetConfig(JsonObjectConst params);
+  String         actionReboot(JsonObjectConst params);
+  String         actionLog(JsonObjectConst params);
 };
 
 #endif  // MothershipService_h

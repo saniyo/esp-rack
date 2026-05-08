@@ -2,6 +2,11 @@
 #include <ITLSProvider.h>
 #include <ICertProvider.h>
 #include <WebManager.h>
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
+#include <esp_system.h>
 
 // ===== Persistence =====
 
@@ -185,11 +190,274 @@ void MothershipService::registerManifest(WebManager* web) {
 void MothershipService::begin() {
   (void)_cfg.ensureLoaded();
   refreshRuntimeState();
+
+  // Spawn the check-in task once at boot. Inside the loop the task
+  // checks `_state.enabled` + cert availability each iteration —
+  // toggling enabled doesn't restart the task, just changes whether
+  // the next iteration POSTs or sleeps. 8 KB stack matches the cert-
+  // manager enrollment task: mbedtls TLS handshake + JSON response
+  // parsing under one stack.
+  if (_task == nullptr) {
+    BaseType_t rc = xTaskCreatePinnedToCore(
+        &MothershipService::checkinTaskTramp,
+        "mothership",
+        8192,
+        this,
+        1,
+        &_task,
+        tskNO_AFFINITY);
+    if (rc != pdPASS) {
+      Serial.printf("[mship.begin] xTaskCreate failed: %d\n", (int)rc);
+      _task = nullptr;
+    }
+  }
+
   if (_feature) _feature->broadcastWs("boot");
 }
 
 void MothershipService::loop() {
-  // Phase 2.2 will spawn a FreeRTOS check-in task. For now no-op.
+  // Phase 2.4 will tick the live last/next countdowns via WS push
+  // here. Actual check-in lives in the FreeRTOS task spawned in
+  // begin(); loop() stays cooperative-cheap.
+}
+
+// ===== Phase 2.2 — Check-in task =====
+//
+// Single long-running task. Each iteration:
+//   1. Sleep until either next_checkin_at_s (fixed wall-clock) or a
+//      wakeup notification (burst after pending actions, Phase 2.3).
+//   2. Re-check enabled + cert readiness; if either off, just sleep
+//      another interval. The task NEVER exits — toggling enabled
+//      just suspends iterations.
+//   3. performOneCheckin(); update counters; schedule next iteration
+//      (5 min default, or 10s if dispatchActions returned true).
+
+void MothershipService::checkinTaskTramp(void* arg) {
+  auto* svc = static_cast<MothershipService*>(arg);
+  if (svc) svc->runCheckinLoop();
+  vTaskDelete(nullptr);
+}
+
+void MothershipService::runCheckinLoop() {
+  Serial.println("[mship] check-in task started");
+
+  while (true) {
+    // Re-evaluate gates each iteration.
+    bool wantTick = _state.enabled
+                    && _cert && _cert->hasValidCert()
+                    && WiFi.isConnected();
+    if (!wantTick) {
+      vTaskDelay(pdMS_TO_TICKS(5000));   // recheck every 5s when paused
+      continue;
+    }
+
+    // Schedule next iteration BEFORE sending the request — so the
+    // status countdown immediately ticks toward the next moment, not
+    // toward "now + handshake time".
+    uint32_t now_s = (uint32_t)(millis() / 1000);
+    uint32_t base_interval_s = (uint32_t)_state.interval_min * 60u;
+    if (base_interval_s < 60) base_interval_s = 60;
+    update([base_interval_s, now_s](MothershipSettings& s) {
+      s.next_checkin_at_s = now_s + base_interval_s;
+      s.runtime_state     = IMothershipProvider::State::CheckingIn;
+      s.status_label      = "CheckingIn";
+      return StateUpdateResult::CHANGED;
+    }, "mship.tick-start");
+
+    bool ok = performOneCheckin();
+    bool burst = false;  // Phase 2.3 sets this from dispatchActions
+
+    update([ok, burst, now_s, base_interval_s](MothershipSettings& s) {
+      if (ok) {
+        s.success_count++;
+        s.last_checkin_at_s = now_s;
+      } else {
+        s.fail_count++;
+      }
+      // Adaptive cadence: if actions arrived this round, drop to
+      // 10-second burst follow-up — likely more queued.
+      uint32_t interval = burst ? 10u : base_interval_s;
+      s.next_checkin_at_s = now_s + interval;
+      return StateUpdateResult::CHANGED;
+    }, "mship.tick-end");
+
+    // refresh state-machine (Idle→LastOk/LastFail) for status colour.
+    refreshRuntimeState();
+    if (_feature) _feature->broadcastWs("mship.tick");
+
+    // Block until the next scheduled check-in. Re-check every 5
+    // seconds so an early wake (operator toggling enabled, or
+    // Phase 2.3 burst signal) lands quickly.
+    while (true) {
+      vTaskDelay(pdMS_TO_TICKS(5000));
+      uint32_t cur_s = (uint32_t)(millis() / 1000);
+      if (cur_s >= _state.next_checkin_at_s) break;
+      if (!_state.enabled) break;   // operator paused — recheck gates
+    }
+  }
+}
+
+bool MothershipService::performOneCheckin() {
+  if (!_tls || !_cert) return false;
+  if (_state.checkin_url.length() == 0) {
+    Serial.println("[mship] checkin_url empty — skip");
+    return false;
+  }
+
+  WiFiClientSecure client;
+  // Bind CA bundle + device cert+key — full mTLS handshake. Server
+  // verifies our cert against ITS allow-list; we verify server's
+  // cert against the CA bundle from enrollment.
+  _tls->attachToClient(client);
+  client.setHandshakeTimeout(15);
+  client.setTimeout(15000);
+
+  HTTPClient http;
+  if (!http.begin(client, _state.checkin_url)) {
+    Serial.println("[mship] http.begin failed");
+    return false;
+  }
+  http.setTimeout(15000);
+  http.addHeader("Content-Type", "application/json");
+
+  // Body: {deviceId, fwVer, hwVer, uptimeSec, freeHeap}
+  // Server uses deviceId (subject CN from cert) for routing; the
+  // mTLS handshake guarantees the device IS that CN, server doesn't
+  // need to trust the JSON-side claim.
+  DynamicJsonDocument req(1024);
+  req["deviceId"]  = _cert->subjectCN();
+  req["fwVer"]     = "v0.1.6-pre";   // TODO: thread from App::deviceVersion
+  req["hwVer"]     = ESP.getChipModel();
+  req["uptimeSec"] = (uint32_t)(millis() / 1000);
+  req["freeHeap"]  = ESP.getFreeHeap();
+  String body;
+  serializeJson(req, body);
+
+  Serial.printf("[mship] POST %s, body=%u B\n",
+                _state.checkin_url.c_str(),
+                (unsigned)body.length());
+
+  int code = http.POST(body);
+  Serial.printf("[mship] HTTP code=%d\n", code);
+
+  if (code < 200 || code >= 300) {
+    String err = http.getString();
+    Serial.printf("[mship] server error: %s\n", err.c_str());
+    http.end();
+    return false;
+  }
+
+  String respBody = http.getString();
+  http.end();
+  Serial.printf("[mship] response %u B\n", (unsigned)respBody.length());
+
+  // Response: {"actions": [...], "nextCheckInSec": N}
+  // 16 KB doc — actions can carry firmware URLs / WireGuard configs.
+  DynamicJsonDocument resp(16384);
+  DeserializationError jerr = deserializeJson(resp, respBody);
+  if (jerr) {
+    Serial.printf("[mship] JSON parse: %s\n", jerr.c_str());
+    return false;
+  }
+
+  // Phase 2.3 — dispatch actions; return value ignored at this
+  // layer for now (Phase 2.4 will use `burst` flag for adaptive
+  // cadence). The dispatcher logs each action's outcome.
+  if (resp["actions"].is<JsonArray>()) {
+    dispatchActions(resp["actions"].as<JsonArrayConst>());
+  }
+
+  return true;
+}
+
+// ===== Phase 2.3 — Action dispatcher =====
+
+bool MothershipService::dispatchActions(JsonArrayConst actions) {
+  bool any = false;
+  for (JsonVariantConst v : actions) {
+    if (!v.is<JsonObjectConst>()) continue;
+    JsonObjectConst a = v.as<JsonObjectConst>();
+    String type = a["type"].as<String>();
+    JsonObjectConst params = a["params"].as<JsonObjectConst>();
+    String result;
+
+    if (type == "update")          result = actionUpdate(params);
+    else if (type == "renewCert")   result = actionRenewCert(params);
+    else if (type == "openTunnel")  result = actionOpenTunnel(params);
+    else if (type == "setConfig")   result = actionSetConfig(params);
+    else if (type == "reboot")      result = actionReboot(params);
+    else if (type == "log")         result = actionLog(params);
+    else                             result = "unknown action type";
+
+    Serial.printf("[mship.action] %s → %s\n", type.c_str(), result.c_str());
+    any = true;
+  }
+  return any;
+}
+
+String MothershipService::actionUpdate(JsonObjectConst params) {
+  // Phase 2.5 implements an INDEPENDENT mTLS-fetched OTA path here —
+  // mothership-driven updates flow through TLSContextService and
+  // bypass AutoUpdateService entirely. Rationale: AutoUpdate is the
+  // back-door (plain HTTP polling against a hard-coded URL) that
+  // MUST keep working even when mothership is unreachable / cert
+  // expired / server is rolled back. Two parallel update paths,
+  // each owns its own crypto + transport + signature checks.
+  // For now log + acknowledge so end-to-end test can verify the
+  // dispatcher path works.
+  String url = params["url"].as<String>();
+  if (url.length() == 0) return "missing url";
+  Serial.printf("[mship.action.update] would download %s\n", url.c_str());
+  return "deferred to phase 2.5";
+}
+
+String MothershipService::actionRenewCert(JsonObjectConst params) {
+  // Phase 4 wires this into CertManagerService::rotate(). For now
+  // ack so the dispatcher logs work end-to-end.
+  (void)params;
+  return "deferred to phase 4";
+}
+
+String MothershipService::actionOpenTunnel(JsonObjectConst params) {
+  // Phase 3 wires this into WireGuardModule. For now ack.
+  (void)params;
+  return "deferred to phase 3";
+}
+
+String MothershipService::actionSetConfig(JsonObjectConst params) {
+  // Generic per-key config push. Useful for diagnostic in the field
+  // — operator can flip a debug flag without rebuilding firmware.
+  // Phase 2.4 wires it into a generic config-write path; for now
+  // log the requested key/value and skip apply.
+  String key = params["key"].as<String>();
+  String val = params["value"].as<String>();
+  Serial.printf("[mship.action.setConfig] %s = %s (skipped)\n",
+                key.c_str(), val.c_str());
+  return "ack-only";
+}
+
+String MothershipService::actionReboot(JsonObjectConst params) {
+  // Schedule a deferred reboot so we can return the response first.
+  // 2-second delay gives the HTTP client time to flush.
+  (void)params;
+  Serial.println("[mship.action.reboot] in 2s...");
+  // Schedule via FreeRTOS so we don't block this task.
+  xTaskCreate([](void*) {
+    vTaskDelay(pdMS_TO_TICKS(2000));
+    ESP.restart();
+  }, "mship.reboot", 2048, nullptr, 1, nullptr);
+  return "scheduled in 2s";
+}
+
+String MothershipService::actionLog(JsonObjectConst params) {
+  // Echo a log line to Serial. Useful for "is this device alive?"
+  // probes from server-side admin without needing remote shell.
+  String level = params["level"].as<String>();
+  String msg   = params["msg"].as<String>();
+  Serial.printf("[mship.log][%s] %s\n",
+                level.length() ? level.c_str() : "info",
+                msg.c_str());
+  return "logged";
 }
 
 int32_t MothershipService::lastCheckInAgoSec() const {

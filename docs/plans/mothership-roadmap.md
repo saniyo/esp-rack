@@ -182,13 +182,17 @@ long-poll). Default інтервал з `MOTHERSHIP_INTERVAL_MIN` (5 хв). Як
   - `reboot` → ESP.restart()
   - `log` → `{level, msg}` → пише в WS-діагностику
 
-**Existing AutoUpdate refactor:**
-- Видалити з `AutoUpdateService` polling loop (line 174-202).
-- Залишити `performUpdate(url)` як public API.
-- `AutoUpdateModule` залишається як OTA executor; Mothership delegate-ить
-  оновлення через `app->autoUpdate()->performUpdate()`.
-- HTTP→HTTPS — `WiFiClient` (line 220) → `WiFiClientSecure` через
-  `app->tls()->attachToClient(...)`.
+**Existing AutoUpdate — БЕЗ ЗМІН (rationale: back-door fallback):**
+- AutoUpdate **продовжує** своє окреме polling до hard-coded URL по
+  plain HTTP, як і раніше.
+- Це навмисно: AutoUpdate — back-door на випадок коли мазершіп
+  unreachable (server впав / cert expired / network split). Дві
+  ПАРАЛЕЛЬНІ незалежні дороги до OTA, кожна зі своїми crypto +
+  transport + signature checks.
+- Mothership.actionUpdate (Phase 2.5) робить OWN mTLS-fetched OTA
+  через TLSContextService, **не делегує** до AutoUpdate. Перемога
+  цього варіанту: ні AutoUpdate, ні Mothership ніколи не залежать
+  від функціонального стану одне одного.
 
 **UI:**
 - New tab "Mothership" — Status (last check-in, next check-in,
