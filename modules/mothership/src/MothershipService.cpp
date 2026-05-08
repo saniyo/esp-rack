@@ -302,8 +302,8 @@ void MothershipService::runCheckinLoop() {
       return StateUpdateResult::CHANGED;
     }, "mship.tick-start");
 
-    bool ok = performOneCheckin();
-    bool burst = false;  // Phase 2.3 sets this from dispatchActions
+    bool burst = false;
+    bool ok = performOneCheckin(burst);
 
     update([ok, burst, now_s, base_interval_s](MothershipSettings& s) {
       if (ok) {
@@ -339,7 +339,8 @@ void MothershipService::runCheckinLoop() {
   }
 }
 
-bool MothershipService::performOneCheckin() {
+bool MothershipService::performOneCheckin(bool& outBurst) {
+  outBurst = false;
   Serial.printf("[mship.do] enter — tls=%p cert=%p url-len=%u\n",
                 (void*)_tls, (void*)_cert,
                 (unsigned)_state.checkin_url.length());
@@ -410,11 +411,11 @@ bool MothershipService::performOneCheckin() {
     return false;
   }
 
-  // Phase 2.3 — dispatch actions; return value ignored at this
-  // layer for now (Phase 2.4 will use `burst` flag for adaptive
-  // cadence). The dispatcher logs each action's outcome.
+  // Phase 2.3 — dispatch actions; outBurst signals to caller that
+  // at least one action was dispatched, triggering 10s burst
+  // cadence on the next tick (likely more actions queued).
   if (resp["actions"].is<JsonArray>()) {
-    dispatchActions(resp["actions"].as<JsonArrayConst>());
+    outBurst = dispatchActions(resp["actions"].as<JsonArrayConst>());
   }
 
   return true;

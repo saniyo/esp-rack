@@ -110,7 +110,10 @@ class MothershipService : public StatefulService<MothershipSettings>,
   // Single check-in iteration: build request → POST → parse →
   // dispatch actions → return success bool. Caller updates
   // success/fail counters + next-checkin timestamp + state.
-  bool           performOneCheckin();
+  // outBurst is set true when at least one action was dispatched —
+  // signals the adaptive cadence to schedule next tick at 10s
+  // instead of the base interval (likely more queued).
+  bool           performOneCheckin(bool& outBurst);
 
   // ── Phase 2.3 action dispatcher ──
   //
