@@ -21,10 +21,10 @@ StateUpdateResult MothershipSettings::update(JsonObject& root,
 }
 
 // ===== Form schema =====
-// Phase 2.0 skeleton — single Status tab placeholder. Phase 2.1
-// expands with Settings tab (URL / interval / enabled toggle) +
-// Phase 2.4 adds command log table.
+// Phase 2.1: Status (RO live readouts) + Settings (RW URL / interval /
+// enabled toggle). Phase 2.4 adds a command-log table to Status.
 void MothershipSettings::buildForm(MothershipSettings& s, JsonObject& root) {
+  // ── STATUS ───────────────────────────────────────────────────────
   JsonArray st = FormBuilder::createForm(root, "status",
                                           "Mothership client status");
 
@@ -34,6 +34,27 @@ void MothershipSettings::buildForm(MothershipSettings& s, JsonObject& root) {
                                      "Idle:info,LastFail:error,"
                                      "NeedsCert:warning,Disabled:default,"
                                      "default:info"));
+
+  // Derived "X seconds ago" / "next in X seconds" — computed at form-
+  // render time from last_checkin_at_s + millis()/interval_min. WS
+  // pushes refresh these without a full REST GET.
+  uint32_t now_s = (uint32_t)(millis() / 1000);
+  int32_t  last_ago = (s.last_checkin_at_s == 0)
+                        ? -1
+                        : (int32_t)(now_s - s.last_checkin_at_s);
+  int32_t  next_in  = (s.next_checkin_at_s == 0 || !s.enabled)
+                        ? -1
+                        : (s.next_checkin_at_s > now_s
+                            ? (int32_t)(s.next_checkin_at_s - now_s)
+                            : 0);
+  FormBuilder::addNumberField(st, "last_checkin_ago", AF::R,
+                              (double)last_ago, format("0"),
+                              label("Last check-in (s ago)"),
+                              icon("Schedule"), unit("s"));
+  FormBuilder::addNumberField(st, "next_checkin_in",  AF::R,
+                              (double)next_in, format("0"),
+                              label("Next check-in"),
+                              icon("Update"), unit("s"));
   FormBuilder::addNumberField(st, "success_count", AF::R,
                               (double)s.success_count, format("0"),
                               label("Successful check-ins"),
@@ -42,11 +63,33 @@ void MothershipSettings::buildForm(MothershipSettings& s, JsonObject& root) {
                               (double)s.fail_count, format("0"),
                               label("Failed check-ins"),
                               icon("ErrorOutline"));
-  FormBuilder::addMessageField(st, "m_status_help",
-      "Phase 2.0 skeleton — settings UI (Phase 2.1) + actual HTTPS "
-      "check-in (Phase 2.2) + command dispatcher (Phase 2.3) arrive "
-      "in subsequent commits. Currently the module is wired but does "
-      "no network work.",
+  FormBuilder::addMessageField(st, "m_status_phase",
+      "Phase 2.1 — settings UI is live. Phase 2.2 will start actual "
+      "HTTPS check-ins; until then the counters stay at zero.",
+      level("info"), icon("Info"));
+
+  // ── SETTINGS ─────────────────────────────────────────────────────
+  JsonArray set = FormBuilder::createForm(root, "settings",
+                                           "Mothership client config");
+
+  FormBuilder::addSwitchField(set, "enabled", AF::RW, s.enabled,
+                              label("Enabled"), icon("PowerSettingsNew"));
+  FormBuilder::addTextField(set, "checkin_url", AF::RW,
+                            s.checkin_url.c_str(),
+                            label("Check-in URL"),
+                            placeholder(FACTORY_MOTHERSHIP_CHECKIN_URL),
+                            icon("Cloud"));
+  FormBuilder::addNumberField(set, "interval_min", AF::RW,
+                              (double)s.interval_min,
+                              minVal(1), maxVal(60), format("0"),
+                              label("Check-in interval"),
+                              icon("Timer"), unit("min"));
+  FormBuilder::addMessageField(set, "m_settings_help",
+      "Adaptive polling — when a check-in returns one or more "
+      "actions the device drops to a 10-second burst cadence to "
+      "drain the queue, then returns to this base interval. "
+      "Default 5 min keeps load light on the mothership; tune to "
+      "your fleet size.",
       level("info"), icon("Info"));
 }
 
@@ -55,6 +98,18 @@ void MothershipSettings::staRead(MothershipSettings& s, JsonObject& root) {
   root["status"]        = s.status_label;
   root["success_count"] = s.success_count;
   root["fail_count"]    = s.fail_count;
+
+  // Live countdown — recomputed every WS tick so the operator sees a
+  // ticking next-checkin timer without refreshing the tab.
+  uint32_t now_s = (uint32_t)(millis() / 1000);
+  root["last_checkin_ago"] = (s.last_checkin_at_s == 0)
+                                ? -1
+                                : (int32_t)(now_s - s.last_checkin_at_s);
+  root["next_checkin_in"]  = (s.next_checkin_at_s == 0 || !s.enabled)
+                                ? -1
+                                : (s.next_checkin_at_s > now_s
+                                    ? (int32_t)(s.next_checkin_at_s - now_s)
+                                    : 0);
 }
 
 StateUpdateResult MothershipSettings::staUpd(JsonObject& root,
@@ -110,6 +165,15 @@ void MothershipService::registerManifest(WebManager* web) {
   statusTab.postable = false;
   statusTab.live     = true;
   spec.tabs.push_back(statusTab);
+
+  WebTabSpec settingsTab;
+  settingsTab.key      = "settings";
+  settingsTab.title    = "Settings";
+  settingsTab.restPath = MOTHERSHIP_FORM_PATH;
+  settingsTab.postable = true;
+  settingsTab.auth     = WebAuthLevel::Admin;
+  settingsTab.order    = 20;
+  spec.tabs.push_back(settingsTab);
 
   _feature = web->registerFeature<MothershipSettings>(
       std::move(spec), this,
