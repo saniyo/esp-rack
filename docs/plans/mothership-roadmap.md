@@ -144,6 +144,26 @@ tokens. Private key те саме (~250 B PEM EC PRIVATE KEY block).
 
 ---
 
+### Phase 2 — Mothership Client ✅ COMPLETE (2026-05-09)
+
+End-to-end verified on ESP32-C6 against the Python mock mothership:
+- mTLS check-in succeeds with HTTP 200 + adaptive polling cadence
+  (5min default + 10s burst after actions)
+- All six action handlers wired: log + reboot fully functional;
+  update / renewCert / openTunnel / setConfig staged for later
+  phases
+- FIFO command queue drain: 3 log actions in one checkin → all
+  three dispatched sequentially, then 10s burst cadence kicks in
+- Reboot action recovery: device persists cert+CA through reboot,
+  re-establishes mTLS check-ins on next boot with no operator
+  intervention
+
+Found-and-fixed during testing: 7 commits worth of bugs surfaced
+incrementally — TLSContextService never instantiated in App ctor,
+mock-server CA non-persistent across restarts, server cert SAN
+hostname-only (missing LAN IP), mothership state machine
+clobbering tick-set state, burst cadence flag never wired.
+
 ### Phase 2 — Mothership Client (HTTPS poll + command channel)
 
 **Goal:** Один централізований модуль робить періодичний check-in з
