@@ -43,6 +43,16 @@ import sys
 import tempfile
 from typing import Tuple
 
+# Windows console defaults to cp1252 which can't encode the em-dashes
+# / arrows / other non-ASCII chars sprinkled across this file's
+# print() calls. Force UTF-8 with replace-on-unencodable so the
+# server doesn't silently 500 mid-handler when its log line contains
+# a non-ASCII byte.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 try:
     from cryptography import x509
     from cryptography.hazmat.primitives import hashes, serialization
@@ -52,6 +62,13 @@ except ImportError:
     print("ERROR: cryptography lib missing — run: pip install cryptography",
           file=sys.stderr)
     sys.exit(1)
+
+
+# ----- Per-device action queue (Phase 2 check-in command channel) -----
+# Operator stages actions via POST /api/v1/admin/queue/<deviceId>; the
+# next /api/v1/checkin from that device drains the queue (FIFO) into
+# its response. In-memory only — restart wipes pending actions.
+COMMAND_QUEUE: dict = {}
 
 
 # ----- root CA generation (in-memory, fresh each run) -----
@@ -168,10 +185,32 @@ class EnrollHandler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_POST(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
-        if self.path != "/api/v1/enroll":
-            self._send_json(404, {"err": "not found"})
-            return
+        try:
+            if self.path == "/api/v1/enroll":
+                self._handle_enroll()
+            elif self.path == "/api/v1/checkin":
+                self._handle_checkin()
+            elif self.path.startswith("/api/v1/admin/queue/"):
+                # /api/v1/admin/queue/<deviceId> — operator-side endpoint
+                # for staging actions to be delivered on the device's next
+                # check-in. Body is the action payload as-is. NOT secured
+                # in this mock — production server has admin auth.
+                self._handle_admin_queue()
+            else:
+                self._send_json(404, {"err": "not found"})
+        except Exception as e:
+            # Catch-all so a bug in the handler doesn't drop the TLS
+            # connection mid-flight (schannel:close_notify error on the
+            # client side); always send something HTTP-shaped back.
+            import traceback
+            sys.stderr.write(f"[mock] handler exception: {e}\n")
+            traceback.print_exc(file=sys.stderr)
+            try:
+                self._send_json(500, {"err": str(e)})
+            except Exception:
+                pass
 
+    def _handle_enroll(self) -> None:
         # Bearer token check — must match what device pasted in UI.
         auth = self.headers.get("Authorization", "")
         if not auth.startswith("Bearer "):
@@ -218,6 +257,76 @@ class EnrollHandler(http.server.BaseHTTPRequestHandler):
             "cert_pem":       cert_pem,
             "ca_bundle_pem":  self.CA_CERT_PEM,
             "recovery_token": recovery_token,
+        })
+
+    def _handle_checkin(self) -> None:
+        # Phase 2.2 — mTLS check-in. Production server validates the
+        # client cert against its allow-list, here we accept any
+        # client cert presented (Python http.server doesn't easily
+        # surface peer cert to handlers, so this mock is "anyone who
+        # got past TLS handshake passes"). The deviceId in the
+        # request body identifies which device's command queue to
+        # drain.
+        length = int(self.headers.get("Content-Length", "0"))
+        if length <= 0 or length > 16384:
+            self._send_json(400, {"err": "bad content-length"})
+            return
+        raw = self.rfile.read(length)
+        try:
+            req = json.loads(raw.decode("utf-8"))
+        except json.JSONDecodeError as e:
+            self._send_json(400, {"err": f"json parse: {e}"})
+            return
+
+        device_id  = req.get("deviceId", "")
+        uptime_sec = req.get("uptimeSec", 0)
+        free_heap  = req.get("freeHeap", 0)
+        fw         = req.get("fwVer", "?")
+        hw         = req.get("hwVer", "?")
+
+        # Drain the per-device action queue (FIFO).
+        actions = COMMAND_QUEUE.pop(device_id, [])
+        if actions:
+            print(f"[checkin] {device_id} fw={fw} up={uptime_sec}s "
+                  f"heap={free_heap} -> DELIVERING {len(actions)} actions: "
+                  + ", ".join(a.get("type", "?") for a in actions))
+        else:
+            print(f"[checkin] {device_id} fw={fw} up={uptime_sec}s "
+                  f"heap={free_heap} -> no pending actions")
+
+        self._send_json(200, {
+            "actions":         actions,
+            "nextCheckInSec":  300,  # device ignores this for now
+        })
+
+    def _handle_admin_queue(self) -> None:
+        # /api/v1/admin/queue/<deviceId>  — POST a single action.
+        # Stages it for delivery on the device's next checkin.
+        device_id = self.path[len("/api/v1/admin/queue/"):]
+        if not device_id:
+            self._send_json(400, {"err": "missing deviceId in path"})
+            return
+
+        length = int(self.headers.get("Content-Length", "0"))
+        if length <= 0 or length > 16384:
+            self._send_json(400, {"err": "bad content-length"})
+            return
+        raw = self.rfile.read(length)
+        try:
+            action = json.loads(raw.decode("utf-8"))
+        except json.JSONDecodeError as e:
+            self._send_json(400, {"err": f"json parse: {e}"})
+            return
+
+        if "type" not in action:
+            self._send_json(400, {"err": "action missing 'type'"})
+            return
+
+        COMMAND_QUEUE.setdefault(device_id, []).append(action)
+        print(f"[admin] queued action {action.get('type')} for {device_id}")
+        self._send_json(202, {
+            "ok":     True,
+            "queued": len(COMMAND_QUEUE[device_id]),
         })
 
     def log_message(self, format: str, *args) -> None:  # noqa: A002
@@ -282,13 +391,26 @@ def main() -> int:
         ctx.minimum_version = ssl.TLSVersion.TLSv1_2
         server.socket = ctx.wrap_socket(server.socket, server_side=True)
 
-        print(f"\nListening on https://{args.host}:{args.port}/api/v1/enroll")
-        print(f"Bootstrap token (paste into device PKI Enrollment tab):")
+        print(f"\nListening on https://{args.host}:{args.port}/")
+        print(f"Endpoints:")
+        print(f"  POST /api/v1/enroll                  bootstrap-token CSR signing")
+        print(f"  POST /api/v1/checkin                 mTLS device check-in")
+        print(f"  POST /api/v1/admin/queue/<deviceId>  stage action for next checkin")
+        print(f"\nBootstrap token (paste into device PKI Enrollment tab):")
         print(f"  {args.token}")
-        print(f"\nDevice's `Enroll URL` should be:")
-        print(f"  https://<your-LAN-ip>:{args.port}/api/v1/enroll")
-        print(f"  (or https://{args.cn}:{args.port}/api/v1/enroll if "
-              f"the device can resolve mDNS)\n")
+        print(f"\nOperator action examples:")
+        print(f"  # Schedule reboot on the next check-in:")
+        print(f"  curl -k -X POST -H 'Content-Type: application/json' \\")
+        print(f"    -d '{{\"type\":\"reboot\"}}' \\")
+        print(f"    https://{args.cn}:{args.port}/api/v1/admin/queue/device-<MAC>")
+        print(f"")
+        print(f"  # Send a log line to device's serial console:")
+        print(f"  curl -k -X POST -H 'Content-Type: application/json' \\")
+        print(f"    -d '{{\"type\":\"log\",\"params\":{{\"level\":\"info\",\"msg\":\"hi from server\"}}}}' \\")
+        print(f"    https://{args.cn}:{args.port}/api/v1/admin/queue/device-<MAC>")
+        print(f"\nDevice config:")
+        print(f"  Enroll URL  : https://<LAN-ip>:{args.port}/api/v1/enroll")
+        print(f"  Checkin URL : https://<LAN-ip>:{args.port}/api/v1/checkin\n")
 
         try:
             server.serve_forever()
