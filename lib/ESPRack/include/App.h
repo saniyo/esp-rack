@@ -36,6 +36,8 @@
 class AsyncWebServer;
 class ITelegramProvider;   // forward — populated by TelegramModule
 class IMqttProvider;       // forward — populated by MqttModule
+class ITLSProvider;        // forward — populated by core App ctor (Phase 1.1+)
+class ICertProvider;       // forward — populated by CertManagerModule
 
 namespace ESPRack {
 
@@ -89,6 +91,22 @@ class App {
   IMqttProvider*     mqtt()                  { return mqtt_; }
   void               setMqtt(IMqttProvider* p) { mqtt_ = p; }
 
+  // ITLSProvider — framework-side TLS context primitive. Owned by
+  // the App itself (singleton), instantiated in ctor (Phase 1.1+).
+  // Consumer modules pull it for their HTTPS clients, e.g.
+  // `app->tls()->attachToClient(client)`. Set via setTls() so the
+  // App ctor can defer TLSContextService construction past static
+  // init order issues.
+  ITLSProvider*      tls()                   { return tls_; }
+  void               setTls(ITLSProvider* p) { tls_ = p; }
+
+  // ICertProvider late-binding — same pattern as mqtt(). Set by
+  // CertManagerModule::onInstall when FT_CERT_MANAGER=1. Consumer
+  // services check `app->cert()->hasValidCert()` before assuming
+  // mTLS is available.
+  ICertProvider*     cert()                  { return cert_; }
+  void               setCert(ICertProvider* p) { cert_ = p; }
+
   // Read-only device identity — useful for AutoUpdateModule etc. that
   // pass these to their underlying service ctor. Set once at App
   // construction.
@@ -113,6 +131,8 @@ class App {
   PresenceService*    presence_ {nullptr};   // populated by PresenceModule
   ITelegramProvider*  telegram_ {nullptr};   // populated by TelegramModule
   IMqttProvider*      mqtt_     {nullptr};   // populated by MqttModule
+  ITLSProvider*       tls_      {nullptr};   // populated by App ctor (Phase 1.1+)
+  ICertProvider*      cert_     {nullptr};   // populated by CertManagerModule
 
   std::vector<std::unique_ptr<Module>> modules_;
   bool             begun_ {false};

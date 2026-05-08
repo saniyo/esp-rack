@@ -75,4 +75,14 @@
 #define FT_SECRETS_VAULT 1
 #endif
 
+// Phase 1 of the mothership roadmap — device PKI lifecycle (X.509
+// cert+key in encrypted storage, ECDSA-P256 keypair gen, CSR
+// enrollment, rotation, gray-zone recovery). Default ON, like every
+// other framework module. Consumer trims with `-D FT_CERT_MANAGER=0`
+// to drop the PKI tab and skip the module's overhead.
+// See `docs/plans/mothership-roadmap.md`.
+#ifndef FT_CERT_MANAGER
+#define FT_CERT_MANAGER 1
+#endif
+
 #endif

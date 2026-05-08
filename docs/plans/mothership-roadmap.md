@@ -50,7 +50,17 @@ Audit findings з phase 1 нижче в **Critical files**.
 
 ## Roadmap
 
-### Phase 1 — PKI Foundation (must-do first, blocks everything else)
+### Phase 1 — PKI Foundation ✅ COMPLETE (2026-05-08)
+
+End-to-end verified on ESP32-C6: bootstrap-token enrollment via
+`POST /api/v1/enroll` against the Python mock mothership succeeds,
+all four sensitive fields (cert / key / ca_bundle / recovery_token)
+land ENC:-encrypted on disk through SecretsVault. Found-and-fixed
+during testing: 4 KB → 8 KB ConfigDelegate buffer (encryption walk
+expanded PEMs past pool capacity, dropped last assignment to JSON
+null), readonly secret-form-POST guard against form re-saves
+clobbering the loaded PEMs. Ready to layer Phase 2 mothership client
+on top.
 
 **Goal:** Пристрій має унікальний keypair + X.509 cert у зашифрованому
 storage; будь-який модуль може отримати готовий `mbedtls_ssl_context*`
