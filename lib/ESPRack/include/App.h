@@ -38,6 +38,7 @@ class ITelegramProvider;   // forward — populated by TelegramModule
 class IMqttProvider;       // forward — populated by MqttModule
 class ITLSProvider;        // forward — populated by core App ctor (Phase 1.1+)
 class ICertProvider;       // forward — populated by CertManagerModule
+class IMothershipProvider; // forward — populated by MothershipModule
 
 namespace ESPRack {
 
@@ -107,6 +108,12 @@ class App {
   ICertProvider*     cert()                  { return cert_; }
   void               setCert(ICertProvider* p) { cert_ = p; }
 
+  // IMothershipProvider late-binding — populated by MothershipModule.
+  // Phase 3 (WireGuard) reads check-in state to decide when to bring
+  // up tunnels; status panels read for live UI.
+  IMothershipProvider* mothership()                  { return mothership_; }
+  void                 setMothership(IMothershipProvider* p) { mothership_ = p; }
+
   // Read-only device identity — useful for AutoUpdateModule etc. that
   // pass these to their underlying service ctor. Set once at App
   // construction.
@@ -133,6 +140,7 @@ class App {
   IMqttProvider*      mqtt_     {nullptr};   // populated by MqttModule
   ITLSProvider*       tls_      {nullptr};   // populated by App ctor (Phase 1.1+)
   ICertProvider*      cert_     {nullptr};   // populated by CertManagerModule
+  IMothershipProvider* mothership_ {nullptr}; // populated by MothershipModule
 
   std::vector<std::unique_ptr<Module>> modules_;
   bool             begun_ {false};

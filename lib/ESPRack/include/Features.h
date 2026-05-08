@@ -85,4 +85,13 @@
 #define FT_CERT_MANAGER 1
 #endif
 
+// Phase 2 of the mothership roadmap — periodic HTTPS check-in to a
+// fleet management server with command dispatch. Requires
+// FT_CERT_MANAGER (mTLS handshake needs a device cert) but the
+// runtime is graceful: if the cert isn't enrolled yet, the
+// mothership tab shows NeedsCert and skips check-in attempts.
+#ifndef FT_MOTHERSHIP
+#define FT_MOTHERSHIP 1
+#endif
+
 #endif
