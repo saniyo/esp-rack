@@ -883,6 +883,229 @@ bool CertManagerService::postCsrToMothership(const String& csrPem,
   return true;
 }
 
+// ===== Phase 4a — Proactive cert rotation =====
+//
+// Mothership scheduler (cron, daily) finds devices with
+// `not_after - now < 30d` and queues a `renewCert` action in the
+// device's command channel. Device's MothershipService dispatcher
+// invokes ICertProvider::rotate(renewUrl) on next check-in.
+// rotate() spawns a FreeRTOS task to do the work off the check-in
+// thread (same pattern as enrollment).
+//
+// Atomic verify-then-swap: new keypair + CSR are generated, POSTed
+// via mTLS using the CURRENT cert (mutual auth proves identity to
+// server, no bootstrap token needed). On 2xx response the new cert
+// is parsed for metadata and pushed into TLSContextService —
+// updateClientCert keeps the previous PEMs alive for one generation
+// so any in-flight handshakes survive. State + disk get updated
+// only after TLS context accepts the new material. Any failure on
+// the path leaves cert.json untouched and current cert keeps
+// working until the next rotation attempt.
+
+namespace {
+struct RotateArg {
+  CertManagerService* svc;
+  String              renewUrl;
+};
+}  // namespace
+
+bool CertManagerService::rotate(const String& renewUrl) {
+  if (_rotateTask != nullptr) {
+    Serial.println("[cert.rotate] already running");
+    return false;
+  }
+  if (!hasValidCert()) {
+    Serial.println("[cert.rotate] no current cert — cannot rotate "
+                    "via mTLS; full re-enroll required");
+    return false;
+  }
+  if (renewUrl.length() == 0) {
+    Serial.println("[cert.rotate] empty renewUrl");
+    return false;
+  }
+
+  auto* arg = new RotateArg{this, renewUrl};
+  BaseType_t rc = xTaskCreatePinnedToCore(
+      &CertManagerService::rotateTaskTramp,
+      "certRotate",
+      8192,
+      arg,
+      1,
+      &_rotateTask,
+      tskNO_AFFINITY);
+
+  if (rc != pdPASS) {
+    Serial.printf("[cert.rotate] xTaskCreate failed: %d\n", (int)rc);
+    delete arg;
+    _rotateTask = nullptr;
+    return false;
+  }
+
+  // Visible "Renewing" status for UI — mTLS still works under the
+  // OLD cert during this period, so consumers don't need to gate
+  // their requests; this state is purely informational.
+  update([](CertManagerSettings& s) {
+    s.runtime_state = ICertProvider::State::Renewing;
+    s.status_label  = "Renewing…";
+    return StateUpdateResult::CHANGED;
+  }, "cert.rotate-kick");
+
+  return true;
+}
+
+void CertManagerService::rotateTaskTramp(void* arg) {
+  auto* a = static_cast<RotateArg*>(arg);
+  if (a && a->svc) a->svc->runRotation(a->renewUrl);
+  if (a) delete a;
+  vTaskDelete(nullptr);
+}
+
+void CertManagerService::runRotation(const String& renewUrl) {
+  Serial.printf("[cert.rotate] task start, url=%s\n", renewUrl.c_str());
+
+  String newKeyPem;
+  if (!generateEcdsaKeyPair(newKeyPem)) {
+    Serial.println("[cert.rotate] FAIL: keypair gen");
+    update([](CertManagerSettings& s) {
+      s.runtime_state = ICertProvider::State::Ready;  // back to Ready, old cert intact
+      s.status_label  = "Ready";
+      return StateUpdateResult::CHANGED;
+    }, "cert.rotate-fail");
+    _rotateTask = nullptr;
+    return;
+  }
+
+  String newCsrPem;
+  if (!buildCsr(newKeyPem, newCsrPem)) {
+    Serial.println("[cert.rotate] FAIL: CSR build");
+    update([](CertManagerSettings& s) {
+      s.runtime_state = ICertProvider::State::Ready;
+      s.status_label  = "Ready";
+      return StateUpdateResult::CHANGED;
+    }, "cert.rotate-fail");
+    _rotateTask = nullptr;
+    return;
+  }
+
+  String newCertPem, newCaBundlePem;
+  if (!postCsrToRenew(newCsrPem, renewUrl, newCertPem, newCaBundlePem)) {
+    Serial.println("[cert.rotate] FAIL: server unreachable / rejected");
+    update([](CertManagerSettings& s) {
+      s.runtime_state = ICertProvider::State::Ready;
+      s.status_label  = "Ready (last rotate failed)";
+      return StateUpdateResult::CHANGED;
+    }, "cert.rotate-fail");
+    _rotateTask = nullptr;
+    return;
+  }
+
+  String newSerialHex;
+  uint32_t newNotAfterTs = 0;
+  if (!parseCertMetadata(newCertPem, newSerialHex, newNotAfterTs)) {
+    Serial.println("[cert.rotate] WARN: cert parse failed; "
+                    "proceeding with empty serial / notAfter");
+    newSerialHex = "";
+    newNotAfterTs = 0;
+  }
+
+  // Atomic swap: write new material to state (which propagates to
+  // disk via addUpdateHandler), then push into TLS context. Old
+  // PEM strings stay in TLSContextService's _prev / _prevPrev slots
+  // for one generation, protecting any in-flight outbound HTTPS.
+  // recovery_token is preserved (rotation-invariant; reissued only
+  // on full re-enroll).
+  update([&](CertManagerSettings& s) {
+    s.device_cert_pem = newCertPem;
+    s.device_key_pem  = newKeyPem;
+    s.ca_bundle_pem   = newCaBundlePem;
+    s.serial_hex      = newSerialHex;
+    s.not_after_ts    = newNotAfterTs;
+    s.runtime_state   = ICertProvider::State::Ready;
+    s.status_label    = "Ready";
+    return StateUpdateResult::CHANGED;
+  }, "cert.rotate-ok");
+
+  if (_tls) {
+    _tls->updateClientCert(newCertPem, newKeyPem);
+    _tls->loadCaChain(newCaBundlePem);
+  }
+
+  Serial.printf("[cert.rotate] done — new serial=%s, not_after=%u\n",
+                newSerialHex.c_str(), (unsigned)newNotAfterTs);
+  _rotateTask = nullptr;
+}
+
+bool CertManagerService::postCsrToRenew(const String& csrPem,
+                                          const String& renewUrl,
+                                          String& outCertPem,
+                                          String& outCaBundlePem) {
+  outCertPem = String();
+  outCaBundlePem = String();
+
+  if (!_tls) {
+    Serial.println("[cert.rotate] no TLS provider");
+    return false;
+  }
+
+  WiFiClientSecure client;
+  // mTLS this time — attach the EXISTING cert (not insecure, not
+  // bootstrap-token). Server validates client cert; if valid,
+  // signs the new CSR.
+  _tls->attachToClient(client);
+  client.setHandshakeTimeout(15);
+  client.setTimeout(20000);
+
+  HTTPClient http;
+  if (!http.begin(client, renewUrl)) {
+    Serial.println("[cert.rotate] http.begin failed");
+    return false;
+  }
+  http.setTimeout(20000);
+  http.addHeader("Content-Type", "application/json");
+
+  // Body: just deviceId + csr_pem; no token (mTLS auth already)
+  DynamicJsonDocument req(2048);
+  req["deviceId"] = deviceSubjectCN();
+  req["csr_pem"]  = csrPem;
+  String reqBody;
+  serializeJson(req, reqBody);
+
+  Serial.printf("[cert.rotate] POST %s, body=%u B\n",
+                renewUrl.c_str(), (unsigned)reqBody.length());
+
+  int code = http.POST(reqBody);
+  Serial.printf("[cert.rotate] HTTP code=%d\n", code);
+
+  if (code < 200 || code >= 300) {
+    String err = http.getString();
+    Serial.printf("[cert.rotate] server error: %s\n", err.c_str());
+    http.end();
+    return false;
+  }
+
+  String respBody = http.getString();
+  http.end();
+
+  DynamicJsonDocument resp(8192);
+  DeserializationError jerr = deserializeJson(resp, respBody);
+  if (jerr) {
+    Serial.printf("[cert.rotate] JSON parse: %s\n", jerr.c_str());
+    return false;
+  }
+
+  outCertPem     = resp["cert_pem"].as<String>();
+  outCaBundlePem = resp["ca_bundle_pem"].as<String>();
+
+  if (outCertPem.length() == 0 || outCaBundlePem.length() == 0) {
+    Serial.println("[cert.rotate] response missing cert / ca");
+    return false;
+  }
+  Serial.printf("[cert.rotate] parsed cert=%u ca=%u B\n",
+                (unsigned)outCertPem.length(),
+                (unsigned)outCaBundlePem.length());
+  return true;
+}
+
 bool CertManagerService::parseCertMetadata(const String& certPem,
                                             String& outSerialHex,
                                             uint32_t& outNotAfterTs) {

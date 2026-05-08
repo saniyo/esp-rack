@@ -284,6 +284,13 @@ class EnrollHandler(http.server.BaseHTTPRequestHandler):
                 self._handle_enroll()
             elif self.path == "/api/v1/checkin":
                 self._handle_checkin()
+            elif self.path == "/api/v1/renew":
+                # Phase 4a — cert rotation. Mock accepts any client
+                # cert that survived TLS handshake (Python http.server
+                # doesn't easily surface peer cert; production server
+                # validates client cert against allow-list before
+                # signing the new CSR).
+                self._handle_renew()
             elif self.path.startswith("/api/v1/admin/queue/"):
                 # /api/v1/admin/queue/<deviceId> — operator-side endpoint
                 # for staging actions to be delivered on the device's next
@@ -391,6 +398,47 @@ class EnrollHandler(http.server.BaseHTTPRequestHandler):
         self._send_json(200, {
             "actions":         actions,
             "nextCheckInSec":  300,  # device ignores this for now
+        })
+
+    def _handle_renew(self) -> None:
+        # Phase 4a — proactive cert rotation. Same flow as enroll
+        # except no bootstrap-token check (mTLS handshake is the
+        # auth — if Python's TLS layer accepted the client, treat
+        # the request as authenticated). Returns just cert + ca
+        # (no recovery_token — that's reissued only on full enroll).
+        length = int(self.headers.get("Content-Length", "0"))
+        if length <= 0 or length > 16384:
+            self._send_json(400, {"err": "bad content-length"})
+            return
+        raw = self.rfile.read(length)
+        try:
+            req = json.loads(raw.decode("utf-8"))
+        except json.JSONDecodeError as e:
+            self._send_json(400, {"err": f"json parse: {e}"})
+            return
+
+        device_id = req.get("deviceId", "")
+        csr_pem   = req.get("csr_pem", "")
+        if not csr_pem:
+            self._send_json(400, {"err": "missing csr_pem"})
+            return
+
+        try:
+            cert = sign_device_csr(csr_pem.encode("utf-8"),
+                                    self.CA_CERT_OBJ, self.CA_KEY_OBJ)
+        except Exception as e:
+            self._send_json(400, {"err": f"sign failed: {e}"})
+            return
+
+        cert_pem = cert.public_bytes(serialization.Encoding.PEM).decode("utf-8")
+
+        print(f"[renew] re-signed deviceId={device_id} "
+              f"new_serial={cert.serial_number:x} "
+              f"not_after={cert.not_valid_after_utc.isoformat()}")
+
+        self._send_json(200, {
+            "cert_pem":      cert_pem,
+            "ca_bundle_pem": self.CA_CERT_PEM,
         })
 
     def _handle_admin_queue(self) -> None:
@@ -504,6 +552,7 @@ def main() -> int:
         print(f"Endpoints:")
         print(f"  POST /api/v1/enroll                  bootstrap-token CSR signing")
         print(f"  POST /api/v1/checkin                 mTLS device check-in")
+        print(f"  POST /api/v1/renew                   mTLS cert rotation (Phase 4a)")
         print(f"  POST /api/v1/admin/queue/<deviceId>  stage action for next checkin")
         print(f"\nBootstrap token (paste into device PKI Enrollment tab):")
         print(f"  {args.token}")
@@ -516,6 +565,11 @@ def main() -> int:
         print(f"  # Send a log line to device's serial console:")
         print(f"  curl -k -X POST -H 'Content-Type: application/json' \\")
         print(f"    -d '{{\"type\":\"log\",\"params\":{{\"level\":\"info\",\"msg\":\"hi from server\"}}}}' \\")
+        print(f"    https://{args.cn}:{args.port}/api/v1/admin/queue/device-<MAC>")
+        print(f"")
+        print(f"  # Trigger cert rotation:")
+        print(f"  curl -k -X POST -H 'Content-Type: application/json' \\")
+        print(f"    -d '{{\"type\":\"renewCert\",\"params\":{{\"renewUrl\":\"https://{args.cn}:{args.port}/api/v1/renew\"}}}}' \\")
         print(f"    https://{args.cn}:{args.port}/api/v1/admin/queue/device-<MAC>")
         print(f"\nDevice config:")
         print(f"  Enroll URL  : https://<LAN-ip>:{args.port}/api/v1/enroll")

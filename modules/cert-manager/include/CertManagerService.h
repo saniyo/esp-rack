@@ -107,6 +107,7 @@ class CertManagerService : public StatefulService<CertManagerSettings>,
   int32_t daysUntilExpiry() const override;
   const char* subjectCN() const override { return _state.subject_cn.c_str(); }
   const char* serialHex() const override { return _state.serial_hex.c_str(); }
+  bool rotate(const String& renewUrl) override;
 
  private:
   ConfigDelegate<CertManagerSettings>      _cfg;
@@ -179,6 +180,27 @@ class CertManagerService : public StatefulService<CertManagerSettings>,
                           uint32_t& outNotAfterTs);
 
   TaskHandle_t _enrollTask{nullptr};
+
+  // ── Phase 4a — proactive rotation ──
+  //
+  // Same task pattern as enrollment but a separate handle so a
+  // rotate doesn't block / shadow an enrollment retry. Single in-
+  // flight rotate at a time; second rotate request while one is
+  // running is silently dropped (caller's `rotate()` returns false).
+  TaskHandle_t _rotateTask{nullptr};
+  static void  rotateTaskTramp(void* arg);
+  void         runRotation(const String& renewUrl);
+
+  // POST a new CSR through mTLS to `renewUrl` using the EXISTING
+  // device cert as client identity (no bootstrap token — server
+  // accepts the request because the mTLS handshake already proves
+  // we're the cert's holder). On success populates the same three
+  // outputs as enrollment minus recovery_token (which is rotation-
+  // invariant — server doesn't re-issue it).
+  bool postCsrToRenew(const String& csrPem,
+                       const String& renewUrl,
+                       String& outCertPem,
+                       String& outCaBundlePem);
 };
 
 #endif  // CertManagerService_h
