@@ -33,14 +33,15 @@
 #define CERT_MANAGER_FORM_PATH "/rest/certManager"
 #define CERT_MANAGER_WS_PATH   "/ws/certManager"
 
-// Build-time default for the mothership enroll endpoint. Operator
-// can override via the Settings tab at runtime; this is what the
-// device tries on factory-reset / first boot if no override is
-// stored. Mirrors how MQTT / AutoUpdate take their factory defaults
-// (see FACTORY_MQTT_HOST in modules/mqtt/include/MqttSettingsService.h).
-#ifndef FACTORY_MOTHERSHIP_ENROLL_URL
-#define FACTORY_MOTHERSHIP_ENROLL_URL "https://mothership.local:8443/api/v1/enroll"
-#endif
+// Legacy FACTORY_MOTHERSHIP_ENROLL_URL / FACTORY_MOTHERSHIP_RECOVER_URL
+// have been removed — cert-manager no longer carries its own URL
+// fields. Both enroll and recover URLs are derived at request time
+// via effectiveEnrollUrl() / effectiveRecoverUrl():
+//   * If operator set Settings tab's "PKI Base URL" → that prefix
+//     + /api/v1/enroll | /api/v1/recover
+//   * Otherwise → active Mothership profile's base URL + same paths
+// One Settings/Profiles edit on the Mothership tab repoints the
+// whole PKI relationship atomically.
 
 class WebManager;
 class ITLSProvider;
@@ -90,7 +91,8 @@ struct CertManagerSettings {
   //                       while keeping the regular Mothership host
   //                       for check-in / commands.
   // Endpoint paths are fixed per server contract (/api/v1/enroll,
-  // /api/v1/recover) and appended at request time.
+  // /api/v1/recover) and appended at request time. recover_url is
+  // NOT a separate field — Phase 4b uses effectiveRecoverUrl().
   String  pki_base_url;
 
   // ── Runtime (not persisted) ──
@@ -135,6 +137,22 @@ class CertManagerService : public StatefulService<CertManagerSettings>,
   // public key in the CSR payload so the mothership can pre-allocate
   // a tunnel IP and add the peer at enrollment time. Optional.
   void setWireguardProvider(IWireguardProvider* wg) { _wg = wg; }
+
+  // Phase 4b — gray-zone recovery. Spawns a polling task that hits
+  // effectiveRecoverUrl() every RECOVERY_POLL_INTERVAL_S until the
+  // server returns approved=true with a fresh cert. Works without
+  // mTLS — cert is dead so we can only do server-side TLS (CA pin
+  // from the persisted ca_bundle_pem so we still verify it's the
+  // right mothership). Operator on the server side approves the
+  // request via /api/v1/admin/recover/approve/<deviceId>.
+  //
+  // Returns true if poll task was spawned, false if already
+  // running, no recovery_token persisted (means full re-enroll
+  // needed), or no recover URL resolvable. Phase 4b iteration 1 is
+  // operator-triggered via UI button — phase iteration 2 will
+  // auto-trigger on boot when refreshRuntimeState detects state
+  // == GrayZone.
+  bool beginRecovery();
 
   // ICertProvider
   State state() const override { return _state.runtime_state; }
@@ -272,6 +290,38 @@ class CertManagerService : public StatefulService<CertManagerSettings>,
                        const String& renewUrl,
                        String& outCertPem,
                        String& outCaBundlePem);
+
+  // ── Phase 4b — gray-zone recovery ──
+  //
+  // Polling task that hits recover_url at RECOVERY_POLL_INTERVAL_S
+  // cadence (60s) carrying {deviceId, recovery_token,
+  // lastKnownSerial}. Runs WITHOUT mTLS (cert is dead) — uses
+  // setInsecure on the WiFiClientSecure since we can't even verify
+  // the server's cert against our existing CA when the entire
+  // cert.json might be lost. Production hardens this by bundling a
+  // bootstrap CA into firmware that signs the recover endpoint's
+  // cert.
+  //
+  // Server returns either {approved: false, status: "pending|...} or
+  // {approved: true, cert_pem, ca_bundle_pem} — the latter triggers
+  // an atomic-swap into the TLS context (same path as rotate) and
+  // exits GrayZone state.
+  static constexpr uint32_t RECOVERY_POLL_INTERVAL_S = 60;
+  TaskHandle_t _recoveryTask{nullptr};
+  static void  recoveryTaskTramp(void* arg);
+  void         runRecoveryLoop();
+  bool         postRecoveryRequest(String& outCertPem,
+                                    String& outCaBundlePem,
+                                    bool& outApproved);
+
+  // Candidate keypair generated on the FIRST recovery poll; reused
+  // across subsequent polls so the CSR (and thus the eventual
+  // signed cert) keeps matching the same private key. Cleared
+  // after successful apply. NEVER persisted — lives in RAM only;
+  // a reboot mid-recovery loses it and recovery starts fresh next
+  // boot (which is fine — server-side pending request becomes a
+  // dangling reference that operator's admin UI can clean up).
+  String _candidateKeyPem;
 };
 
 #endif  // CertManagerService_h

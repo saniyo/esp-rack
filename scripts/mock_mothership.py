@@ -70,6 +70,15 @@ except ImportError:
 # its response. In-memory only — restart wipes pending actions.
 COMMAND_QUEUE: dict = {}
 
+# ----- Per-device pending recovery (Phase 4b) -----
+# Device polling /recover stages a request here. Operator approves via
+# /api/v1/admin/recover/approve/<deviceId>; on next /recover poll the
+# device drains the approved cert. Each entry shape:
+#   {"csr_pem": "...", "approved": False, "cert_pem": None, "ip": "..."}
+# The CSR is captured on the FIRST poll and reused for subsequent
+# polls (device sends same CSR until approved or operator rejects).
+PENDING_RECOVERY: dict = {}
+
 
 # ----- root CA generation (in-memory, fresh each run) -----
 
@@ -291,6 +300,18 @@ class EnrollHandler(http.server.BaseHTTPRequestHandler):
                 # validates client cert against allow-list before
                 # signing the new CSR).
                 self._handle_renew()
+            elif self.path == "/api/v1/recover":
+                # Phase 4b — gray-zone recovery. Server-side TLS only
+                # (device's cert is dead). Polling endpoint: stages
+                # request on first call, returns {approved:false}
+                # until operator clicks approve via admin endpoint.
+                self._handle_recover()
+            elif self.path.startswith("/api/v1/admin/recover/approve/"):
+                # Operator-side: approve a pending recovery request.
+                # Server signs the CSR on file under that deviceId
+                # and parks the resulting cert. Next /recover poll
+                # from the device drains the cert.
+                self._handle_admin_recover_approve()
             elif self.path.startswith("/api/v1/admin/queue/"):
                 # /api/v1/admin/queue/<deviceId> — operator-side endpoint
                 # for staging actions to be delivered on the device's next
@@ -441,6 +462,111 @@ class EnrollHandler(http.server.BaseHTTPRequestHandler):
             "ca_bundle_pem": self.CA_CERT_PEM,
         })
 
+    def _handle_recover(self) -> None:
+        # Phase 4b — gray-zone recovery polling endpoint.
+        # First call from a device: stage the request (capture CSR).
+        # Subsequent calls: return current status — pending OR
+        # approved with cert.
+        length = int(self.headers.get("Content-Length", "0"))
+        if length <= 0 or length > 16384:
+            self._send_json(400, {"err": "bad content-length"})
+            return
+        raw = self.rfile.read(length)
+        try:
+            req = json.loads(raw.decode("utf-8"))
+        except json.JSONDecodeError as e:
+            self._send_json(400, {"err": f"json parse: {e}"})
+            return
+
+        device_id        = req.get("deviceId", "")
+        recovery_token   = req.get("recoveryToken", "")
+        last_known_serial = req.get("lastKnownSerial", "")
+        csr_pem          = req.get("csr_pem", "")
+
+        if not device_id or not recovery_token or not csr_pem:
+            self._send_json(400, {"err": "missing deviceId / recoveryToken / csr_pem"})
+            return
+
+        # Production server would validate `recovery_token` against
+        # its persistent device DB (the token was minted at first
+        # enroll and shared with the device). Mock just trusts it.
+        existing = PENDING_RECOVERY.get(device_id)
+        if existing is None:
+            # First poll — stage request.
+            PENDING_RECOVERY[device_id] = {
+                "csr_pem": csr_pem,
+                "recovery_token": recovery_token,
+                "last_known_serial": last_known_serial,
+                "approved": False,
+                "cert_pem": None,
+                "ip": self.address_string(),
+            }
+            print(f"[recover] STAGED device={device_id} "
+                  f"last_serial={last_known_serial} ip={self.address_string()}")
+            self._send_json(200, {"approved": False, "status": "pending"})
+            return
+
+        # Subsequent poll. Refresh CSR / IP every time so an operator-
+        # rejected previous request that the device retries with a
+        # fresh keypair gets the latest CSR signed.
+        existing["csr_pem"]           = csr_pem
+        existing["recovery_token"]    = recovery_token
+        existing["last_known_serial"] = last_known_serial
+        existing["ip"]                = self.address_string()
+
+        if existing["approved"] and existing.get("cert_pem"):
+            # Drain — clear from pending so we don't keep returning
+            # the same cert on retries.
+            cert_pem = existing["cert_pem"]
+            del PENDING_RECOVERY[device_id]
+            print(f"[recover] DELIVERED approved cert to device={device_id}")
+            self._send_json(200, {
+                "approved":      True,
+                "cert_pem":      cert_pem,
+                "ca_bundle_pem": self.CA_CERT_PEM,
+            })
+            return
+
+        # Still pending.
+        self._send_json(200, {"approved": False, "status": "pending"})
+
+    def _handle_admin_recover_approve(self) -> None:
+        # /api/v1/admin/recover/approve/<deviceId> — operator approve.
+        # Pulls the staged CSR, signs as a 90-day device cert, parks
+        # under that deviceId. Next /recover poll from the device
+        # drains and applies it.
+        device_id = self.path[len("/api/v1/admin/recover/approve/"):]
+        if not device_id:
+            self._send_json(400, {"err": "missing deviceId in path"})
+            return
+
+        entry = PENDING_RECOVERY.get(device_id)
+        if entry is None:
+            self._send_json(404, {"err": "no pending recovery for that deviceId"})
+            return
+
+        try:
+            cert = sign_device_csr(entry["csr_pem"].encode("utf-8"),
+                                    self.CA_CERT_OBJ, self.CA_KEY_OBJ)
+        except Exception as e:
+            self._send_json(400, {"err": f"sign failed: {e}"})
+            return
+
+        cert_pem = cert.public_bytes(serialization.Encoding.PEM).decode("utf-8")
+        entry["approved"] = True
+        entry["cert_pem"] = cert_pem
+
+        print(f"[admin] approved recovery for device={device_id} "
+              f"new_serial={cert.serial_number:x} "
+              f"not_after={cert.not_valid_after_utc.isoformat()}")
+
+        self._send_json(200, {
+            "ok":            True,
+            "approved":      True,
+            "device_id":     device_id,
+            "new_serial":    f"{cert.serial_number:x}",
+        })
+
     def _handle_admin_queue(self) -> None:
         # /api/v1/admin/queue/<deviceId>  — POST a single action.
         # Stages it for delivery on the device's next checkin.
@@ -553,7 +679,10 @@ def main() -> int:
         print(f"  POST /api/v1/enroll                  bootstrap-token CSR signing")
         print(f"  POST /api/v1/checkin                 mTLS device check-in")
         print(f"  POST /api/v1/renew                   mTLS cert rotation (Phase 4a)")
+        print(f"  POST /api/v1/recover                 gray-zone recovery polling (Phase 4b)")
         print(f"  POST /api/v1/admin/queue/<deviceId>  stage action for next checkin")
+        print(f"  POST /api/v1/admin/recover/approve/<deviceId>")
+        print(f"                                       approve gray-zone recovery (Phase 4b)")
         print(f"\nBootstrap token (paste into device PKI Enrollment tab):")
         print(f"  {args.token}")
         print(f"\nOperator action examples:")
@@ -571,6 +700,9 @@ def main() -> int:
         print(f"  curl -k -X POST -H 'Content-Type: application/json' \\")
         print(f"    -d '{{\"type\":\"renewCert\",\"params\":{{\"renewUrl\":\"https://{args.cn}:{args.port}/api/v1/renew\"}}}}' \\")
         print(f"    https://{args.cn}:{args.port}/api/v1/admin/queue/device-<MAC>")
+        print(f"")
+        print(f"  # Approve a pending gray-zone recovery (after device clicked Trigger Recovery):")
+        print(f"  curl -k -X POST https://{args.cn}:{args.port}/api/v1/admin/recover/approve/device-<MAC>")
         print(f"\nDevice config:")
         print(f"  Enroll URL  : https://<LAN-ip>:{args.port}/api/v1/enroll")
         print(f"  Checkin URL : https://<LAN-ip>:{args.port}/api/v1/checkin\n")
