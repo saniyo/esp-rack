@@ -29,16 +29,6 @@
 void CertManagerSettings::readConfig(CertManagerSettings& s, JsonObject& root) {
   // Three PEM blobs go through SecretsVault — see buildForm for the
   // `secret;` field markers that drive auto-encryption.
-  // Diagnostic: log the lengths of each sensitive field at save-time
-  // so we can see if state already lost ca_bundle_pem before disk hit.
-  Serial.printf("[cert.readCfg] cert=%u key=%u ca=%u recovery=%u "
-                "subj=%s serial=%s\n",
-                (unsigned)s.device_cert_pem.length(),
-                (unsigned)s.device_key_pem.length(),
-                (unsigned)s.ca_bundle_pem.length(),
-                (unsigned)s.recovery_token.length(),
-                s.subject_cn.c_str(),
-                s.serial_hex.c_str());
   root["device_cert_pem"] = s.device_cert_pem;
   root["device_key_pem"]  = s.device_key_pem;
   root["ca_bundle_pem"]   = s.ca_bundle_pem;
@@ -873,40 +863,14 @@ bool CertManagerService::postCsrToMothership(const String& csrPem,
   outCaBundlePem    = resp["ca_bundle_pem"].as<String>();
   outRecoveryToken  = resp["recovery_token"].as<String>();
 
-  Serial.printf("[cert.enroll] parsed: cert=%u B, ca=%u B, recovery=%u B\n",
-                (unsigned)outCertPem.length(),
-                (unsigned)outCaBundlePem.length(),
-                (unsigned)outRecoveryToken.length());
-
-  // Diagnostic dump of the first / last 80 chars of each PEM so we
-  // can see truncation or parse mishap from a single log line.
-  if (outCertPem.length() > 0) {
-    Serial.printf("[cert.enroll] cert head: %s\n",
-                  outCertPem.substring(0, 60).c_str());
-  }
-  if (outCaBundlePem.length() > 0) {
-    Serial.printf("[cert.enroll] ca   head: %s\n",
-                  outCaBundlePem.substring(0, 60).c_str());
-  } else {
-    Serial.println("[cert.enroll] ca   head: (EMPTY!)");
-    // Re-look at the raw response — maybe the JSON key is different
-    // than expected, or the value type isn't a string.
-    Serial.printf("[cert.enroll] resp containsKey ca_bundle_pem=%d, "
-                  "isNull=%d, raw type=%d\n",
-                  (int)resp.containsKey("ca_bundle_pem"),
-                  (int)resp["ca_bundle_pem"].isNull(),
-                  // is<String> / is<const char*>?
-                  (int)resp["ca_bundle_pem"].is<const char*>());
-    // Print raw response body capped at 1KB for inspection.
-    size_t cap = respBody.length() > 1024 ? 1024 : respBody.length();
-    Serial.printf("[cert.enroll] resp body (first %u B):\n%s\n",
-                  (unsigned)cap, respBody.substring(0, cap).c_str());
-  }
-
   if (outCertPem.length() == 0 || outCaBundlePem.length() == 0) {
     Serial.println("[cert.enroll] response missing cert_pem / ca_bundle_pem");
     return false;
   }
+  Serial.printf("[cert.enroll] parsed cert=%u ca=%u recovery=%u B\n",
+                (unsigned)outCertPem.length(),
+                (unsigned)outCaBundlePem.length(),
+                (unsigned)outRecoveryToken.length());
   return true;
 }
 
