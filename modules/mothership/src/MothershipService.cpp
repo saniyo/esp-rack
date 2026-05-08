@@ -329,25 +329,33 @@ void MothershipService::runCheckinLoop() {
 }
 
 bool MothershipService::performOneCheckin() {
-  if (!_tls || !_cert) return false;
+  Serial.printf("[mship.do] enter — tls=%p cert=%p url-len=%u\n",
+                (void*)_tls, (void*)_cert,
+                (unsigned)_state.checkin_url.length());
+  if (!_tls || !_cert) {
+    Serial.println("[mship.do] EARLY: missing tls or cert provider");
+    return false;
+  }
   if (_state.checkin_url.length() == 0) {
-    Serial.println("[mship] checkin_url empty — skip");
+    Serial.println("[mship.do] EARLY: checkin_url empty");
     return false;
   }
 
   WiFiClientSecure client;
-  // Bind CA bundle + device cert+key — full mTLS handshake. Server
-  // verifies our cert against ITS allow-list; we verify server's
-  // cert against the CA bundle from enrollment.
+  Serial.println("[mship.do] step1: attachToClient");
   _tls->attachToClient(client);
   client.setHandshakeTimeout(15);
   client.setTimeout(15000);
+  Serial.println("[mship.do] step2: timeouts set");
 
   HTTPClient http;
+  Serial.printf("[mship.do] step3: http.begin(%s)\n",
+                _state.checkin_url.c_str());
   if (!http.begin(client, _state.checkin_url)) {
-    Serial.println("[mship] http.begin failed");
+    Serial.println("[mship.do] EARLY: http.begin failed");
     return false;
   }
+  Serial.println("[mship.do] step4: http.begin OK");
   http.setTimeout(15000);
   http.addHeader("Content-Type", "application/json");
 
