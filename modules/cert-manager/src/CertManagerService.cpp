@@ -170,6 +170,40 @@ void CertManagerSettings::buildForm(CertManagerSettings& s, JsonObject& root) {
       "recoveryToken and waits for an operator to approve re-enrollment "
       "from the admin UI. Implemented in Phase 4b — currently inactive.",
       level("info"), icon("Info"));
+
+  // ── INTERNALS ─────────────────────────────────────────────────────
+  // Sensitive material — cert PEM, private key PEM, CA bundle PEM,
+  // recovery token. Marked as secret so SecretsVault auto-discovery
+  // catches them and encrypts on disk (otherwise they'd land
+  // PLAINTEXT in /config/cert.json, which is exactly what we don't
+  // want for a private key). Read-only — operator can toggle the
+  // eye icon for debug visibility but can't edit. Lives in its own
+  // tab so the day-to-day Status / Enrollment / Settings tabs stay
+  // uncluttered.
+  JsonArray intl = FormBuilder::createForm(root, "internals",
+                                            "Sensitive material (encrypted on disk)");
+
+  FormBuilder::addMessageField(intl, "m_internals_warn",
+      "These fields contain the device's cryptographic identity. "
+      "Encrypted at rest by SecretsVault — eye icon reveals plaintext "
+      "for debug. Do NOT modify by hand: edits via this UI are "
+      "discarded on save (fields are AF::R). To rotate the cert use "
+      "the Mothership's renewCert command (Phase 4) or factory-reset "
+      "the device and re-enroll.",
+      level("warning"), icon("Warning"));
+
+  FormBuilder::addSecretField(intl, "device_cert_pem", AF::R,
+                              s.device_cert_pem.c_str(),
+                              label("Device cert (PEM)"), icon("VerifiedUser"));
+  FormBuilder::addSecretField(intl, "device_key_pem", AF::R,
+                              s.device_key_pem.c_str(),
+                              label("Device private key (PEM)"), icon("Key"));
+  FormBuilder::addSecretField(intl, "ca_bundle_pem", AF::R,
+                              s.ca_bundle_pem.c_str(),
+                              label("Mothership CA bundle (PEM)"), icon("AccountTree"));
+  FormBuilder::addSecretField(intl, "recovery_token", AF::R,
+                              s.recovery_token.c_str(),
+                              label("Recovery token"), icon("VpnKey"));
 }
 
 // ===== WS push =====
@@ -293,6 +327,21 @@ void CertManagerService::registerManifest(WebManager* web) {
   recoveryTab.auth     = WebAuthLevel::Admin;
   recoveryTab.order    = 20;
   spec.tabs.push_back(recoveryTab);
+
+  // Internals tab — exposes cert PEM / key PEM / CA bundle as
+  // SecretField-rendered readonly fields. Their presence in the form
+  // schema is what triggers SecretsVault auto-discovery to mark them
+  // as encrypt-on-disk; the rendering is just transparency for the
+  // operator. Last in tab order so it doesn't distract from the
+  // common-case Status / Enrollment / Settings flow.
+  WebTabSpec internalsTab;
+  internalsTab.key      = "internals";
+  internalsTab.title    = "Internals";
+  internalsTab.restPath = CERT_MANAGER_FORM_PATH;
+  internalsTab.postable = false;
+  internalsTab.auth     = WebAuthLevel::Admin;
+  internalsTab.order    = 30;
+  spec.tabs.push_back(internalsTab);
 
   _feature = web->registerFeature<CertManagerSettings>(
       std::move(spec), this,
