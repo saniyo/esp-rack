@@ -28,6 +28,15 @@ class ITLSProvider {
   // mTLS additionally requires a client cert (see hasClientCert).
   virtual bool hasCaChain() const = 0;
 
+  // Push a CA bundle (PEM concat of trusted server roots) into the
+  // active context. Subsequent attachToClient() calls will pin
+  // server certs against this bundle. Called by CertManagerService
+  // after enrollment when the server includes its trust bundle in
+  // the response — replaces whatever bootstrap CA was loaded
+  // previously. Returns true on PEM parse / accept, false on
+  // malformed input (existing CA stays).
+  virtual bool loadCaChain(const String& caBundlePem) = 0;
+
   // True when device has a valid client cert+key loaded — enables
   // mTLS on every outbound HTTPS handshake. Until then, only
   // server-side TLS (CA-pinned, no client auth) is possible.

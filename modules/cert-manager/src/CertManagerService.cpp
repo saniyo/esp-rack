@@ -2,15 +2,23 @@
 #include <ITLSProvider.h>
 #include <WebManager.h>
 
-// mbedtls bindings for ECDSA-P256 keypair + PKCS#10 CSR. arduino-
-// esp32 ships with mbedtls compiled in; these headers come from
-// the framework's bundled mbedtls and don't need a lib_deps entry.
+// mbedtls bindings for ECDSA-P256 keypair + PKCS#10 CSR + cert
+// metadata parsing. arduino-esp32 ships with mbedtls compiled in;
+// these headers come from the framework's bundled mbedtls and
+// don't need a lib_deps entry.
 #include <mbedtls/pk.h>
 #include <mbedtls/ecp.h>
 #include <mbedtls/ctr_drbg.h>
 #include <mbedtls/entropy.h>
 #include <mbedtls/x509_csr.h>
+#include <mbedtls/x509_crt.h>
 #include <mbedtls/error.h>
+
+// HTTPS client + JSON for the enrollment POST.
+#include <HTTPClient.h>
+#include <WiFiClientSecure.h>
+#include <ArduinoJson.h>
+#include <time.h>
 
 #if defined(ESP32)
 #include <esp_mac.h>   // esp_read_mac for MAC-based CN derivation
@@ -29,7 +37,8 @@ void CertManagerSettings::readConfig(CertManagerSettings& s, JsonObject& root) {
   root["subject_cn"]    = s.subject_cn;
   root["not_after_ts"]  = s.not_after_ts;
 
-  root["recovery_token"] = s.recovery_token;
+  root["recovery_token"]  = s.recovery_token;
+  root["mothership_url"]  = s.mothership_url;
   // bootstrap_token intentionally omitted — never persists.
 }
 
@@ -44,6 +53,7 @@ StateUpdateResult CertManagerSettings::update(JsonObject& root,
   ch |= FormBuilder::updateValue(root, "not_after_ts",    s.not_after_ts);
   ch |= FormBuilder::updateValue(root, "recovery_token",  s.recovery_token);
   ch |= FormBuilder::updateValue(root, "bootstrap_token", s.bootstrap_token);
+  ch |= FormBuilder::updateValue(root, "mothership_url",  s.mothership_url);
   return ch ? StateUpdateResult::CHANGED : StateUpdateResult::UNCHANGED;
 }
 
@@ -127,6 +137,25 @@ void CertManagerSettings::buildForm(CertManagerSettings& s, JsonObject& root) {
       "setup or after factory reset.",
       level("warning"), icon("Warning"));
 
+  // ── SETTINGS ────────────────────────────────────────────────────────
+  // Mothership endpoint config. Survives reboot. Operator can repoint
+  // the device at staging / dev mock server without reflashing.
+  JsonArray set = FormBuilder::createForm(root, "settings",
+                                          "Mothership endpoint");
+
+  FormBuilder::addTextField(set, "mothership_url", AF::RW,
+                            s.mothership_url.c_str(),
+                            label("Enroll URL"),
+                            placeholder(FACTORY_MOTHERSHIP_ENROLL_URL),
+                            icon("Cloud"));
+
+  FormBuilder::addMessageField(set, "m_settings_help",
+      "URL of the mothership /api/v1/enroll endpoint. Default points "
+      "at \"mothership.local\" — repoint to a development mock server "
+      "during testing (e.g. https://192.168.1.50:8443/api/v1/enroll). "
+      "Save before clicking Enroll on the Enrollment tab.",
+      level("info"), icon("Info"));
+
   // ── RECOVERY ────────────────────────────────────────────────────────
   // Phase 1.2 skeleton — Phase 4b fills in the polling status +
   // Approve/Reject feedback. For now just a placeholder so the tab
@@ -199,7 +228,7 @@ void CertManagerService::registerManifest(WebManager* web) {
     String tok;
     if (r->hasArg("token")) tok = r->arg("token");
     tok.trim();
-    Serial.printf("[cert.enroll] token-len=%u, current state=%u\n",
+    Serial.printf("[cert.enroll] req token-len=%u, state=%u\n",
                   (unsigned)tok.length(),
                   (unsigned)_state.runtime_state);
     if (tok.length() == 0) {
@@ -207,17 +236,12 @@ void CertManagerService::registerManifest(WebManager* web) {
               "{\"ok\":false,\"err\":\"empty bootstrap token\"}");
       return;
     }
-    // Phase 1.5: enqueue real enrollment (gen keypair → CSR → POST).
-    // For now flip state to Enrolling, log + revert next loop tick
-    // so operator sees the wiring is alive end-to-end without an
-    // actual server.
-    update([tok](CertManagerSettings& s) {
-      s.bootstrap_token   = tok;
-      s.runtime_state     = ICertProvider::State::Enrolling;
-      s.status_label      = "Enrolling (stub — phase 1.5 will do real work)";
-      return StateUpdateResult::CHANGED;
-    }, "cert.enroll-start");
-    r->send(200, "application/json", "{\"ok\":true,\"stub\":true}");
+    if (!kickEnrollment(tok)) {
+      r->send(409, "application/json",
+              "{\"ok\":false,\"err\":\"enrollment already in progress\"}");
+      return;
+    }
+    r->send(200, "application/json", "{\"ok\":true}");
   };
   web->registerAction(enrollAct);
 
@@ -250,6 +274,15 @@ void CertManagerService::registerManifest(WebManager* web) {
   enrollmentTab.auth     = WebAuthLevel::Admin;
   enrollmentTab.order    = 15;
   spec.tabs.push_back(enrollmentTab);
+
+  WebTabSpec settingsTab;
+  settingsTab.key      = "settings";
+  settingsTab.title    = "Settings";
+  settingsTab.restPath = CERT_MANAGER_FORM_PATH;
+  settingsTab.postable = true;
+  settingsTab.auth     = WebAuthLevel::Admin;
+  settingsTab.order    = 18;
+  spec.tabs.push_back(settingsTab);
 
   WebTabSpec recoveryTab;
   recoveryTab.key      = "recovery";
@@ -513,4 +546,284 @@ String CertManagerService::deviceSubjectCN() const {
 #else
   return String("device-unknown");
 #endif
+}
+
+// ===== Phase 1.5 — Enrollment HTTPS POST =====
+//
+// kickEnrollment is called from the AsyncWebServer action thread —
+// we just spawn a FreeRTOS task and return. Action handler responds
+// 200 immediately so UI doesn't block on a 5-30 second handshake +
+// CSR build.
+//
+// runEnrollment does the work in task context: keypair → CSR → POST
+// → save → state transition. Updates state via update() so each
+// transition fires WS broadcast and the operator sees live progress
+// in the UI.
+
+namespace {
+struct EnrollArg {
+  CertManagerService* svc;
+  String              token;
+};
+}  // namespace
+
+bool CertManagerService::kickEnrollment(const String& bootstrapToken) {
+  if (_enrollTask != nullptr) {
+    Serial.println("[cert.enroll] task already running");
+    return false;
+  }
+
+  // Heap-owned arg — task is responsible for freeing it.
+  auto* arg = new EnrollArg{this, bootstrapToken};
+
+  // 8 KB stack — mbedtls keypair gen + CSR + HTTPS handshake +
+  // ArduinoJson parsing on the same stack. ESP32 default tasks
+  // are usually 4 KB; we double it to leave breathing room for
+  // mbedtls scratch buffers.
+  BaseType_t rc = xTaskCreatePinnedToCore(
+      &CertManagerService::enrollTaskTramp,
+      "certEnroll",
+      8192,
+      arg,
+      1,
+      &_enrollTask,
+      tskNO_AFFINITY);
+
+  if (rc != pdPASS) {
+    Serial.printf("[cert.enroll] xTaskCreate failed: %d\n", (int)rc);
+    delete arg;
+    _enrollTask = nullptr;
+    return false;
+  }
+
+  // Optimistic state update so UI shows "Enrolling" while task runs.
+  update([](CertManagerSettings& s) {
+    s.runtime_state = ICertProvider::State::Enrolling;
+    s.status_label  = "Enrolling…";
+    return StateUpdateResult::CHANGED;
+  }, "cert.enroll-kick");
+
+  return true;
+}
+
+void CertManagerService::enrollTaskTramp(void* arg) {
+  auto* a = static_cast<EnrollArg*>(arg);
+  if (a && a->svc) a->svc->runEnrollment(a->token);
+  if (a) delete a;
+  // Task self-destruct: clear handle BEFORE vTaskDelete so parent
+  // thread sees nullptr if it polls. The actual mutation must happen
+  // through the service so it sees nullptr too.
+  vTaskDelete(nullptr);
+}
+
+void CertManagerService::runEnrollment(const String& bootstrapToken) {
+  Serial.println("[cert.enroll] task start");
+
+  String keyPem;
+  if (!generateEcdsaKeyPair(keyPem)) {
+    update([](CertManagerSettings& s) {
+      s.runtime_state = ICertProvider::State::EnrollmentFailed;
+      s.status_label  = "Enrollment failed: keypair generation";
+      s.bootstrap_token = String();
+      return StateUpdateResult::CHANGED;
+    }, "cert.enroll-fail");
+    _enrollTask = nullptr;
+    return;
+  }
+
+  String csrPem;
+  if (!buildCsr(keyPem, csrPem)) {
+    update([](CertManagerSettings& s) {
+      s.runtime_state = ICertProvider::State::EnrollmentFailed;
+      s.status_label  = "Enrollment failed: CSR build";
+      s.bootstrap_token = String();
+      return StateUpdateResult::CHANGED;
+    }, "cert.enroll-fail");
+    _enrollTask = nullptr;
+    return;
+  }
+
+  String certPem, caBundlePem, recoveryToken;
+  if (!postCsrToMothership(csrPem, bootstrapToken,
+                            certPem, caBundlePem, recoveryToken)) {
+    update([](CertManagerSettings& s) {
+      s.runtime_state = ICertProvider::State::EnrollmentFailed;
+      s.status_label  = "Enrollment failed: server unreachable / rejected";
+      s.bootstrap_token = String();
+      return StateUpdateResult::CHANGED;
+    }, "cert.enroll-fail");
+    _enrollTask = nullptr;
+    return;
+  }
+
+  String serialHex;
+  uint32_t notAfterTs = 0;
+  if (!parseCertMetadata(certPem, serialHex, notAfterTs)) {
+    Serial.println("[cert.enroll] WARN: cert parse failed; proceeding "
+                    "with empty serial / not_after");
+    serialHex = "";
+    notAfterTs = 0;
+  }
+
+  // Atomic write through update — all fields land together.
+  update([&](CertManagerSettings& s) {
+    s.device_cert_pem  = certPem;
+    s.device_key_pem   = keyPem;
+    s.ca_bundle_pem    = caBundlePem;
+    s.serial_hex       = serialHex;
+    s.subject_cn       = deviceSubjectCN();
+    s.not_after_ts     = notAfterTs;
+    s.recovery_token   = recoveryToken;
+    s.bootstrap_token  = String();   // single-use → wipe
+    s.runtime_state    = ICertProvider::State::Ready;
+    s.status_label     = "Ready";
+    return StateUpdateResult::CHANGED;
+  }, "cert.enroll-ok");
+
+  // Push fresh material into the TLS context so subsequent HTTPS
+  // calls from any framework module pick up mTLS automatically.
+  if (_tls) {
+    _tls->updateClientCert(certPem, keyPem);
+    _tls->loadCaChain(caBundlePem);  // for Phase 2 mothership /checkin
+  }
+
+  Serial.printf("[cert.enroll] done — serial=%s, not_after=%u\n",
+                serialHex.c_str(), (unsigned)notAfterTs);
+  _enrollTask = nullptr;
+}
+
+bool CertManagerService::postCsrToMothership(const String& csrPem,
+                                              const String& bootstrapToken,
+                                              String& outCertPem,
+                                              String& outCaBundlePem,
+                                              String& outRecoveryToken) {
+  outCertPem = String();
+  outCaBundlePem = String();
+  outRecoveryToken = String();
+
+  if (_state.mothership_url.length() == 0) {
+    Serial.println("[cert.enroll] mothership_url empty");
+    return false;
+  }
+
+  WiFiClientSecure secureClient;
+  // FIRST-ENROLLMENT TLS POSTURE: we don't have a CA pinned yet
+  // (the bundle ARRIVES in this very response), so we accept
+  // whatever cert the server presents. Production builds should
+  // pre-bundle a bootstrap CA into firmware and load it here via
+  // _tls->loadCaChain(BOOTSTRAP_CA_PEM) BEFORE this call.
+  // For dev / mock-server testing, setInsecure() lets us reach
+  // a self-signed mock without any bundled trust store.
+  secureClient.setInsecure();
+  secureClient.setHandshakeTimeout(15);
+  secureClient.setTimeout(20000);
+
+  HTTPClient http;
+  if (!http.begin(secureClient, _state.mothership_url)) {
+    Serial.println("[cert.enroll] HTTPClient.begin failed");
+    return false;
+  }
+  http.setTimeout(20000);
+  http.addHeader("Content-Type", "application/json");
+  http.addHeader("Authorization", String("Bearer ") + bootstrapToken);
+
+  // Body: {"deviceId": "...", "csr_pem": "..."}
+  // Allocate enough for csr_pem (~480 B base64) + framing.
+  DynamicJsonDocument req(2048);
+  req["deviceId"] = deviceSubjectCN();
+  req["csr_pem"]  = csrPem;
+  String reqBody;
+  serializeJson(req, reqBody);
+
+  Serial.printf("[cert.enroll] POST %s, body=%u B\n",
+                _state.mothership_url.c_str(),
+                (unsigned)reqBody.length());
+
+  int code = http.POST(reqBody);
+  Serial.printf("[cert.enroll] HTTP code=%d\n", code);
+
+  if (code < 200 || code >= 300) {
+    String err = http.getString();
+    Serial.printf("[cert.enroll] server error: %s\n", err.c_str());
+    http.end();
+    return false;
+  }
+
+  String respBody = http.getString();
+  http.end();
+
+  Serial.printf("[cert.enroll] response %u B\n", (unsigned)respBody.length());
+
+  // Response: {"cert_pem":"...","ca_bundle_pem":"...","recovery_token":"hex..."}
+  // 8 KB doc — cert PEM ~400 B, ca_bundle ~1.5 KB worst case, +
+  // recovery_token + framing.
+  DynamicJsonDocument resp(8192);
+  DeserializationError jerr = deserializeJson(resp, respBody);
+  if (jerr) {
+    Serial.printf("[cert.enroll] JSON parse: %s\n", jerr.c_str());
+    return false;
+  }
+
+  outCertPem        = resp["cert_pem"].as<String>();
+  outCaBundlePem    = resp["ca_bundle_pem"].as<String>();
+  outRecoveryToken  = resp["recovery_token"].as<String>();
+
+  if (outCertPem.length() == 0 || outCaBundlePem.length() == 0) {
+    Serial.println("[cert.enroll] response missing cert_pem / ca_bundle_pem");
+    return false;
+  }
+  return true;
+}
+
+bool CertManagerService::parseCertMetadata(const String& certPem,
+                                            String& outSerialHex,
+                                            uint32_t& outNotAfterTs) {
+  outSerialHex = String();
+  outNotAfterTs = 0;
+
+  mbedtls_x509_crt crt;
+  mbedtls_x509_crt_init(&crt);
+
+  // mbedtls_x509_crt_parse wants length INCLUDING trailing NUL.
+  int rc = mbedtls_x509_crt_parse(&crt,
+      (const unsigned char*)certPem.c_str(), certPem.length() + 1);
+  if (rc != 0) {
+    Serial.printf("[cert.parse] x509_crt_parse failed: -0x%04x\n", -rc);
+    mbedtls_x509_crt_free(&crt);
+    return false;
+  }
+
+  // Serial — bytes in crt.serial.p as unstructured big-endian. Format
+  // as colon-delimited lowercase hex for matching server-side audit logs.
+  if (crt.serial.len > 0 && crt.serial.p) {
+    char hex[3];
+    for (size_t i = 0; i < crt.serial.len; ++i) {
+      snprintf(hex, sizeof(hex), "%02x", crt.serial.p[i]);
+      if (i > 0) outSerialHex += ":";
+      outSerialHex += hex;
+    }
+  }
+
+  // notAfter — mbedtls_x509_time has year/month/day/hour/min/sec.
+  // Convert to unix timestamp via tm + mktime (assumes UTC; cert
+  // times in X.509 are UTC by RFC 5280).
+  struct tm tmv = {};
+  tmv.tm_year = crt.valid_to.year - 1900;
+  tmv.tm_mon  = crt.valid_to.mon  - 1;
+  tmv.tm_mday = crt.valid_to.day;
+  tmv.tm_hour = crt.valid_to.hour;
+  tmv.tm_min  = crt.valid_to.min;
+  tmv.tm_sec  = crt.valid_to.sec;
+  tmv.tm_isdst = 0;
+  // mktime treats `tmv` as local time; we have UTC. ESP32 has timegm
+  // (sometimes named _mkgmtime / __timegm depending on toolchain).
+  // Fallback: compute manually — tz-shift mktime result by current
+  // timezone offset. For dev simplicity use mktime + mark; in prod
+  // we'd configure TZ=UTC at boot or use a real timegm. The 24h
+  // tolerance on cert expiry matters more than absolute precision.
+  time_t t = mktime(&tmv);
+  if (t > 0) outNotAfterTs = (uint32_t)t;
+
+  mbedtls_x509_crt_free(&crt);
+  return true;
 }

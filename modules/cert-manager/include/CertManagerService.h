@@ -26,10 +26,21 @@
 #include "ICertProvider.h"
 
 #include <Arduino.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 #define CERT_MANAGER_FILE      "/config/cert.json"
 #define CERT_MANAGER_FORM_PATH "/rest/certManager"
 #define CERT_MANAGER_WS_PATH   "/ws/certManager"
+
+// Build-time default for the mothership enroll endpoint. Operator
+// can override via the Settings tab at runtime; this is what the
+// device tries on factory-reset / first boot if no override is
+// stored. Mirrors how MQTT / AutoUpdate take their factory defaults
+// (see FACTORY_MQTT_HOST in modules/mqtt/include/MqttSettingsService.h).
+#ifndef FACTORY_MOTHERSHIP_ENROLL_URL
+#define FACTORY_MOTHERSHIP_ENROLL_URL "https://mothership.local:8443/api/v1/enroll"
+#endif
 
 class WebManager;
 class ITLSProvider;
@@ -55,6 +66,12 @@ struct CertManagerSettings {
   // but device can still authenticate as itself. Persisted hex.
   // Empty until Phase 1.5 sets it on first enroll.
   String  recovery_token;
+
+  // ── Persisted endpoint config ──
+  // Mothership enrollment URL. Configurable at runtime so operator
+  // can repoint the device at staging / dev mock server without a
+  // reflash. Defaulted to FACTORY_MOTHERSHIP_ENROLL_URL on first boot.
+  String  mothership_url{FACTORY_MOTHERSHIP_ENROLL_URL};
 
   // ── Runtime (not persisted) ──
   // Bootstrap token for first enrollment. Operator types it in the
@@ -123,6 +140,45 @@ class CertManagerService : public StatefulService<CertManagerSettings>,
   // base MAC ("device-aabbccddeeff" lowercased, no separators).
   // Used by buildCsr; exposed for the enroll-status display.
   String deviceSubjectCN() const;
+
+  // ── Phase 1.5 — Enrollment HTTPS POST ──
+  //
+  // Spawn a FreeRTOS task that runs the full enrollment flow off the
+  // AsyncWebServer thread (the action handler returns 200 immediately
+  // so UI doesn't block). Single-task in-flight only; if a task is
+  // already running, returns false. Caller's `bootstrapToken` is
+  // captured into a heap-allocated argument struct that the task
+  // owns and frees.
+  bool kickEnrollment(const String& bootstrapToken);
+
+  // The task body — runs on its own stack, calls back into the
+  // service for state mutation. Trampoline / static so it can be
+  // passed to xTaskCreate.
+  static void enrollTaskTramp(void* arg);
+  void runEnrollment(const String& bootstrapToken);
+
+  // POST CSR to mothership_url with bootstrap token. Returns true
+  // and populates outputs on 2xx response. Server response shape:
+  //   {"cert_pem": "...", "ca_bundle_pem": "...", "recovery_token": "hex..."}
+  // First-enrollment uses setInsecure() (we don't have a CA pinned
+  // yet) — Phase 1.5 wires this with a TODO to switch to bundled
+  // bootstrap CA in production builds. Once enrolled, subsequent
+  // mothership calls use mTLS via the freshly-saved client cert and
+  // setCACert(ca_bundle_pem).
+  bool postCsrToMothership(const String& csrPem,
+                            const String& bootstrapToken,
+                            String& outCertPem,
+                            String& outCaBundlePem,
+                            String& outRecoveryToken);
+
+  // Parse a freshly-received cert PEM to extract serial + notAfter
+  // for state display. Uses mbedtls_x509_crt_parse + crt.serial.p +
+  // crt.valid_to. Returns true on parse-success.
+  bool parseCertMetadata(const String& certPem,
+                          String& outSerialHex,
+                          uint32_t& outNotAfterTs);
+
+  TaskHandle_t _enrollTask{nullptr};
 };
 
 #endif  // CertManagerService_h

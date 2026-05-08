@@ -31,13 +31,9 @@ class TLSContextService : public ITLSProvider {
   TLSContextService();
   ~TLSContextService() override;
 
-  // Loads a CA bundle (PEM concat of allowed-server roots) into the
-  // active context. Phase 1.0 stub: store + return — no parsing yet.
-  // Returns true on parse-success; false on malformed PEM.
-  bool loadCaChain(const String& caBundlePem);
-
   // ITLSProvider
   bool hasCaChain() const override { return _caBundlePem.length() > 0; }
+  bool loadCaChain(const String& caBundlePem) override;
   bool hasClientCert() const override {
     return _clientCertPem.length() > 0 && _clientKeyPem.length() > 0;
   }
