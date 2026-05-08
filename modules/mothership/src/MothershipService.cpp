@@ -271,8 +271,12 @@ void MothershipService::runCheckinLoop() {
       if (ok) {
         s.success_count++;
         s.last_checkin_at_s = now_s;
+        s.runtime_state = IMothershipProvider::State::LastOk;
+        s.status_label  = "LastOk";
       } else {
         s.fail_count++;
+        s.runtime_state = IMothershipProvider::State::LastFail;
+        s.status_label  = "LastFail";
       }
       // Adaptive cadence: if actions arrived this round, drop to
       // 10-second burst follow-up — likely more queued.
@@ -281,8 +285,14 @@ void MothershipService::runCheckinLoop() {
       return StateUpdateResult::CHANGED;
     }, "mship.tick-end");
 
-    // refresh state-machine (Idle→LastOk/LastFail) for status colour.
-    refreshRuntimeState();
+    // Note: refreshRuntimeState() is intentionally NOT called here —
+    // the lambda above sets the post-tick state directly. Calling
+    // refresh would re-derive from counters and could clobber the
+    // freshly-recorded LastOk/LastFail with a stale Idle reading
+    // (e.g. when fail_count == success_count midway through a fail
+    // streak). The refresh path is reserved for cases where the
+    // state-machine inputs (cert availability, enabled toggle) might
+    // have changed independently of the tick — boot, form save.
     if (_feature) _feature->broadcastWs("mship.tick");
 
     // Block until the next scheduled check-in. Re-check every 5
