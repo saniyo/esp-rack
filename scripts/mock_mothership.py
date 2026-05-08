@@ -73,9 +73,37 @@ COMMAND_QUEUE: dict = {}
 
 # ----- root CA generation (in-memory, fresh each run) -----
 
+def _ca_path() -> Tuple[str, str]:
+    """Persistent CA storage paths — alongside the script. Once a CA
+    is generated it survives mock-server restarts so devices that
+    enrolled against it keep their CA bundle valid for mTLS handshake.
+    Without this every server restart would force re-enrollment of
+    every test device."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    return (os.path.join(here, ".mock_ca.pem"),
+            os.path.join(here, ".mock_ca.key"))
+
+
 def make_root_ca() -> Tuple[x509.Certificate, ec.EllipticCurvePrivateKey]:
-    """Self-signed ECDSA-P256 CA — 10 year validity. Lives only in
-    process memory; killed when this script stops."""
+    """Self-signed ECDSA-P256 CA — 10 year validity. Persisted to
+    .mock_ca.{pem,key} alongside the script so successive mock
+    restarts present the same CA to enrolled devices.
+
+    Delete those two files (or pass --reset-ca) to force a fresh CA
+    on the next start (will require re-enrolling every test device)."""
+    cert_path, key_path = _ca_path()
+
+    if os.path.exists(cert_path) and os.path.exists(key_path):
+        try:
+            with open(cert_path, "rb") as f:
+                cert = x509.load_pem_x509_certificate(f.read())
+            with open(key_path, "rb") as f:
+                key = serialization.load_pem_private_key(f.read(), password=None)
+            print(f"[ca] loaded persisted CA from {cert_path}")
+            return cert, key
+        except Exception as e:
+            print(f"[ca] persisted CA load failed ({e}); regenerating")
+
     key = ec.generate_private_key(ec.SECP256R1())
     name = x509.Name([
         x509.NameAttribute(NameOID.COMMON_NAME, "esprack-mock-mothership-CA"),
@@ -103,6 +131,22 @@ def make_root_ca() -> Tuple[x509.Certificate, ec.EllipticCurvePrivateKey]:
                        critical=True)
         .sign(key, hashes.SHA256())
     )
+
+    # Persist for future runs.
+    try:
+        with open(cert_path, "wb") as f:
+            f.write(cert.public_bytes(serialization.Encoding.PEM))
+        with open(key_path, "wb") as f:
+            f.write(key.private_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PrivateFormat.TraditionalOpenSSL,
+                encryption_algorithm=serialization.NoEncryption(),
+            ))
+        print(f"[ca] persisted new CA to {cert_path}")
+    except OSError as e:
+        print(f"[ca] WARNING: failed to persist CA ({e}); next start "
+              f"will regenerate and break enrolled devices")
+
     return cert, key
 
 
@@ -350,7 +394,18 @@ def main() -> int:
                     help="Server cert CN / primary SAN (default: "
                          "mothership.local — set to your LAN IP if "
                          "device can't resolve mDNS)")
+    ap.add_argument("--reset-ca", action="store_true",
+                    help="Delete the persisted CA before start. Every "
+                         "previously enrolled device will need to "
+                         "re-enroll because their CA bundle won't match.")
     args = ap.parse_args()
+
+    if args.reset_ca:
+        cp, kp = _ca_path()
+        for p in (cp, kp):
+            if os.path.exists(p):
+                os.unlink(p)
+                print(f"[ca] reset: removed {p}")
 
     print("=" * 60)
     print("ESPRack mock mothership — DEV ONLY, no persistence")

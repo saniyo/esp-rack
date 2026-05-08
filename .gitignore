@@ -31,3 +31,9 @@ WWWData-*.h
 
 # Local config drafts
 *.local
+
+# Persisted CA + key for the dev mock mothership server.
+# Generated on first script run, reused across restarts so devices
+# don't need re-enrollment after every server bounce. Local-only.
+scripts/.mock_ca.pem
+scripts/.mock_ca.key
