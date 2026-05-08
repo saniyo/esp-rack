@@ -141,7 +141,18 @@ MothershipService::MothershipService(ConfigManager* cfgMgr,
       _tls(tls),
       _cert(cert) {
   addUpdateHandler([this](const String& origin) {
-    refreshRuntimeState();
+    // Refresh state-machine ONLY for non-tick origins. The tick path
+    // (mship.tick-start / mship.tick-end) sets runtime_state
+    // authoritatively in its lambda — Enrolling/CheckingIn/LastOk/
+    // LastFail. Calling refreshRuntimeState here would derive state
+    // from counter comparisons (fail_count > success_count etc.) and
+    // clobber the freshly-set value: e.g. tick-end sets LastOk after
+    // a successful check-in, refresh sees fail_count(6) > success(2)
+    // from history and flips back to LastFail. Only form-save / WS
+    // updates / boot need the counter-driven derivation.
+    if (!origin.startsWith("mship.tick")) {
+      refreshRuntimeState();
+    }
     _cfg.saveIfChanged(origin);
     if (_feature) _feature->broadcastWs(origin);
   }, false);
@@ -518,23 +529,26 @@ void MothershipService::refreshRuntimeState() {
   using S = IMothershipProvider::State;
   S newState;
 
+  // refreshRuntimeState handles ONLY the gate cases — Disabled and
+  // NeedsCert — based on inputs that can change independently of a
+  // check-in (operator toggle, cert (re)load). Result-of-last-tick
+  // states (CheckingIn/LastOk/LastFail) are owned by the tick lambda
+  // in runCheckinLoop; we preserve whatever's there when neither
+  // gate fails.
+  //
+  // Idle is the boot fallback when no tick has run yet.
   if (!_state.enabled) {
     newState = S::Disabled;
   } else if (!_cert || !_cert->hasValidCert()) {
-    // Module is on but device doesn't have a usable cert yet —
-    // operator must finish enrollment before mothership can talk
-    // through mTLS.
     newState = S::NeedsCert;
-  } else if (_state.runtime_state == S::CheckingIn) {
-    // Don't clobber transient in-flight state on every refresh.
-    newState = S::CheckingIn;
-  } else if (_state.fail_count > _state.success_count
-             && _state.fail_count > 0) {
-    newState = S::LastFail;
-  } else if (_state.success_count > 0) {
-    newState = S::LastOk;
-  } else {
+  } else if (_state.runtime_state == S::Disabled
+             || _state.runtime_state == S::NeedsCert) {
+    // Gates were previously failing, now both pass → Idle until
+    // the first tick lands.
     newState = S::Idle;
+  } else {
+    // Preserve current state — set by tick path or another refresh.
+    newState = _state.runtime_state;
   }
 
   _state.runtime_state = newState;
