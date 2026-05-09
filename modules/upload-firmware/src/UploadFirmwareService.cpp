@@ -24,9 +24,6 @@ UploadFirmwareService::UploadFirmwareService(AsyncWebServer* server, SecurityMan
              HTTP_GET,
              securityManager->wrapRequest(std::bind(&UploadFirmwareService::uploadForm, this, std::placeholders::_1),
                                           AuthenticationPredicates::IS_ADMIN));
-#ifdef ESP8266
-  Update.runAsync(true);
-#endif
 }
 
 void UploadFirmwareService::registerManifest(WebManager* web) {

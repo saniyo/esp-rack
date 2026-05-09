@@ -66,6 +66,17 @@ const ManifestLoader: FC<RequiredChildrenProps> = (props) => {
     loadManifest();
   }, [loadManifest]);
 
+  // Sync the browser tab title to the canonical project name from the
+  // manifest. Falls back to "ESPRack" only when the manifest hasn't
+  // landed yet (race window) or the device record is missing. The
+  // static index.html title shows briefly during the very first paint
+  // before this fires; everything after the first /rest/uiManifest
+  // response shows the real project name (Builder("...") first arg).
+  useEffect(() => {
+    const name = manifest.device?.name;
+    if (name) document.title = name;
+  }, [manifest.device?.name]);
+
   const findFeature = useCallback(
     (id: string): FeatureEntry | undefined => manifest.features.find((f) => f.id === id),
     [manifest]

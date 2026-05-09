@@ -1,6 +1,7 @@
 #include <CertManagerService.h>
 #include <ITLSProvider.h>
 #include <WebManager.h>
+#include <DeviceIdentity.h>
 
 // mbedtls bindings for ECDSA-P256 keypair + PKCS#10 CSR + cert
 // metadata parsing. arduino-esp32 ships with mbedtls compiled in;
@@ -20,9 +21,7 @@
 #include <ArduinoJson.h>
 #include <time.h>
 
-#if defined(ESP32)
-#include <esp_mac.h>   // esp_read_mac for MAC-based CN derivation
-#endif
+// MAC / project / eFuse pulled in via DeviceIdentity.h above.
 
 // ===== Persistence (ConfigDelegate) =====
 
@@ -224,6 +223,38 @@ void CertManagerSettings::buildForm(CertManagerSettings& s, JsonObject& root) {
                               icon("Restore"), color("warning"),
                               refetchForm());
 
+  FormBuilder::addActionField(rc, "forget_cert", "Forget local cert",
+                              AF::RW,
+                              actionRef("cert.forgetCert"),
+                              icon("DeleteForever"), color("error"),
+                              refetchForm());
+
+  FormBuilder::addMessageField(rc, "m_forget_help",
+      "\"Forget local cert\" wipes the on-device cert+key (and clears "
+      "the TLS client context) but PRESERVES recovery_token + CA "
+      "bundle. After clicking Forget, the device drops out of mTLS "
+      "and into NeedsEnrollment / GrayZone — then click Trigger "
+      "Recovery to start the polling flow on a server that already "
+      "knows this device's recovery_token.",
+      level("info"), icon("Info"));
+
+  FormBuilder::addActionField(rc, "wipe_all", "Reset PKI (full wipe)",
+                              AF::RW,
+                              actionRef("cert.wipeAll"),
+                              icon("DeleteSweep"), color("error"),
+                              refetchForm());
+
+  FormBuilder::addMessageField(rc, "m_wipe_warn",
+      "\"Reset PKI (full wipe)\" deletes EVERYTHING — cert, key, CA "
+      "bundle, recovery_token, cert metadata. After this only a fresh "
+      "bootstrap-token enrollment can re-establish mTLS (recovery is "
+      "no longer possible — the server-side recovery_token check will "
+      "fail). Mothership / recover URLs are preserved so the operator "
+      "doesn't have to repoint the device. Use this to simulate a "
+      "blank-flash device or after the recovery_token has been "
+      "compromised and revoked server-side.",
+      level("warning"), icon("Warning"));
+
   FormBuilder::addMessageField(rc, "m_recovery_warn",
       "Recovery uses server-side TLS only (mTLS impossible — cert "
       "is dead). Production firmware should pin a bootstrap CA at "
@@ -335,12 +366,12 @@ void CertManagerService::registerManifest(WebManager* web) {
                   (unsigned)_state.runtime_state);
     if (tok.length() == 0) {
       r->send(400, "application/json",
-              "{\"ok\":false,\"err\":\"empty bootstrap token\"}");
+              "{\"ok\":false,\"message\":\"Bootstrap token is empty — paste it in the Enrollment tab first\"}");
       return;
     }
     if (!kickEnrollment(tok)) {
       r->send(409, "application/json",
-              "{\"ok\":false,\"err\":\"enrollment already in progress\"}");
+              "{\"ok\":false,\"message\":\"Enrollment already in progress — wait for the current attempt to finish\"}");
       return;
     }
     r->send(200, "application/json", "{\"ok\":true}");
@@ -358,14 +389,94 @@ void CertManagerService::registerManifest(WebManager* web) {
   recoverAct.auth            = WebAuthLevel::Admin;
   recoverAct.successMessage  = "Recovery polling started";
   recoverAct.handler = [this](AsyncWebServerRequest* r) {
-    if (!beginRecovery()) {
+    // Disambiguate the three "can't start recovery" reasons so the UI
+    // snackbar tells the operator what to actually do — generic 409
+    // is useless ("Recovery polling already running" vs "no token,
+    // re-enroll required" need very different operator responses).
+    if (_state.recovery_token.length() == 0) {
       r->send(409, "application/json",
-              "{\"ok\":false,\"err\":\"recovery already running, no recovery_token, or no recover_url\"}");
+              "{\"ok\":false,\"message\":\"Recovery token lost — full re-enrollment required (Enrollment tab)\"}");
       return;
     }
-    r->send(200, "application/json", "{\"ok\":true}");
+    if (_state.recover_url.length() == 0) {
+      r->send(409, "application/json",
+              "{\"ok\":false,\"message\":\"Recover URL not configured — set it on the Recovery tab and save\"}");
+      return;
+    }
+    // Either spawns a new task or wakes an existing one (early poll);
+    // both are success from the operator's POV.
+    bool wasRunning = (_recoveryTask != nullptr);
+    if (!beginRecovery()) {
+      r->send(500, "application/json",
+              "{\"ok\":false,\"message\":\"Failed to spawn recovery task — check device heap\"}");
+      return;
+    }
+    if (wasRunning) {
+      r->send(200, "application/json",
+              "{\"ok\":true,\"message\":\"Polling task already running — woken up for early poll\"}");
+    } else {
+      r->send(200, "application/json", "{\"ok\":true}");
+    }
   };
   web->registerAction(recoverAct);
+
+  // Service-tech action: wipe local cert+key (drop out of mTLS) but
+  // PRESERVE recovery_token + ca_bundle + URLs so the operator can
+  // immediately click Trigger Recovery to test the gray-zone flow.
+  // Mirrors what would happen if /config/cert.json got partially
+  // corrupted (cert blobs lost, recovery_token survived).
+  WebActionSpec forgetAct;
+  forgetAct.id              = "cert.forgetCert";
+  forgetAct.title           = "Forget local cert";
+  forgetAct.icon            = "DeleteForever";
+  forgetAct.color           = "error";
+  forgetAct.auth            = WebAuthLevel::Admin;
+  forgetAct.successMessage  = "Local cert forgotten — TLS client identity cleared";
+  forgetAct.handler = [this](AsyncWebServerRequest* r) {
+    update([](CertManagerSettings& s) {
+      s.device_cert_pem = String();
+      s.device_key_pem  = String();
+      s.serial_hex      = String();
+      s.subject_cn      = String();
+      s.not_after_ts    = 0;
+      return StateUpdateResult::CHANGED;
+    }, "cert.forget");
+    if (_tls) _tls->clearClientCert();
+    Serial.println("[cert.forget] local cert+key wiped, "
+                   "recovery_token preserved");
+    r->send(200, "application/json", "{\"ok\":true}");
+  };
+  web->registerAction(forgetAct);
+
+  // Full PKI wipe: cert + key + ca + recovery_token + metadata. Only
+  // fresh bootstrap-token enrollment can recover after this — used
+  // to simulate a blank-flashed device or after recovery_token has
+  // been revoked server-side. URLs preserved so operator's staging
+  // wiring survives.
+  WebActionSpec wipeAct;
+  wipeAct.id              = "cert.wipeAll";
+  wipeAct.title           = "Reset PKI (full wipe)";
+  wipeAct.icon            = "DeleteSweep";
+  wipeAct.color           = "error";
+  wipeAct.auth            = WebAuthLevel::Admin;
+  wipeAct.successMessage  = "PKI fully wiped — re-enrollment required";
+  wipeAct.handler = [this](AsyncWebServerRequest* r) {
+    update([](CertManagerSettings& s) {
+      s.device_cert_pem = String();
+      s.device_key_pem  = String();
+      s.ca_bundle_pem   = String();
+      s.recovery_token  = String();
+      s.serial_hex      = String();
+      s.subject_cn      = String();
+      s.not_after_ts    = 0;
+      return StateUpdateResult::CHANGED;
+    }, "cert.wipeAll");
+    if (_tls) _tls->clearClientCert();
+    Serial.println("[cert.wipeAll] full PKI wipe — cert+key+ca+"
+                   "recovery_token cleared");
+    r->send(200, "application/json", "{\"ok\":true}");
+  };
+  web->registerAction(wipeAct);
 
   WebFeatureSpec spec;
   spec.id         = "certManager";
@@ -482,8 +593,11 @@ void CertManagerService::refreshRuntimeState() {
 
   if (_state.device_cert_pem.length() == 0 ||
       _state.device_key_pem.length()  == 0) {
-    // No cert on disk — operator must enroll.
-    newState = S::NeedsEnrollment;
+    // No cert on disk. If a recovery task is already polling, we're
+    // in the gray zone (operator triggered recovery after forget /
+    // partial wipe); otherwise it's plain NeedsEnrollment.
+    newState = (_recoveryTask != nullptr) ? S::GrayZone
+                                          : S::NeedsEnrollment;
   } else {
     // Phase 1.7 will add real expiry parsing from cert PEM. For now
     // trust the persisted not_after_ts field (set by enrollment in
@@ -677,21 +791,13 @@ bool CertManagerService::buildCsr(const String& keyPem,
   return ok;
 }
 
-// Subject CN = "device-<mac-hex-lowercase-no-sep>". Stable per-device,
-// matches what server-side admin UI shows when reviewing pending
-// enrollments. Used by buildCsr and exposed as a status field once
-// the cert is signed.
+// Subject CN = canonical device ID — single source of truth lives in
+// DeviceIdentity.h. Anything else that needs to reference / display
+// the same identity (System Status page, mothership payload) MUST go
+// through DeviceIdentity::canonical() so format changes propagate
+// atomically.
 String CertManagerService::deviceSubjectCN() const {
-#if defined(ESP32)
-  uint8_t mac[6] = {0};
-  esp_read_mac(mac, ESP_MAC_WIFI_STA);
-  char buf[24];
-  snprintf(buf, sizeof(buf), "device-%02x%02x%02x%02x%02x%02x",
-           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-  return String(buf);
-#else
-  return String("device-unknown");
-#endif
+  return DeviceIdentity::canonical();
 }
 
 // ===== Phase 1.5 — Enrollment HTTPS POST =====

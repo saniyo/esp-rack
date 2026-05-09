@@ -11,19 +11,12 @@ NTPSettingsService::NTPSettingsService(ConfigManager* cfgMgr)
            NTPSettings::readConfig,
            NTPSettings::update,
            false /*autoSave*/) {
-#ifdef ESP32
   WiFi.onEvent(
       std::bind(&NTPSettingsService::onStationModeDisconnected, this, std::placeholders::_1, std::placeholders::_2),
       WiFiEvent_t::ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
   WiFi.onEvent(
       std::bind(&NTPSettingsService::onStationModeGotIP, this, std::placeholders::_1, std::placeholders::_2),
       WiFiEvent_t::ARDUINO_EVENT_WIFI_STA_GOT_IP);
-#elif defined(ESP8266)
-  _onStationModeDisconnectedHandler = WiFi.onStationModeDisconnected(
-      std::bind(&NTPSettingsService::onStationModeDisconnected, this, std::placeholders::_1));
-  _onStationModeGotIPHandler =
-      WiFi.onStationModeGotIP(std::bind(&NTPSettingsService::onStationModeGotIP, this, std::placeholders::_1));
-#endif
 
   addUpdateHandler([this](const String& origin) {
     configureNTP();
@@ -91,7 +84,6 @@ void NTPSettingsService::loop() {
   }
 }
 
-#ifdef ESP32
 void NTPSettingsService::onStationModeGotIP(WiFiEvent_t event, WiFiEventInfo_t info) {
   Serial.println(F("Got IP address, starting NTP synchronization."));
   configureNTP();
@@ -100,30 +92,14 @@ void NTPSettingsService::onStationModeDisconnected(WiFiEvent_t event, WiFiEventI
   Serial.println(F("WiFi dropped, stopping NTP."));
   configureNTP();
 }
-#elif defined(ESP8266)
-void NTPSettingsService::onStationModeGotIP(const WiFiEventStationModeGotIP& event) {
-  configureNTP();
-}
-void NTPSettingsService::onStationModeDisconnected(const WiFiEventStationModeDisconnected& event) {
-  configureNTP();
-}
-#endif
 
 void NTPSettingsService::configureNTP() {
   if (WiFi.isConnected() && _state.enabled) {
     Serial.println(F("Starting NTP..."));
-#ifdef ESP32
     configTzTime(_state.tzFormat.c_str(), _state.server.c_str());
-#elif defined(ESP8266)
-    configTime(_state.tzFormat.c_str(), _state.server.c_str());
-#endif
   } else {
-#ifdef ESP32
     setenv("TZ", _state.tzFormat.c_str(), 1);
     tzset();
-#elif defined(ESP8266)
-    setTZ(_state.tzFormat.c_str());
-#endif
     // IDF 5 panics with "Required to lock TCPIP core functionality!"
     // when sntp_stop() is called bare from a non-tcpip thread.
     // WIFI_SAFE_SNTP_STOP() routes to esp_sntp_stop() (locked wrapper)

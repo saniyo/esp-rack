@@ -1,5 +1,6 @@
 #include <WiFiSettingsService.h>
 #include <WebManager.h>
+#include <DeviceIdentity.h>
 
 // File-scope snapshot of the service's dual-AP selection. buildForm / wsRead
 // live on WiFiSettings (no service pointer), so the service writes here and
@@ -108,7 +109,7 @@ void WiFiSettings::buildForm(WiFiSettings& s, JsonObject& root) {
   FormBuilder::addTextField(status, "local_ip", AF::R, localIp.c_str(),
                             label("Local IP"), icon("Router"));
 
-  const String mac = WiFi.macAddress();
+  const String mac = DeviceIdentity::macColon();
   FormBuilder::addTextField(status, "mac_address", AF::R, mac.c_str(),
                             label("MAC address"), icon("DeviceHub"));
 
@@ -505,12 +506,8 @@ void WiFiSettingsService::reconfigureWiFiConnection() {
   s_activeAp = _activeAp;
   _apAttempts = 0;
 
-#ifdef ESP32
   WiFi.disconnect(false, true);
   _stopping = false;
-#elif defined(ESP8266)
-  WiFi.disconnect(false);
-#endif
 }
 
 void WiFiSettingsService::pickActiveCreds(String& outSsid, String& outPass) {
@@ -555,29 +552,18 @@ void WiFiSettingsService::manageSTA() {
     WiFi.config(_state.localIP, _state.gatewayIP, _state.subnetMask,
                 _state.dnsIP1, _state.dnsIP2);
   } else {
-#ifdef ESP32
     WiFi.config(INADDR_NONE, INADDR_NONE, INADDR_NONE);
     WiFi.setHostname(_state.hostname.c_str());
-#elif defined(ESP8266)
-    WiFi.config(INADDR_ANY, INADDR_ANY, INADDR_ANY);
-    WiFi.hostname(_state.hostname);
-#endif
   }
   WiFi.begin(ssid.c_str(), password.c_str());
 }
 
 void WiFiSettingsService::ensureStaEnabledNoKillAp() {
-#ifdef ESP32
   wifi_mode_t mode = (wifi_mode_t)WiFi.getMode();
   if ((mode & WIFI_STA) != 0) return;
   if ((mode & WIFI_AP) != 0)       WiFi.mode(WIFI_AP_STA);
   else if (mode == WIFI_OFF)       WiFi.mode(WIFI_STA);
   else                             WiFi.mode(WIFI_STA);
-#elif defined(ESP8266)
-  if (WiFi.getMode() != WIFI_STA && WiFi.getMode() != WIFI_AP_STA) {
-    WiFi.mode(WIFI_AP_STA);
-  }
-#endif
 }
 
 #ifdef ESP32

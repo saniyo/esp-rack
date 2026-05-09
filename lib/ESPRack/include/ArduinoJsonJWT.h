@@ -6,11 +6,7 @@
 #include <libb64/cdecode.h>
 #include <libb64/cencode.h>
 
-#ifdef ESP32
 #include <mbedtls/md.h>
-#elif defined(ESP8266)
-#include <bearssl/bearssl_hmac.h>
-#endif
 
 class ArduinoJsonJWT {
  private:

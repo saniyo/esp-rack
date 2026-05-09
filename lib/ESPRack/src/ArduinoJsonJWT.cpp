@@ -12,33 +12,19 @@ String ArduinoJsonJWT::getSecret() {
 }
 
 /*
- * ESP32 uses mbedtls, ESP2866 uses bearssl.
- *
- * Both come with decent HMAC implmentations supporting sha256, as well as others.
- *
- * No need to pull in additional crypto libraries - lets use what we already have.
+ * HMAC-SHA256 via mbedtls (bundled with arduino-esp32). No
+ * additional crypto libraries pulled in.
  */
 String ArduinoJsonJWT::sign(String& payload) {
   unsigned char hmacResult[32];
-  {
-#ifdef ESP32
-    mbedtls_md_context_t ctx;
-    mbedtls_md_type_t md_type = MBEDTLS_MD_SHA256;
-    mbedtls_md_init(&ctx);
-    mbedtls_md_setup(&ctx, mbedtls_md_info_from_type(md_type), 1);
-    mbedtls_md_hmac_starts(&ctx, (unsigned char*)_secret.c_str(), _secret.length());
-    mbedtls_md_hmac_update(&ctx, (unsigned char*)payload.c_str(), payload.length());
-    mbedtls_md_hmac_finish(&ctx, hmacResult);
-    mbedtls_md_free(&ctx);
-#elif defined(ESP8266)
-    br_hmac_key_context keyCtx;
-    br_hmac_key_init(&keyCtx, &br_sha256_vtable, _secret.c_str(), _secret.length());
-    br_hmac_context hmacCtx;
-    br_hmac_init(&hmacCtx, &keyCtx, 0);
-    br_hmac_update(&hmacCtx, payload.c_str(), payload.length());
-    br_hmac_out(&hmacCtx, hmacResult);
-#endif
-  }
+  mbedtls_md_context_t ctx;
+  mbedtls_md_type_t md_type = MBEDTLS_MD_SHA256;
+  mbedtls_md_init(&ctx);
+  mbedtls_md_setup(&ctx, mbedtls_md_info_from_type(md_type), 1);
+  mbedtls_md_hmac_starts(&ctx, (unsigned char*)_secret.c_str(), _secret.length());
+  mbedtls_md_hmac_update(&ctx, (unsigned char*)payload.c_str(), payload.length());
+  mbedtls_md_hmac_finish(&ctx, hmacResult);
+  mbedtls_md_free(&ctx);
   return encode((char*)hmacResult, 32);
 }
 
@@ -93,13 +79,8 @@ void ArduinoJsonJWT::parseJWT(String jwt, JsonDocument& jsonDocument) {
 String ArduinoJsonJWT::encode(const char* cstr, int inputLen) {
   // prepare encoder
   base64_encodestate _state;
-#ifdef ESP32
   base64_init_encodestate(&_state);
   size_t encodedLength = base64_encode_expected_len(inputLen) + 1;
-#elif defined(ESP8266)
-  base64_init_encodestate_nonewlines(&_state);
-  size_t encodedLength = base64_encode_expected_len_nonewlines(inputLen) + 1;
-#endif
   // prepare buffer of correct length, returning an empty string on failure
   char* buffer = (char*)malloc(encodedLength * sizeof(char));
   if (buffer == nullptr) {

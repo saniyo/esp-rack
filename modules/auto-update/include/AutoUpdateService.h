@@ -7,13 +7,8 @@
 #include <ConfigDelegate.h>
 #include <Arduino.h>
 
-#ifdef ESP32
 #include <WiFi.h>
 #include <HTTPUpdate.h>
-#elif defined(ESP8266)
-#include <ESP8266WiFi.h>
-#include <ESP8266httpUpdate.h>
-#endif
 
 #define AUTO_UPDATE_SETTINGS_FILE "/config/autoUpdateSettings.json"
 #define AUTO_UPDATE_SERVICE_PATH "/rest/autoUpdateSettings"
@@ -234,17 +229,9 @@ class AutoUpdateService : public StatefulService<AutoUpdateSettings> {
   unsigned long _otaStartMs;
   TaskHandle_t _otaTaskHandle;
 
-#ifdef ESP32
   void onStationModeGotIP(WiFiEvent_t event, WiFiEventInfo_t info);
   void onStationModeDisconnected(WiFiEvent_t event, WiFiEventInfo_t info);
   void onStationModeLostIP(WiFiEvent_t event, WiFiEventInfo_t info);
-#elif defined(ESP8266)
-  WiFiEventHandler _onStationModeGotIPHandler;
-  WiFiEventHandler _onStationModeDisconnectedHandler;
-
-  void onStationModeGotIP(const WiFiEventStationModeGotIP& event);
-  void onStationModeDisconnected(const WiFiEventStationModeDisconnected& event);
-#endif
 
   const char* _deviceName;
   const char* _deviceVersion;

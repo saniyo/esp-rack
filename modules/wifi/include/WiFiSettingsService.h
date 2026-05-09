@@ -10,11 +10,7 @@
 #include <JsonUtils.h>
 #include <IPUtils.h>
 
-#ifdef ESP32
 #include <WiFi.h>
-#elif defined(ESP8266)
-#include <ESP8266WiFi.h>
-#endif
 
 #ifndef FACTORY_WIFI_SSID
 #define FACTORY_WIFI_SSID ""
@@ -25,7 +21,7 @@
 #endif
 
 #ifndef FACTORY_WIFI_HOSTNAME
-#define FACTORY_WIFI_HOSTNAME "#{platform}-#{unique_id}"
+#define FACTORY_WIFI_HOSTNAME "#{device_id_short}"
 #endif
 
 // Persisted config path — MUST stay identical to the pre-WebManager layout

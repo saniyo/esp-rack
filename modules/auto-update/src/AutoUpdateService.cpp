@@ -2,30 +2,38 @@
 #include "AutoUpdateService.h"
 
 #include <WebManager.h>
+#include <DeviceIdentity.h>
 
-#ifdef ESP32
 #include <HTTPClient.h>
-#elif defined(ESP8266)
-#include <ESP8266HTTPClient.h>
-#endif
 
-static String buildUpdateUrl(const String& baseUrl, const String& basePlatform, const String& hwFlavor, const String& curVer) {
+static String buildUpdateUrl(const String& baseUrl,
+                              const String& basePlatform,
+                              const String& hwFlavor,
+                              const String& curVer,
+                              const String& deviceId,
+                              const String& hwRev) {
   String url = baseUrl;
   if (url.indexOf('?') == -1) url += "?";
   else url += "&";
   url += "dev=" + basePlatform;
   url += "&flv=" + hwFlavor;
   url += "&ver=" + curVer;
+  // Canonical device ID — "<project>-<mac>-<uid8>" — same string as
+  // X.509 Subject CN and mothership deviceId. Server can use it for
+  // per-device update channels (canary / staging / pinned firmware)
+  // without parsing the cert.
+  url += "&did=" + deviceId;
+  // Hardware board revision (FACTORY_HW_REVISION). Lets the update
+  // server return different firmware artefacts for rev-A vs rev-B
+  // boards built off the same project. Omitted when empty.
+  if (hwRev.length() > 0) {
+    url += "&hw=" + hwRev;
+  }
   return url;
 }
 
 static String computeHwSuffix() {
-  String chip = "unknown";
-#ifdef ESP32
-  chip = ESP.getChipModel();
-#elif defined(ESP8266)
-  chip = "esp8266";
-#endif
+  String chip = ESP.getChipModel();
   chip.toLowerCase();
   chip.replace("-", "");
   chip.replace(" ", "");
@@ -33,11 +41,8 @@ static String computeHwSuffix() {
   uint32_t flashBytes = ESP.getFlashChipSize();
   int flashMB = (int)((flashBytes + 512UL * 1024UL) / (1024UL * 1024UL));
 
-  int psramMB = 0;
-#ifdef ESP32
   uint32_t psramBytes = ESP.getPsramSize();
-  psramMB = (int)((psramBytes + 512UL * 1024UL) / (1024UL * 1024UL));
-#endif
+  int psramMB = (int)((psramBytes + 512UL * 1024UL) / (1024UL * 1024UL));
 
   String suffix = chip + "-n" + String(flashMB);
   if (psramMB > 0) {
@@ -81,7 +86,6 @@ AutoUpdateService::AutoUpdateService(AsyncWebServer* server,
   _state.lastResultTime = "";
   _state.otaElapsedSec = 0;
 
-#ifdef ESP32
   WiFi.onEvent(
       std::bind(&AutoUpdateService::onStationModeGotIP, this, std::placeholders::_1, std::placeholders::_2),
       WiFiEvent_t::ARDUINO_EVENT_WIFI_STA_GOT_IP);
@@ -91,13 +95,6 @@ AutoUpdateService::AutoUpdateService(AsyncWebServer* server,
   WiFi.onEvent(
       std::bind(&AutoUpdateService::onStationModeLostIP, this, std::placeholders::_1, std::placeholders::_2),
       WiFiEvent_t::ARDUINO_EVENT_WIFI_STA_LOST_IP);
-#elif defined(ESP8266)
-  _onStationModeGotIPHandler =
-      WiFi.onStationModeGotIP(std::bind(&AutoUpdateService::onStationModeGotIP, this, std::placeholders::_1));
-  _onStationModeDisconnectedHandler =
-      WiFi.onStationModeDisconnected(
-          std::bind(&AutoUpdateService::onStationModeDisconnected, this, std::placeholders::_1));
-#endif
 }
 
 void AutoUpdateService::registerManifest(WebManager* web) {
@@ -231,12 +228,17 @@ int AutoUpdateService::preflightCheck(const String& url, uint32_t timeoutMs, Str
     return -1;
   }
 
-  // Add MAC header — server uses it for whitelist check
-#ifdef ESP32
-  http.addHeader("x-ESP32-STA-MAC", WiFi.macAddress());
-#elif defined(ESP8266)
-  http.addHeader("x-ESP8266-STA-MAC", WiFi.macAddress());
-#endif
+  // Add MAC header — server uses it for whitelist check.
+  // DeviceIdentity::macColon() returns the same upper-case colon
+  // format as WiFi.macAddress() so existing server-side whitelists
+  // keep matching.
+  const String macHeader = DeviceIdentity::macColon();
+  http.addHeader("x-ESP32-STA-MAC", macHeader);
+
+  // Send canonical device ID alongside the MAC. Server can use this
+  // for richer routing (project + per-device fingerprint) once the
+  // backend learns about it; older servers ignore unknown headers.
+  http.addHeader("x-ESPRack-Device-Id", DeviceIdentity::canonical());
 
   int code = http.GET();
 
@@ -266,13 +268,6 @@ t_httpUpdate_return AutoUpdateService::performUpdate(const String& url) {
   Serial.printf("[AutoUpdate] OTA download: %s\n", url.c_str());
   setOtaState(AU_DOWNLOADING);
 
-#ifdef ESP8266
-  ESPhttpUpdate.rebootOnUpdate(false);
-  if (_progressCallback) {
-    ESPhttpUpdate.onProgress([this](int cur, int total) { _progressCallback(cur, total); });
-  }
-  return ESPhttpUpdate.update(WiFi, url, _state.currentVersion);
-#elif defined(ESP32)
   httpUpdate.rebootOnUpdate(false);
   httpUpdate.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
   if (_progressCallback) {
@@ -281,7 +276,6 @@ t_httpUpdate_return AutoUpdateService::performUpdate(const String& url) {
   WiFiClient client;
   client.setTimeout(_state.updateTimeoutSec);
   return httpUpdate.update(client, url, _state.currentVersion);
-#endif
 }
 
 // ====================================================
@@ -303,8 +297,10 @@ void AutoUpdateService::checkForUpdate() {
 
   String basePlatform = String(_deviceName);
   basePlatform.toLowerCase();
-  const String primaryUrl = buildUpdateUrl(String(HARD_UPDATE_SERVER_URL), basePlatform, _state.hwSuffix, _state.currentVersion);
-  const String fallbackUrl = buildUpdateUrl(_state.serverUrl, basePlatform, _state.hwSuffix, _state.currentVersion);
+  const String deviceId = DeviceIdentity::canonical();
+  const String hwRev    = DeviceIdentity::hwRevision();
+  const String primaryUrl  = buildUpdateUrl(String(HARD_UPDATE_SERVER_URL), basePlatform, _state.hwSuffix, _state.currentVersion, deviceId, hwRev);
+  const String fallbackUrl = buildUpdateUrl(_state.serverUrl,                basePlatform, _state.hwSuffix, _state.currentVersion, deviceId, hwRev);
 
   // --- 1) Primary server preflight ---
   String body;
@@ -385,13 +381,8 @@ void AutoUpdateService::checkForUpdate() {
 void AutoUpdateService::handleOtaResult(t_httpUpdate_return ret, const char* server) {
   switch (ret) {
     case HTTP_UPDATE_FAILED: {
-#ifdef ESP8266
-      int err = ESPhttpUpdate.getLastError();
-      String errStr = ESPhttpUpdate.getLastErrorString();
-#elif defined(ESP32)
       int err = httpUpdate.getLastError();
       String errStr = httpUpdate.getLastErrorString();
-#endif
       char lr[256];
       snprintf(lr, sizeof(lr), "%s failed (%d): %s", server, err, errStr.c_str());
       Serial.printf("[AutoUpdate] %s\n", lr);
@@ -418,7 +409,6 @@ void AutoUpdateService::handleOtaResult(t_httpUpdate_return ret, const char* ser
 // ====================================================
 // WiFi event handlers
 // ====================================================
-#ifdef ESP32
 void AutoUpdateService::onStationModeGotIP(WiFiEvent_t event, WiFiEventInfo_t info) {
   _wifiConnected = true;
   if (!_checkedOnce) {
@@ -435,17 +425,3 @@ void AutoUpdateService::onStationModeDisconnected(WiFiEvent_t event, WiFiEventIn
 void AutoUpdateService::onStationModeLostIP(WiFiEvent_t event, WiFiEventInfo_t info) {
   _wifiConnected = false;
 }
-
-#elif defined(ESP8266)
-void AutoUpdateService::onStationModeGotIP(const WiFiEventStationModeGotIP& event) {
-  _wifiConnected = true;
-  if (!_checkedOnce) {
-    _checkedOnce = true;
-    _lastCheckMs = 0;
-  }
-}
-
-void AutoUpdateService::onStationModeDisconnected(const WiFiEventStationModeDisconnected& event) {
-  _wifiConnected = false;
-}
-#endif

@@ -9,17 +9,13 @@
 #include <WebFeatureDelegate.h>
 
 #include <time.h>
-#ifdef ESP32
 #include <WiFi.h>
 #include <esp_idf_version.h>
-// SNTP API split:
-//  - reads (sntp_enabled / sntp_getservername) work on every IDF version
-//    without TCPIP-core locking — they touch read-only globals.
-//  - control writes (sntp_stop / sntp_init) MUST be wrapped in
-//    LOCK_TCPIP_CORE() on IDF 5+ (Arduino-3.x, C6); the bare raw-API
-//    asserts otherwise. esp_sntp_stop() is the locked wrapper added in
-//    IDF 5; on IDF 4 (Arduino-2.x, S3) we still call sntp_stop() because
-//    the wrapper is missing there.
+// SNTP API split between Arduino-2.x (IDF 4, S3) and Arduino-3.x
+// (IDF 5+, C6). On IDF 5+ control writes MUST be wrapped in
+// LOCK_TCPIP_CORE() — esp_sntp_stop() does that internally; the
+// bare sntp_stop() asserts. Reads (sntp_enabled / sntp_getservername)
+// work on every IDF version without locking.
 #if ESP_IDF_VERSION_MAJOR >= 5
 #include <esp_sntp.h>
 #define WIFI_SAFE_SNTP_STOP()       esp_sntp_stop()
@@ -27,13 +23,6 @@
 #define WIFI_SAFE_SNTP_GETSERVER(i) esp_sntp_getservername(i)
 #else
 #include <lwip/apps/sntp.h>
-#define WIFI_SAFE_SNTP_STOP()       sntp_stop()
-#define WIFI_SAFE_SNTP_ENABLED()    sntp_enabled()
-#define WIFI_SAFE_SNTP_GETSERVER(i) sntp_getservername(i)
-#endif
-#elif defined(ESP8266)
-#include <ESP8266WiFi.h>
-#include <sntp.h>
 #define WIFI_SAFE_SNTP_STOP()       sntp_stop()
 #define WIFI_SAFE_SNTP_ENABLED()    sntp_enabled()
 #define WIFI_SAFE_SNTP_GETSERVER(i) sntp_getservername(i)
@@ -188,15 +177,8 @@ class NTPSettingsService : public StatefulService<NTPSettings> {
   WebFeatureEntry<NTPSettings>* _feature{nullptr};
   unsigned long _lastTickMs{0};
 
-#ifdef ESP32
   void onStationModeGotIP(WiFiEvent_t event, WiFiEventInfo_t info);
   void onStationModeDisconnected(WiFiEvent_t event, WiFiEventInfo_t info);
-#elif defined(ESP8266)
-  WiFiEventHandler _onStationModeDisconnectedHandler;
-  WiFiEventHandler _onStationModeGotIPHandler;
-  void onStationModeGotIP(const WiFiEventStationModeGotIP& event);
-  void onStationModeDisconnected(const WiFiEventStationModeDisconnected& event);
-#endif
 
   void configureNTP();
 };

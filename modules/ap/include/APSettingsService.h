@@ -13,17 +13,13 @@
 
 #include <DNSServer.h>
 #include <IPAddress.h>
-#ifdef ESP32
 #include <WiFi.h>
-#elif defined(ESP8266)
-#include <ESP8266WiFi.h>
-#endif
 
 #ifndef FACTORY_AP_PROVISION_MODE
 #define FACTORY_AP_PROVISION_MODE AP_MODE_ALWAYS
 #endif
 #ifndef FACTORY_AP_SSID
-#define FACTORY_AP_SSID "ESP-React-#{unique_id}"
+#define FACTORY_AP_SSID "ESPRack-#{device_id_short}"
 #endif
 #ifndef FACTORY_AP_PASSWORD
 #define FACTORY_AP_PASSWORD "esp-react"

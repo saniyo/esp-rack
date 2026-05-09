@@ -5,6 +5,7 @@
 #include "Version.h"
 #include "WebFeatureSpec.h"
 #include "TLSContextService.h"
+#include "DeviceIdentity.h"
 
 #include <ESPAsyncWebServer.h>
 #include <WiFi.h>
@@ -66,6 +67,19 @@ App::App(AsyncWebServer* server, const char* deviceName, const char* deviceVersi
     // of init-list sequence; -Wreorder fires if these don't match.
     tlsContext_   {std::unique_ptr<TLSContextService>(new TLSContextService())},
     tls_          {tlsContext_.get()} {
+  // Publish the canonical identity strings to DeviceIdentity so every
+  // consumer reads the same source of truth — CertManagerService
+  // (Subject CN), AutoUpdateService (HTTP headers / URL query),
+  // MothershipService (checkin payload), SystemStatus (Identity tab).
+  // On Arduino-ESP32 esp_app_get_description() leaks "arduino-lib-
+  // builder" through, so we override with what Builder("...","...")
+  // got and what the consumer's factory_settings.ini declared.
+  DeviceIdentity::setProjectName(deviceName_.c_str());
+  DeviceIdentity::setVersion(deviceVersion_.c_str());
+#ifdef FACTORY_HW_REVISION
+  DeviceIdentity::setHwRevision(FACTORY_HW_REVISION);
+#endif
+
   // Framework-owned UI shell — registered BEFORE Builder runs module
   // onInstall, so that modules calling addTabToFeature("system", ...)
   // find a parent. The buildFeatures map (exposed via /rest/uiManifest)
