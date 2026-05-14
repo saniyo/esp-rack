@@ -428,15 +428,21 @@ bool MothershipService::performOneCheckin(bool& outBurst) {
 
   // Body: {deviceId, fwVer, hwVer, hwRev, uptimeSec, freeHeap}
   // All identity fields come from the single source of truth in
-  // DeviceIdentity so this payload stays in lockstep with the
-  // X.509 cert subject + AutoUpdate URL + Identity tab readout.
-  // mTLS handshake guarantees the device IS that subject CN; the
-  // JSON-side deviceId is for human-readable log lines / DB row
-  // lookups only.
+  // DeviceIdentity so this payload stays in lockstep with the X.509
+  // cert subject + AutoUpdate URL + Identity tab readout. mTLS
+  // handshake guarantees the device IS the subject CN; the JSON
+  // deviceId is for human-readable log lines + DB row lookups only.
+  //
+  // hwVer uses chipModelFull() ("ESP32-S3-N16R8V") instead of the
+  // bare ESP.getChipModel() ("ESP32-S3") so the fleet view shows the
+  // memory variant — operator needs to tell N16R8 from N8R2 at a
+  // glance when picking firmware.
   DynamicJsonDocument req(1024);
   req["deviceId"]  = _cert->subjectCN();
   req["fwVer"]     = DeviceIdentity::version();
-  req["hwVer"]     = DeviceIdentity::chipModelFull();   // "ESP32-S3-N16R8V"
+  req["hwVer"]     = DeviceIdentity::chipModelFull();
+  // Only emit hwRev when the consumer set FACTORY_HW_REVISION —
+  // empty string would just be noise on the server side.
   if (DeviceIdentity::hwRevision().length() > 0) {
     req["hwRev"]   = DeviceIdentity::hwRevision();
   }
@@ -585,16 +591,25 @@ String MothershipService::actionSetConfig(JsonObjectConst params) {
 }
 
 String MothershipService::actionReboot(JsonObjectConst params) {
-  // Schedule a deferred reboot so we can return the response first.
-  // 2-second delay gives the HTTP client time to flush.
   (void)params;
-  Serial.println("[mship.action.reboot] in 2s...");
-  // Schedule via FreeRTOS so we don't block this task.
-  xTaskCreate([](void*) {
-    vTaskDelay(pdMS_TO_TICKS(2000));
-    ESP.restart();
-  }, "mship.reboot", 2048, nullptr, 1, nullptr);
-  return "scheduled in 2s";
+  // Reboot directly, no grace period, no separate task. The prior
+  // "spawn task with vTaskDelay(2000); ESP.restart()" pattern raced
+  // with AsyncWebSocket cleanup on the main loop (which lives on a
+  // different core): during the 2 s window the AP often kicks the
+  // STA (ASSOC_LEAVE), AsyncTCP queues a client-disconnect cleanup,
+  // and the main loop's WsManager::processAllQueues runs the SAME
+  // cleanup concurrently → AsyncWebSocketClient destructor's deque
+  // gets double-freed → tlsf_free assert → panic instead of clean
+  // reboot. Calling esp_restart() inline from the check-in task
+  // collapses the window to zero: the HTTP response is already
+  // received (we're inside dispatchActions, the check-in POST has
+  // returned), nothing on this side needs to flush. The browser
+  // sees TCP-RST on its open WS sockets, exactly the same as on
+  // any other reset path.
+  Serial.println("[mship.action.reboot] esp_restart()");
+  Serial.flush();
+  esp_restart();   // does not return
+  return "rebooting";
 }
 
 String MothershipService::actionLog(JsonObjectConst params) {
