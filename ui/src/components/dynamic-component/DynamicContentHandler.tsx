@@ -33,7 +33,10 @@ import MessageField from './elements/MessageField';
 import TimeZones from './elements/TimeZones';
 import IPAddressField from './elements/IPAddressField';
 import DefaultComponent from './elements/DefaultComponent';
+import EndpointMissing from './elements/EndpointMissing';
 import { useDynamicForm } from './DynamicFormContext';
+import { useManifest } from '../../contexts/manifest';
+import { endpointAvailable, findAction } from '../../utils/manifestEndpoints';
 
 interface DynamicContentHandlerProps {
   title: string;
@@ -132,6 +135,15 @@ const DynamicContentHandler: FC<DynamicContentHandlerProps> = ({
   // button is clicked after a row pick.
   const { setLiveValue } = useDynamicForm();
 
+  // Manifest snapshot used by the endpoint-availability check below.
+  // ManifestLoader gates children on `revealComplete`, so by the time
+  // this component mounts the manifest is final and findFeature returns
+  // a stable result across renders. Used to detect widgets whose backend
+  // (FileSystemModule, an OTA endpoint, an action whose owning module
+  // was opted out, …) wasn't installed on this build — those widgets
+  // would otherwise spinner-forever or 404-snackbar-spam.
+  const { manifest } = useManifest();
+
   const handleInputChange = (label: string, value: any) => {
     setFormState((prevState) => ({
       ...prevState,
@@ -195,16 +207,66 @@ const DynamicContentHandler: FC<DynamicContentHandlerProps> = ({
         return <RadioField key={fieldKey} {...commonProps} />;
       case 'trend':
         return <TrendChart key={fieldKey} {...commonProps} />;
-      case 'files':
+      case 'files': {
+        const { optionMap: om } = parseFieldOptions(field.label, field.o);
+        const base = ((om as any).base?.value as string) || '/rest/fs';
+        if (!endpointAvailable(manifest, base)) {
+          return (
+            <EndpointMissing
+              key={fieldKey}
+              label={field.label}
+              endpoint={`${base}/*`}
+              reason="FileSystem module not installed — add .install<FileSystemModule>() to the composition root."
+            />
+          );
+        }
         return <FilesField key={fieldKey} field={field} />;
-      case 'upload':
+      }
+      case 'upload': {
+        const { optionMap: om } = parseFieldOptions(field.label, field.o);
+        const url = (om as any).url?.value as string | undefined;
+        if (url && !endpointAvailable(manifest, url)) {
+          return (
+            <EndpointMissing
+              key={fieldKey}
+              label={field.label}
+              endpoint={url}
+              reason="Upload endpoint not registered — the backend module that exposes this URL isn't installed."
+            />
+          );
+        }
         return <UploadField key={fieldKey} field={field} />;
+      }
       case 'table':
         return <TableField key={fieldKey} field={field} value={formState[field.label]} onChange={handleInputChange} formState={formState} />;
       case 'datetime':
         return <DateTimeField key={fieldKey} {...commonProps} />;
-      case 'action':
+      case 'action': {
+        const { optionMap: om } = parseFieldOptions(field.label, field.o);
+        const ref = (om as any).ref?.value as string | undefined;
+        const url = (om as any).url?.value as string | undefined;
+        if (ref && !findAction(manifest, ref)) {
+          return (
+            <EndpointMissing
+              key={fieldKey}
+              label={field.label}
+              endpoint={`actionRef:${ref}`}
+              reason="Action not registered — the owning backend module isn't installed."
+            />
+          );
+        }
+        if (!ref && url && !endpointAvailable(manifest, url)) {
+          return (
+            <EndpointMissing
+              key={fieldKey}
+              label={field.label}
+              endpoint={url}
+              reason="Action endpoint not registered — the backend module that handles this URL isn't installed."
+            />
+          );
+        }
         return <ActionField key={fieldKey} field={field} value={formState[field.label]} />;
+      }
       case 'message':
         return <MessageField key={fieldKey} field={field} value={formState[field.label]} />;
       case 'timezones':
