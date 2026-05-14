@@ -222,6 +222,17 @@ class WebManager {
       out_status = 400;
       return false;
     }
+    // Special case: /rest/uiManifest. The browser-facing handler
+    // streams the body via AsyncResponseStream to keep heap flat,
+    // but rest.proxy expects a JsonObject. We rebuild the manifest
+    // in-memory here — it costs a few KB of transient heap (caller
+    // pre-sized out_body) and there's no other way to expose the
+    // schema-driven UI to Mothership without reaching for the wire.
+    if (String(method) == "GET" && String(path) == UI_MANIFEST_PATH) {
+      buildManifestObject(out_body.to<JsonObject>());
+      out_status = 200;
+      return true;
+    }
     // Generic proxy-endpoint registry. Modules that mount their REST
     // handler directly on AsyncWebServer (rather than as an
     // IWebFeatureEntry — see e.g. FeaturesService, which only serves
@@ -262,6 +273,21 @@ class WebManager {
     _proxyEndpoints.push_back(std::move(pe));
   }
 
+  // Single-shot (non-streaming) manifest builder for rest.proxy +
+  // device-side manifest_rev hashing. Same data shape as
+  // serveManifest's authenticated tier — features, modules, device,
+  // buildFeatures — but written into a pre-allocated JsonObject
+  // instead of streamed via AsyncResponseStream. The caller is
+  // responsible for document sizing (typical ~8 KB covers the full
+  // manifest of a normal-sized consumer project).
+  //
+  // Authentication is intentionally bypassed — the caller is either
+  // (a) the mothership rest.proxy path which has already cleared the
+  // mTLS gate on /api/v1/checkin, or (b) the device's MothershipService
+  // computing a CRC of its own manifest to send as manifest_rev.
+  // Local-browser /rest/uiManifest still goes through serveManifest
+  // (which honors JWT auth).
+  void buildManifestObject(JsonObject root);
 
  private:
   void serveManifest(AsyncWebServerRequest* request);

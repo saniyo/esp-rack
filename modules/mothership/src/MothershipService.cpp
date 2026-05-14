@@ -8,6 +8,7 @@
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
+#include <esp_rom_crc.h>
 #include <esp_system.h>
 
 // ===== Persistence =====
@@ -484,6 +485,36 @@ bool MothershipService::performOneCheckin(bool& outBurst) {
   }
   req["uptimeSec"] = (uint32_t)(millis() / 1000);
   req["freeHeap"]  = ESP.getFreeHeap();
+
+  // Phase 5 — manifest_rev is a 32-bit CRC over the device's manifest
+  // metadata that changes only when the operator changes the
+  // installed-module set (firmware rebuild). Calculated lazily on the
+  // first check-in after boot, cached afterwards (manifest is static
+  // post-boot). Server compares against its cached value and queues
+  // rest.proxy(GET /rest/uiManifest) when they diverge — avoids
+  // shipping the full manifest on every check-in.
+  static uint32_t cached_manifest_rev = 0;
+  if (cached_manifest_rev == 0 && _web) {
+    DynamicJsonDocument manifestDoc(8192);
+    JsonObject mo = manifestDoc.to<JsonObject>();
+    _web->buildManifestObject(mo);
+    // Drop the device subobject from the CRC — fwVer / hwVer change
+    // independently of the actual feature set. We want manifest_rev
+    // to track ONLY the registered feature + module + endpoint shape.
+    manifestDoc.remove("device");
+    String serialised;
+    serializeJson(manifestDoc, serialised);
+    cached_manifest_rev = esp_rom_crc32_le(
+        0xffffffff,
+        reinterpret_cast<const uint8_t*>(serialised.c_str()),
+        serialised.length());
+    Serial.printf("[mship.do] manifest_rev computed = 0x%08x (%u B)\n",
+                  (unsigned)cached_manifest_rev,
+                  (unsigned)serialised.length());
+  }
+  if (cached_manifest_rev != 0) {
+    req["manifest_rev"] = cached_manifest_rev;
+  }
 
   // Phase 1 — drain pending action results into the outbound body.
   // Each entry came from a prior /checkin response whose actions[] we

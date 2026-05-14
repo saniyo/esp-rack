@@ -50,6 +50,45 @@ void WebManager::begin() {
 // (full WebFeatureSpec with tabs + actions). 4 KB leaves comfortable
 // headroom; if a single entry ever exceeded this we'd see truncation
 // of THAT entry only, never of unrelated entries downstream.
+// Single-shot manifest builder for the rest.proxy path. Browser-facing
+// /rest/uiManifest stays on AsyncResponseStream — this is the in-process
+// alternative that fills a pre-allocated JsonObject so Mothership can
+// snapshot the device's UI schema without an HTTPS round trip on each
+// poll.
+void WebManager::buildManifestObject(JsonObject root) {
+  root["schemaVersion"] = 2;
+
+  JsonObject device = root.createNestedObject("device");
+  device["name"]    = _deviceName;
+  device["version"] = _deviceVersion;
+  if (_frameworkVersion && *_frameworkVersion) {
+    device["frameworkVersion"] = _frameworkVersion;
+  }
+
+  JsonObject bf = root.createNestedObject("buildFeatures");
+  for (const auto& b : _buildFeatures) {
+    if (b.key) bf[b.key] = b.enabled;
+  }
+
+  // Trust boundary is the caller's mTLS handshake — always emit full
+  // authenticated tier.
+  root["authenticated"] = true;
+
+  JsonArray modules = root.createNestedArray("modules");
+  for (const auto& m : _modules) {
+    JsonObject mo = modules.createNestedObject();
+    mo["id"]      = m.id;
+    mo["version"] = m.version;
+  }
+
+  JsonArray features = root.createNestedArray("features");
+  for (const auto& e : _entries) {
+    if (!e) continue;
+    JsonObject fo = features.createNestedObject();
+    e->toJson(fo);
+  }
+}
+
 void WebManager::serveManifest(AsyncWebServerRequest* request) {
   // Auth probe — ALWAYS replies, never 401s here. The result decides
   // payload depth: anonymous = stub; authenticated = full. Real
