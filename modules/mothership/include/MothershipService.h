@@ -229,15 +229,25 @@ class MothershipService : public StatefulService<MothershipSettings>,
   // unboundedly while WiFi is down); head is dropped on overflow.
   struct ActionResult {
     String   reqId;
-    int      status;     // HTTP-style: 200=ok, 4xx=client err, 5xx=device err
-    String   summary;    // human-readable one-liner; what the handler returned
+    int      status;       // HTTP-style; only chunk 0 carries the "real" status
+    String   summary;      // either the full body, or a fragment if chunked
+    uint8_t  chunk_idx{0};
+    uint8_t  chunk_total{1};
   };
   std::deque<ActionResult> _resultRing;
-  static constexpr size_t  RESULT_RING_CAP = 16;
+  static constexpr size_t  RESULT_RING_CAP = 64;   // hold ~16 KB of chunks
+  static constexpr size_t  MAX_CHUNK_BYTES = 1024; // payload per ring entry
+  // Cap on how many chunks one check-in can emit so the req doc never
+  // overflows; 3 × 1 KB chunks + framing fits comfortably in 6 KB.
+  static constexpr size_t  MAX_CHUNKS_PER_CHECKIN = 3;
 
-  // Push a result entry — caller has already classified status.
-  // Drops the oldest entry on overflow so the device can never get
-  // stuck unable to record new results because of a backlog.
+  // Push a result entry. Small payloads (≤ MAX_CHUNK_BYTES) go in as a
+  // single chunk_total=1 entry; larger ones get split into N
+  // chunk_total=N entries. The drain in performOneCheckin emits up to
+  // MAX_CHUNKS_PER_CHECKIN chunks per body — long payloads (e.g. the
+  // manifest at ~12 KB) span multiple check-ins. Server reassembles
+  // by reqId and runs side-effects (manifest cache, backup save) only
+  // when chunk_total chunks have all landed.
   void pushActionResult(const String& reqId, int status, const String& summary);
 };
 

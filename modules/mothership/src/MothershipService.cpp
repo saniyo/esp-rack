@@ -459,9 +459,12 @@ bool MothershipService::performOneCheckin(bool& outBurst) {
   // memory variant — operator needs to tell N16R8 from N8R2 at a
   // glance when picking firmware.
   //
-  // 4 KB doc — header fields + up to RESULT_RING_CAP=16 action_results
-  // each ~80 B of JSON. Well under the 16 KB the server accepts.
-  DynamicJsonDocument req(4096);
+  // 6 KB doc — header fields + up to ~3 chunks per drain (each
+  // chunk capped at 1 KB summary + small framing). Large responses
+  // (rest.proxy of /rest/uiManifest = 10-15 KB) are split across
+  // multiple check-ins via pushActionResult's chunking; we never
+  // need to fit the full payload in one body.
+  DynamicJsonDocument req(6144);
   req["deviceId"]  = _cert->subjectCN();
   req["fwVer"]     = DeviceIdentity::version();
   req["hwVer"]     = DeviceIdentity::chipModelFull();
@@ -478,18 +481,32 @@ bool MothershipService::performOneCheckin(bool& outBurst) {
   // already dispatched; the server matches reqId back to the original
   // queue entry. Emitting them here piggy-backs on the existing
   // transport — no separate /api/v1/result endpoint needed.
+  //
+  // Cap how many entries (chunks) ship per check-in so the req doc
+  // never overflows. Anything left over goes next time — the server
+  // reassembles fragments across multiple check-ins by reqId.
   if (!_resultRing.empty()) {
     JsonArray results = req.createNestedArray("action_results");
-    for (const auto& r : _resultRing) {
+    size_t emitted = 0;
+    while (!_resultRing.empty() && emitted < MAX_CHUNKS_PER_CHECKIN) {
+      const ActionResult& r = _resultRing.front();
       JsonObject row = results.createNestedObject();
       row["reqId"]   = r.reqId;
       row["status"]  = r.status;
       row["ok"]      = (r.status >= 200 && r.status < 300);
       if (r.summary.length() > 0) row["summary"] = r.summary;
+      // Emit chunk fields ONLY when chunked — backward-compat with
+      // server-side legacy path that treats missing fields as
+      // chunk_total=1, chunk_idx=0.
+      if (r.chunk_total > 1) {
+        row["chunk_idx"]   = (int)r.chunk_idx;
+        row["chunk_total"] = (int)r.chunk_total;
+      }
+      _resultRing.pop_front();
+      emitted++;
     }
-    Serial.printf("[mship.do] emitting %u action_results\n",
-                  (unsigned)_resultRing.size());
-    _resultRing.clear();
+    Serial.printf("[mship.do] emitting %u action_results (%u left in ring)\n",
+                  (unsigned)emitted, (unsigned)_resultRing.size());
   }
 
   String body;
@@ -591,12 +608,55 @@ bool MothershipService::dispatchActions(JsonArrayConst actions) {
 void MothershipService::pushActionResult(const String& reqId,
                                           int status,
                                           const String& summary) {
-  if (_resultRing.size() >= RESULT_RING_CAP) {
-    Serial.printf("[mship.result] ring full, dropping head reqId=%s\n",
-                  _resultRing.front().reqId.c_str());
-    _resultRing.pop_front();
+  // Fits single chunk → push one entry with chunk_total=1.
+  if (summary.length() <= MAX_CHUNK_BYTES) {
+    if (_resultRing.size() >= RESULT_RING_CAP) {
+      Serial.printf("[mship.result] ring full, dropping head reqId=%s\n",
+                    _resultRing.front().reqId.c_str());
+      _resultRing.pop_front();
+    }
+    ActionResult r;
+    r.reqId       = reqId;
+    r.status      = status;
+    r.summary     = summary;
+    r.chunk_idx   = 0;
+    r.chunk_total = 1;
+    _resultRing.push_back(std::move(r));
+    return;
   }
-  _resultRing.push_back({reqId, status, summary});
+
+  // Larger payload — split into N chunks of MAX_CHUNK_BYTES each.
+  // Server reassembles by reqId and runs side-effects only when
+  // chunk_total chunks have all arrived.
+  const size_t total = (summary.length() + MAX_CHUNK_BYTES - 1) / MAX_CHUNK_BYTES;
+  if (total > 255) {
+    // chunk_total is uint8_t in the wire shape; refuse payloads
+    // bigger than 255 × 1 KB = ~256 KB. Manifests are well under
+    // this; if a future use case needs more, bump to uint16_t.
+    Serial.printf("[mship.result] payload too big (%u B), dropping reqId=%s\n",
+                  (unsigned)summary.length(), reqId.c_str());
+    pushActionResult(reqId, 500,
+                      String("{\"error\":\"payload_too_big\",\"bytes\":") +
+                          summary.length() + "}");
+    return;
+  }
+  Serial.printf("[mship.result] chunking reqId=%s into %u chunks (%u B total)\n",
+                reqId.c_str(), (unsigned)total, (unsigned)summary.length());
+  for (size_t i = 0; i < total; ++i) {
+    if (_resultRing.size() >= RESULT_RING_CAP) {
+      Serial.printf("[mship.result] ring full mid-split, dropping head reqId=%s\n",
+                    _resultRing.front().reqId.c_str());
+      _resultRing.pop_front();
+    }
+    ActionResult r;
+    r.reqId       = reqId;
+    r.status      = status;
+    r.summary     = summary.substring(i * MAX_CHUNK_BYTES,
+                                        (i + 1) * MAX_CHUNK_BYTES);
+    r.chunk_idx   = (uint8_t)i;
+    r.chunk_total = (uint8_t)total;
+    _resultRing.push_back(std::move(r));
+  }
 }
 
 String MothershipService::actionUpdate(JsonObjectConst params) {
