@@ -44,7 +44,9 @@ class SystemStatus {
   void buildIdentityForm(JsonObject& root);
 
  private:
-  WebManager* _web{nullptr};
+  AsyncWebServer*  _server{nullptr};
+  SecurityManager* _sec{nullptr};
+  WebManager*      _web{nullptr};
 
   void systemStatus(AsyncWebServerRequest* request);
   void systemStatusForm(AsyncWebServerRequest* request);

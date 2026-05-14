@@ -5,32 +5,75 @@
 #include <DeviceIdentity.h>
 
 SystemStatus::SystemStatus(AsyncWebServer* server, SecurityManager* securityManager, WebManager* web)
-    : _web(web) {
-  server->on(SYSTEM_STATUS_SERVICE_PATH,
-             HTTP_GET,
-             securityManager->wrapRequest(std::bind(&SystemStatus::systemStatus, this, std::placeholders::_1),
-                                          AuthenticationPredicates::IS_AUTHENTICATED));
-
-  // New form-schema endpoint consumed by the dynamic 'system' feature's
-  // status tab. The response is {status:{description, fields:[…]}} with
-  // read-only info rows + two embedded actionRef buttons at the bottom.
-  server->on(SYSTEM_STATUS_FORM_PATH,
-             HTTP_GET,
-             securityManager->wrapRequest(std::bind(&SystemStatus::systemStatusForm, this, std::placeholders::_1),
-                                          AuthenticationPredicates::IS_AUTHENTICATED));
-
-  // Identity tab endpoint — pure DeviceIdentity readout. Same auth
-  // level as Status (authenticated read) since it leaks fingerprint
-  // material that lets an attacker correlate a captured cert to a
-  // physical device.
-  server->on(SYSTEM_IDENTITY_FORM_PATH,
-             HTTP_GET,
-             securityManager->wrapRequest(std::bind(&SystemStatus::systemIdentityForm, this, std::placeholders::_1),
-                                          AuthenticationPredicates::IS_AUTHENTICATED));
+    : _server(server), _sec(securityManager), _web(web) {
+  // Endpoint binding moved into registerManifest below so the routes
+  // flow through WebManager::registerPage instead of raw server->on.
+  // Phase 5/Phase 4 follow-up: rest.proxy can now reach
+  // SYSTEM_STATUS_FORM_PATH / SYSTEM_IDENTITY_FORM_PATH from Mothership
+  // without HTTP loopback.
+  (void)_server; (void)_sec;
 }
 
 void SystemStatus::registerManifest(WebManager* web) {
   if (!web) return;
+  using namespace std::placeholders;
+
+  // Endpoint registry — same paths, same handlers, just routed via
+  // WebManager so the rest.proxy in-process dispatcher reaches them.
+  WebPageSpec page;
+  page.id        = "systemStatus";
+  page.title     = "System Status";
+  page.component = "";   // no top-level page route — contributes tabs
+                          // to the compound 'system' feature below.
+  page.auth      = WebAuthLevel::Authenticated;
+  {
+    WebEndpointMeta e;
+    e.method = "GET"; e.path = SYSTEM_STATUS_SERVICE_PATH; e.role = "legacy_status";
+    e.auth   = WebAuthLevel::Authenticated;
+    e.handler = std::bind(&SystemStatus::systemStatus, this, _1);
+    e.internalHandler =
+      [this](JsonVariant /*in*/, JsonVariant out, int& status) {
+        JsonObject o = out.to<JsonObject>();
+        // legacy systemStatus emits hardware / heap fields directly.
+        // Reuse buildForm by writing into our scratch object then
+        // pulling the "status" sub-object out — but buildForm needs
+        // a JsonObject root and we already have one. Slight contortion:
+        DynamicJsonDocument scratch(4096);
+        JsonObject root = scratch.to<JsonObject>();
+        buildForm(root);
+        JsonObject sect = root["status"].as<JsonObject>();
+        if (!sect.isNull()) { o.set(sect); status = 200; }
+        else { o["error"] = "buildForm produced empty status"; status = 500; }
+      };
+    page.endpoints.push_back(std::move(e));
+  }
+  {
+    WebEndpointMeta e;
+    e.method = "GET"; e.path = SYSTEM_STATUS_FORM_PATH; e.role = "resourcesForm";
+    e.auth   = WebAuthLevel::Authenticated;
+    e.handler = std::bind(&SystemStatus::systemStatusForm, this, _1);
+    e.internalHandler =
+      [this](JsonVariant /*in*/, JsonVariant out, int& status) {
+        JsonObject o = out.to<JsonObject>();
+        buildForm(o);
+        status = 200;
+      };
+    page.endpoints.push_back(std::move(e));
+  }
+  {
+    WebEndpointMeta e;
+    e.method = "GET"; e.path = SYSTEM_IDENTITY_FORM_PATH; e.role = "identityForm";
+    e.auth   = WebAuthLevel::Authenticated;
+    e.handler = std::bind(&SystemStatus::systemIdentityForm, this, _1);
+    e.internalHandler =
+      [this](JsonVariant /*in*/, JsonVariant out, int& status) {
+        JsonObject o = out.to<JsonObject>();
+        buildIdentityForm(o);
+        status = 200;
+      };
+    page.endpoints.push_back(std::move(e));
+  }
+  web->registerPage(std::move(page));
 
   // Identity tab — first. "Who is this device" comes before "how is
   // it doing". Holds canonical device ID, project, fw / framework
