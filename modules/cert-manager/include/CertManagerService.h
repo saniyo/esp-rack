@@ -168,8 +168,14 @@ class CertManagerService : public StatefulService<CertManagerSettings>,
   String effectiveRecoverUrl() const;
 
   // Recompute runtime_state from on-disk fields after every load /
-  // mutation. Runs in begin() and after successful enroll/rotate.
+  // mutation. Runs in begin(), after successful enroll/rotate, and
+  // periodically from loop() (so the NTP-race GrayZone gets cleared
+  // once SNTP brings the wall clock forward).
   void refreshRuntimeState();
+
+  // Last millis() the periodic refresh fired — gates the loop() body
+  // to 1-per-60s so we don't burn cycles on a no-op state recheck.
+  uint32_t _lastStateRefreshMs{0};
 
   // ── Phase 1.3+1.4 crypto helpers (mbedtls bindings) ──
   //

@@ -429,6 +429,23 @@ void CertManagerService::begin() {
 }
 
 void CertManagerService::loop() {
+  // Periodic state-machine refresh. The boot-time refreshRuntimeState
+  // runs before SNTP has synced the wall clock, so daysUntilExpiry
+  // can't tell if a freshly-loaded cert is still valid. The fixed
+  // daysUntilExpiry now returns INT32_MAX on unset clock so the
+  // initial state is optimistically Ready, but we still need a
+  // periodic recheck so:
+  //   * cert genuinely past expiry → state slides into GrayZone
+  //     within ~60 s of crossing the boundary (cheap, idempotent)
+  //   * if recovery completes externally → status_label refreshes
+  // 60 s tick keeps the refresh cost negligible (a couple of String
+  // comparisons + an assignment per minute).
+  uint32_t now_ms = millis();
+  if (now_ms - _lastStateRefreshMs > 60000) {
+    _lastStateRefreshMs = now_ms;
+    refreshRuntimeState();
+  }
+
   // Auto-enroll loop. Fires kickEnrollment("") (no Bearer token →
   // server's path 6 parks the device in PENDING_ENROLLMENTS for
   // operator approval) when:
@@ -477,7 +494,13 @@ void CertManagerService::loop() {
 int32_t CertManagerService::daysUntilExpiry() const {
   if (_state.not_after_ts == 0) return INT32_MIN;
   uint32_t now_s = (uint32_t)(time(nullptr));
-  if (now_s == 0) return 0;  // clock not set — treat as expired-soon
+  // Clock-not-set sanity: anything before 2023-11-15 means NTP
+  // hasn't synced yet on this boot. Return MAX rather than 0 so the
+  // refreshRuntimeState path doesn't slam a still-valid cert into
+  // GrayZone on the boot-time race window (cert loaded from disk
+  // before SNTP brought the wall clock forward). Once NTP syncs the
+  // periodic refresh in loop() recomputes against real time.
+  if (now_s < 1700000000) return INT32_MAX;
   int64_t diff_s = (int64_t)_state.not_after_ts - (int64_t)now_s;
   return (int32_t)(diff_s / 86400);
 }
