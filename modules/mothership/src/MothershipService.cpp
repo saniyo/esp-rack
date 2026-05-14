@@ -321,7 +321,9 @@ void MothershipService::runCheckinLoop() {
     }
 
     if (!wantTick) {
-      vTaskDelay(pdMS_TO_TICKS(5000));   // recheck every 5s when paused
+      // Wake-on-notify so setCadence (operator panel opens) doesn't
+      // sit out the full 5s recheck before we re-evaluate gates.
+      ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(5000));
       continue;
     }
 
@@ -332,7 +334,10 @@ void MothershipService::runCheckinLoop() {
     if (_state.next_checkin_at_s != 0 && cur_s < _state.next_checkin_at_s) {
       // Sleep until next_checkin_at_s; wake every 5s to pick up an
       // operator pause / interval change without waiting full duration.
-      vTaskDelay(pdMS_TO_TICKS(5000));
+      // ulTaskNotifyTake supports both: a setCadence notify pokes the
+      // task awake, otherwise the 5s timeout limits the staleness of
+      // any cert-availability / wifi-up transition we missed.
+      ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(5000));
       continue;
     }
 
@@ -345,6 +350,14 @@ void MothershipService::runCheckinLoop() {
     // save yields 0/1/2 the device still keeps a workable polling
     // rate instead of spinning at full speed.
     if (base_interval_s < 5) base_interval_s = 5;
+    // Phase 3 — active-session cadence override. While the panel is
+    // open the operator's setCadence(5, 300) has pulled this down to
+    // 5 s; revert when the TTL deadline passes.
+    if (_state.cadence_override_until_s > now_s
+        && _state.cadence_override_period_s > 0) {
+      base_interval_s = (uint32_t)_state.cadence_override_period_s;
+      if (base_interval_s < 1) base_interval_s = 1;  // sanity floor
+    }
     update([base_interval_s, now_s](MothershipSettings& s) {
       s.next_checkin_at_s = now_s + base_interval_s;
       s.runtime_state     = IMothershipProvider::State::CheckingIn;
@@ -367,8 +380,16 @@ void MothershipService::runCheckinLoop() {
         s.status_label  = "LastFail";
       }
       // Adaptive cadence: if actions arrived this round, drop to
-      // 10-second burst follow-up — likely more queued.
+      // 10-second burst follow-up — likely more queued. Cadence
+      // override takes precedence — burst can't extend the panel
+      // session past its TTL, and a short panel period overrides
+      // any default-burst 10s pick.
       uint32_t interval = burst ? 10u : base_interval_s;
+      if (s.cadence_override_until_s > now_s
+          && s.cadence_override_period_s > 0
+          && interval > s.cadence_override_period_s) {
+        interval = s.cadence_override_period_s;
+      }
       s.next_checkin_at_s = now_s + interval;
       return StateUpdateResult::CHANGED;
     }, "mship.tick-end");
@@ -541,6 +562,7 @@ bool MothershipService::dispatchActions(JsonArrayConst actions) {
     else if (type == "setConfig")   result = actionSetConfig(params);
     else if (type == "reboot")      result = actionReboot(params);
     else if (type == "log")         result = actionLog(params);
+    else if (type == "setCadence")  result = actionSetCadence(params);
     else { result = "unknown action type"; status = 400; }
 
     // Best-effort status classification — for now a "missing" /
@@ -709,6 +731,55 @@ int32_t MothershipService::nextCheckInInSec() const {
   uint32_t now_s = (uint32_t)(millis() / 1000);
   if (_state.next_checkin_at_s <= now_s) return 0;
   return (int32_t)(_state.next_checkin_at_s - now_s);
+}
+
+// ===== Phase 3 — Active-session cadence =====
+
+String MothershipService::actionSetCadence(JsonObjectConst params) {
+  // params: {period_s: int (0=revert to default), ttl_s: int}
+  // Sanity caps: period in [1, 600], ttl in [10, 3600]. Caller can
+  // shorten an in-flight session by sending period_s with a smaller
+  // value (or extend it with a fresh ttl); period_s=0 clears the
+  // override immediately so the next tick uses interval_min*60.
+  int period = params["period_s"].as<int>();
+  int ttl    = params["ttl_s"].as<int>();
+  if (period < 0) period = 0;
+  if (period > 600) period = 600;
+  if (ttl < 0) ttl = 0;
+  if (ttl > 3600) ttl = 3600;
+
+  if (period == 0) {
+    update([](MothershipSettings& s) {
+      s.cadence_override_until_s  = 0;
+      s.cadence_override_period_s = 0;
+      return StateUpdateResult::CHANGED;
+    }, "mship.cadence-clear");
+    Serial.println("[mship.cadence] cleared override");
+    // Wake the check-in task so it re-evaluates its sleep loop —
+    // the next iteration uses the default interval. Without the
+    // notify the operator would wait up to current-period seconds
+    // before seeing the cadence revert.
+    if (_task) xTaskNotifyGive(_task);
+    return "cleared";
+  }
+
+  uint32_t until = (uint32_t)(millis() / 1000) + (uint32_t)ttl;
+  update([period, until](MothershipSettings& s) {
+    s.cadence_override_period_s = (uint16_t)period;
+    s.cadence_override_until_s  = until;
+    // Pull the next_checkin forward so the new cadence takes effect
+    // on the next loop iteration instead of waiting out the
+    // previously-scheduled long interval.
+    uint32_t now_s = (uint32_t)(millis() / 1000);
+    if (s.next_checkin_at_s > now_s + (uint32_t)period) {
+      s.next_checkin_at_s = now_s + (uint32_t)period;
+    }
+    return StateUpdateResult::CHANGED;
+  }, "mship.cadence-set");
+  Serial.printf("[mship.cadence] override period=%ds, ttl=%ds\n",
+                period, ttl);
+  if (_task) xTaskNotifyGive(_task);
+  return String("set period=") + period + " ttl=" + ttl;
 }
 
 void MothershipService::refreshRuntimeState() {

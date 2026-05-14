@@ -99,6 +99,16 @@ struct MothershipSettings {
   uint32_t success_count{0};
   uint32_t fail_count{0};
 
+  // Phase 3 — active-session cadence override. While
+  // millis()/1000 < cadence_override_until_s, the check-in loop uses
+  // cadence_override_period_s instead of interval_min*60. Set by
+  // setCadence action that the mothership server queues when the
+  // operator opens a device's panel; cleared with setCadence{period_s: 0}
+  // (or by hitting the TTL deadline). NOT persisted — a reboot during
+  // an open panel session simply reverts to the default 5-min cadence.
+  uint32_t cadence_override_until_s{0};
+  uint16_t cadence_override_period_s{0};
+
   // ── Derived URL helpers ──
   // Only called by the check-in / PKI / WG paths, never during form
   // render — so the ternary is allowed here. Form-build path stays
@@ -199,6 +209,14 @@ class MothershipService : public StatefulService<MothershipSettings>,
   String         actionSetConfig(JsonObjectConst params);
   String         actionReboot(JsonObjectConst params);
   String         actionLog(JsonObjectConst params);
+
+  // Phase 3 — Active-session cadence override. Accepts
+  // {period_s, ttl_s}: period_s=0 reverts to default, else override
+  // for ttl_s seconds. The check-in loop reads the override fields
+  // at the top of each iteration; a setCadence(5, 300) lands within
+  // one current-interval worth of latency at first, then ticks at
+  // 5s for the next 5 minutes.
+  String         actionSetCadence(JsonObjectConst params);
 
   // ── Phase 1 — Action result return channel ──
   //
