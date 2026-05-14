@@ -185,6 +185,7 @@ MothershipService::MothershipService(ConfigManager* cfgMgr,
 
 void MothershipService::registerManifest(WebManager* web) {
   if (!web) return;
+  _web = web;
 
   WebFeatureSpec spec;
   spec.id         = "mothership";
@@ -593,6 +594,18 @@ bool MothershipService::dispatchActions(JsonArrayConst actions) {
       any = true;
       continue;
     }
+    else if (type == "rest.proxy")  {
+      // rest.proxy owns its own result push (it serialises the
+      // downstream response body into the ring), so dispatchActions
+      // does NOT call pushActionResult for it below. Mark with a
+      // sentinel String so the outer loop skips the generic push.
+      result = actionRestProxy(params, reqId);
+      // Skip the generic pushActionResult below — rest.proxy
+      // pushed a richer entry (with full response body) on its own.
+      Serial.printf("[mship.action] rest.proxy → %s\n", result.c_str());
+      any = true;
+      continue;
+    }
     else { result = "unknown action type"; status = 400; }
 
     // Best-effort status classification — for now a "missing" /
@@ -789,6 +802,89 @@ String MothershipService::actionLog(JsonObjectConst params) {
                 level.length() ? level.c_str() : "info",
                 msg.c_str());
   return "logged";
+}
+
+// ===== Phase 2 — Generic REST proxy =====
+//
+// Receives a queued action of shape
+//   {"type":"rest.proxy","reqId":"a3f7",
+//    "params":{"method":"GET","path":"/rest/mqtt","body":{}}}
+// from the server, walks WebManager's registered entries to find the
+// one that owns (method, path), invokes its in-process handler, and
+// pushes a richer ActionResult onto _resultRing with the downstream
+// response body serialised under summary. Server's _handle_checkin
+// drains it back to PENDING_RESULTS where the operator UI renders it.
+//
+// Auth bypass on purpose — the trust boundary is the mTLS handshake at
+// /api/v1/checkin, NOT a JWT we don't have. Each entry's proxyDispatch
+// decides whether it's safe to expose: features always do (the lambdas
+// are owned by the service that registered them), action entries only
+// when the spec carried an internalHandler (opt-in per module).
+
+String MothershipService::actionRestProxy(JsonObjectConst params,
+                                           const String& reqId) {
+  if (!_web) {
+    pushActionResult(reqId, 500, "{\"error\":\"no_web_manager\"}");
+    return "no_web_manager";
+  }
+  String method = params["method"].as<String>();
+  String path   = params["path"].as<String>();
+  if (method.length() == 0) method = "GET";
+  method.toUpperCase();
+  if (path.length() == 0) {
+    pushActionResult(reqId, 400, "{\"error\":\"missing_path\"}");
+    return "missing_path";
+  }
+
+  // Request body — only present for POST/PUT. The action JSON
+  // structure puts the body under params.body so it's nestable
+  // without colliding with the action's own params.
+  JsonVariantConst body_in = params["body"];
+
+  // 24 KB scratch doc holds the WHOLE response in-memory while we
+  // serialise it; the resulting String then flows into _resultRing
+  // where pushActionResult chunks it into 1 KB pieces across multiple
+  // check-ins. This is the only place we need the full payload
+  // assembled — beyond this point everything's chunked. PSRAM-backed
+  // allocator on S3/N16R8 makes the 24 KB transient cheap; internal
+  // heap stays clean.
+  DynamicJsonDocument respDoc(24576);
+  JsonVariant out_var = respDoc.to<JsonVariant>();
+  int out_status = 404;
+
+  // We need a non-const JsonVariant for body — copy into a scratch
+  // doc so the proxyDispatch can safely view it as a JsonObject
+  // (ArduinoJson 6 makes JsonVariantConst → JsonObject conversion
+  // produce a const view, which the typed StatefulService.update
+  // signature rejects).
+  DynamicJsonDocument bodyDoc(4096);
+  if (!body_in.isNull()) {
+    bodyDoc.set(body_in);
+  }
+  JsonVariant body_var = bodyDoc.as<JsonVariant>();
+
+  bool handled = _web->proxyDispatch(method.c_str(), path.c_str(),
+                                       body_var, out_status, out_var);
+  if (!handled) {
+    out_status = 404;
+    JsonObject err = respDoc.to<JsonObject>();
+    err["error"] = "no_handler_for_path";
+    err["method"] = method;
+    err["path"]   = path;
+  }
+
+  // Serialise downstream response for the ring. The result entry's
+  // `summary` field carries the JSON body verbatim — the server
+  // parses it back when surfacing in the operator UI's "Recent
+  // activity" panel.
+  String bodyOut;
+  serializeJson(respDoc, bodyOut);
+  pushActionResult(reqId, out_status, bodyOut);
+
+  Serial.printf("[mship.proxy] %s %s → %d (%u B)\n",
+                method.c_str(), path.c_str(), out_status,
+                (unsigned)bodyOut.length());
+  return String("proxy ") + out_status;
 }
 
 int32_t MothershipService::lastCheckInAgoSec() const {

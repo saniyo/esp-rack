@@ -176,6 +176,10 @@ class MothershipService : public StatefulService<MothershipSettings>,
   // when WireGuardModule is installed in the consumer. Null when
   // the consumer doesn't want tunneling.
   IWireguardProvider*                      _wg{nullptr};
+  // Phase 2 — stashed in registerManifest so actionRestProxy can
+  // call proxyDispatch from the check-in task (no other clean way
+  // to reach WebManager from inside an action handler).
+  WebManager*                              _web{nullptr};
 
   // Refresh runtime_state + status_label from persisted fields +
   // CertProvider readiness. Runs in begin(), after every update,
@@ -217,6 +221,16 @@ class MothershipService : public StatefulService<MothershipSettings>,
   // one current-interval worth of latency at first, then ticks at
   // 5s for the next 5 minutes.
   String         actionSetCadence(JsonObjectConst params);
+
+  // Phase 2 — Generic rest.proxy handler. Receives
+  // {method, path, body}, walks WebManager's entry list via
+  // proxyDispatch, captures the response body + status, and pushes
+  // a serialised summary onto _resultRing. The reqId tying back to
+  // the operator's queue entry comes from the enclosing action JSON
+  // (dispatchActions extracts and passes via outReqId for this one
+  // handler only — other handlers don't need the reqId at this layer).
+  String         actionRestProxy(JsonObjectConst params,
+                                  const String& reqId);
 
   // ── Phase 1 — Action result return channel ──
   //

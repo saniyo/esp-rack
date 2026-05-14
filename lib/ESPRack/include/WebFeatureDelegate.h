@@ -142,6 +142,64 @@ class WebFeatureEntry : public IWebFeatureEntry {
     if (_wsBinding) _wsBinding->broadcastCurrentState(origin);
   }
 
+  // Phase 2 — in-process rest.proxy entry point. Matches the
+  // request's (method, path) pair against this feature's
+  // restRead / restUpdate. On match: GET re-uses _restReader to
+  // emit the form JSON; POST runs _restUpdater under the service's
+  // transaction guard and then re-reads to surface the new state
+  // back to the caller. Auth bypassed — caller is mothership-action
+  // which already cleared the mTLS check-in gate.
+  bool proxyDispatch(const char* method,
+                      const char* path,
+                      JsonVariant body,
+                      int& out_status,
+                      JsonVariant out_body) override {
+    if (!path || !_service) return false;
+
+    const bool is_get  = method && String(method) == "GET";
+    const bool is_post = method && (String(method) == "POST"
+                                      || String(method) == "PUT");
+
+    // Match against the feature's primary read/update endpoints.
+    const bool match_read   = _spec.restRead   && String(_spec.restRead)   == path;
+    const bool match_update = _spec.restUpdate && String(_spec.restUpdate) == path;
+
+    if (!match_read && !match_update) return false;
+
+    // GET path — read state into out_body.
+    if (is_get) {
+      out_status = 200;
+      JsonObject root = out_body.to<JsonObject>();
+      _service->read(root, _restReader);
+      return true;
+    }
+
+    // POST / PUT path — drive an update through the service's
+    // transactional API, then surface the resulting state.
+    if (is_post && match_update) {
+      JsonObject in_obj = body.as<JsonObject>();
+      StateUpdateResult outcome =
+          _service->update(in_obj, _restUpdater, "rest.proxy");
+      if (outcome == StateUpdateResult::ERROR) {
+        out_status = 400;
+        JsonObject err = out_body.to<JsonObject>();
+        err["error"] = "update_rejected";
+        return true;
+      }
+      out_status = 200;
+      JsonObject root = out_body.to<JsonObject>();
+      _service->read(root, _restReader);
+      return true;
+    }
+
+    // Method/path combo didn't match a known pair — return 405 so
+    // operator's UI surfaces something better than a generic 404.
+    out_status = 405;
+    JsonObject err = out_body.to<JsonObject>();
+    err["error"] = "method_not_allowed";
+    return true;
+  }
+
   // True if at least one WS client is currently subscribed to this feature's
   // endpoint. Services call this BEFORE doing any periodic/event work
   // dedicated to WS — e.g. NTP's 1 Hz clock tick — so the main loop skips

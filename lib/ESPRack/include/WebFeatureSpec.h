@@ -4,6 +4,7 @@
 #include <functional>
 #include <vector>
 
+#include <ArduinoJson.h>
 #include <ESPAsyncWebServer.h>
 #include <WebAuth.h>
 
@@ -42,6 +43,21 @@ struct WebActionSpec {
   std::function<void(AsyncWebServerRequest*)> handler;
   const char* confirm = nullptr;   // dialog text; null = fire immediately
   const char* successMessage = nullptr;
+
+  // Optional in-process handler — bypasses HTTP/AsyncWebServer when
+  // the action is invoked via Mothership's rest.proxy machinery
+  // (Phase 2). Same auth context as the parent mTLS check-in — we
+  // trust the server queue, not the JWT we don't have. When unset,
+  // the rest.proxy action returns "not handled" for this path.
+  // For most modules where the local-UI `handler` only calls
+  // r->send(200, ...), the internalHandler is trivially:
+  //   spec.internalHandler = [this](JsonVariantConst in, JsonVariant out, int& status) {
+  //     // do the real work
+  //     out["ok"] = true; status = 200;
+  //   };
+  std::function<void(JsonVariant     /*in*/,
+                      JsonVariant     /*out*/,
+                      int&            /*status*/)> internalHandler;
 };
 
 struct WebEndpointMeta {

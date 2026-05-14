@@ -59,6 +59,38 @@ class WebActionEntry : public IWebFeatureEntry {
     if (_spec.successMessage) obj["successMessage"] = _spec.successMessage;
   }
 
+  // Phase 2 — in-process rest.proxy entry point. Mothership's
+  // actionRestProxy walks every IWebFeatureEntry; this one says yes
+  // only when (method, path) matches AND the spec carried an
+  // internalHandler. The AsyncWebServerRequest-based `handler`
+  // stays for browser-driven local-UI calls.
+  bool proxyDispatch(const char* method,
+                      const char* path,
+                      JsonVariant body,
+                      int& out_status,
+                      JsonVariant out_body) override {
+    if (!_spec.id || !path) return false;
+    if (resolvedPath() != String(path)) return false;
+    const char* want_method = _spec.method ? _spec.method : "POST";
+    if (method && String(want_method) != method) {
+      out_status = 405;
+      JsonObject o = out_body.to<JsonObject>();
+      o["error"] = "method_not_allowed";
+      return true;
+    }
+    if (!_spec.internalHandler) {
+      out_status = 501;
+      JsonObject o = out_body.to<JsonObject>();
+      o["error"] = "action_has_no_internal_handler";
+      o["message"] = "module must populate WebActionSpec::internalHandler "
+                     "for the action to be reachable via rest.proxy";
+      return true;
+    }
+    out_status = 200;
+    _spec.internalHandler(body, out_body, out_status);
+    return true;
+  }
+
   const WebActionSpec& spec() const { return _spec; }
 
  private:

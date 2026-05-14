@@ -192,6 +192,44 @@ class WebManager {
     return false;
   }
 
+  // Phase 2 — In-process REST dispatch for Mothership's rest.proxy.
+  // Walks every registered IWebFeatureEntry until one claims the
+  // (method, path) pair. On match it populates out_status + out_body
+  // and returns true; on miss the caller surfaces a 404 to the
+  // upstream operator (mothership UI reads it from action_results).
+  //
+  // Caller pre-allocates the document backing out_body. Typical
+  // pattern in MothershipService::actionRestProxy:
+  //   DynamicJsonDocument respDoc(8192);
+  //   JsonVariant out = respDoc.to<JsonVariant>();
+  //   int status = 404;
+  //   bool ok = _web->proxyDispatch(method, path, body, status, out);
+  //   if (!ok) status = 404;
+  //
+  // Auth note: this bypasses AsyncWebServer's predicate chain on
+  // purpose — the request's trust comes from the mTLS handshake at
+  // /api/v1/checkin, NOT from a JWT we don't have. Per-entry impls
+  // refuse to call internalHandler if the spec didn't provide one,
+  // so a module that hasn't opted-in to the proxy mechanism stays
+  // unreachable.
+  bool proxyDispatch(const char* method,
+                      const char* path,
+                      JsonVariant body,
+                      int& out_status,
+                      JsonVariant out_body) {
+    if (!method || !path) {
+      out_status = 400;
+      return false;
+    }
+    for (auto& e : _entries) {
+      if (!e) continue;
+      if (e->proxyDispatch(method, path, body, out_status, out_body)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
  private:
   void serveManifest(AsyncWebServerRequest* request);
 
