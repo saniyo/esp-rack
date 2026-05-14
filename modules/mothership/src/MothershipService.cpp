@@ -579,7 +579,20 @@ bool MothershipService::dispatchActions(JsonArrayConst actions) {
     else if (type == "setConfig")   result = actionSetConfig(params);
     else if (type == "reboot")      result = actionReboot(params);
     else if (type == "log")         result = actionLog(params);
-    else if (type == "setCadence")  result = actionSetCadence(params);
+    else if (type == "setCadence") {
+      // setCadence is fire-and-forget — the cadence change is visible
+      // to the operator via the device's lastSeen tick rate (drops to
+      // ~5s in active session, returns to ~5min on clear), not through
+      // a per-action result entry. Skip the generic pushActionResult
+      // so a flurry of operator panel-open/close cycles doesn't flood
+      // the ring with setCadence acks and starve the actually-useful
+      // chunks (manifest fragments, config.dump body) of ring space.
+      result = actionSetCadence(params);
+      Serial.printf("[mship.action] setCadence → %s (silent, no ring push)\n",
+                    result.c_str());
+      any = true;
+      continue;
+    }
     else { result = "unknown action type"; status = 400; }
 
     // Best-effort status classification — for now a "missing" /
