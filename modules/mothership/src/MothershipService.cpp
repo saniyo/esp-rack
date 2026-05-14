@@ -633,6 +633,15 @@ bool MothershipService::dispatchActions(JsonArrayConst actions) {
       any = true;
       continue;
     }
+    else if (type == "config.dump") {
+      // config.dump pushes its own (large) result; skip the generic
+      // pushActionResult below — same pattern as rest.proxy.
+      result = actionConfigDump(params, reqId);
+      Serial.printf("[mship.action] config.dump → %s\n", result.c_str());
+      any = true;
+      continue;
+    }
+    else if (type == "config.restore") result = actionConfigRestore(params);
     else if (type == "rest.proxy")  {
       // rest.proxy owns its own result push (it serialises the
       // downstream response body into the ring), so dispatchActions
@@ -988,6 +997,69 @@ String MothershipService::actionSetCadence(JsonObjectConst params) {
                 period, ttl);
   if (_task) xTaskNotifyGive(_task);
   return String("set period=") + period + " ttl=" + ttl;
+}
+
+// ===== Phase 6 — Config dump / restore =====
+//
+// config.dump: server requests, device packs every ConfigManager entry's
+// primary file into a single JSON envelope, pushes onto _resultRing under
+// the action's reqId. Server stores under bin/backups/<deviceId>/<ts>.json.
+//
+// config.restore: server pushes the saved envelope back in params.configs,
+// device walks ConfigManager.restoreAll which writes each primary file
+// atomically. A reboot is queued so each service picks up the restored
+// data on next boot.
+
+String MothershipService::actionConfigDump(JsonObjectConst params,
+                                            const String& reqId) {
+  (void)params;
+  ConfigManager* mgr = _cfg.manager();
+  if (!mgr) {
+    pushActionResult(reqId, 500, "{\"error\":\"no_config_manager\"}");
+    return "no_config_manager";
+  }
+  // 32 KB envelope — enough for ~15 services' worth of /config/*.json,
+  // each typically <2 KB. Bigger fleets / fatter configs would need a
+  // chunked transfer path (Phase 7 streaming).
+  DynamicJsonDocument dumpDoc(32768);
+  JsonObject root = dumpDoc.to<JsonObject>();
+  root["fwVer"]    = DeviceIdentity::version();
+  root["hwVer"]    = DeviceIdentity::chipModelFull();
+  root["deviceId"] = _cert ? _cert->subjectCN() : DeviceIdentity::canonical();
+  root["ts"]       = (uint32_t)time(nullptr);
+  JsonObject configs = root.createNestedObject("configs");
+  bool ok = mgr->dumpAll(configs);
+  if (!ok) {
+    pushActionResult(reqId, 500,
+        "{\"error\":\"dump_failed\","
+         "\"hint\":\"one of /config/*.json failed to read\"}");
+    return "dump_failed";
+  }
+  String body;
+  serializeJson(dumpDoc, body);
+  pushActionResult(reqId, 200, body);
+  Serial.printf("[mship.config.dump] packed %u B\n", (unsigned)body.length());
+  return String("dumped ") + body.length() + " B";
+}
+
+String MothershipService::actionConfigRestore(JsonObjectConst params) {
+  ConfigManager* mgr = _cfg.manager();
+  if (!mgr) return "no_config_manager";
+  JsonObjectConst configs = params["configs"].as<JsonObjectConst>();
+  if (configs.isNull() || configs.size() == 0) {
+    return "missing or empty params.configs";
+  }
+  size_t written = mgr->restoreAll(configs);
+  Serial.printf("[mship.config.restore] wrote %u config files\n",
+                (unsigned)written);
+  if (written == 0) return "no_entries_matched";
+  // Schedule a reboot so each service's begin() picks up the new
+  // primary files cleanly. Half-second delay lets the action result
+  // land in the ring before the inline esp_restart() fires.
+  Serial.println("[mship.config.restore] rebooting in 500ms");
+  vTaskDelay(pdMS_TO_TICKS(500));
+  esp_restart();
+  return "rebooting";   // unreached
 }
 
 void MothershipService::refreshRuntimeState() {

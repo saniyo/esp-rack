@@ -206,6 +206,74 @@ bool ConfigManager::hasSnapshot(const char* primaryPath) const {
   return _fs->exists(snap);
 }
 
+bool ConfigManager::dumpAll(JsonObject out) {
+  // Read each registered entry's primary file verbatim (encrypted
+  // secrets stay encrypted on the wire) and stash under the entry's
+  // id key. A read miss on any entry fails the whole dump — caller
+  // gets a single error instead of a half-populated payload.
+  if (!_fs) return false;
+  bool ok = true;
+  forEachEntry([&](IConfigEntry& e) {
+    if (!ok) return;
+    const char* p = e.primary().c_str();
+    if (!p || !*p) return;
+    if (!fileExists(p)) {
+      // Entry registered but never saved — emit an empty object
+      // rather than skipping, so restoreAll can still trigger a
+      // "wipe back to defaults" by passing an empty sub-object.
+      out.createNestedObject(e.id());
+      return;
+    }
+    File f = _fs->open(p, "r");
+    if (!f) { ok = false; return; }
+    DynamicJsonDocument doc(8192);
+    DeserializationError jerr = deserializeJson(doc, f);
+    f.close();
+    if (jerr) { ok = false; return; }
+    JsonObject slot = out.createNestedObject(e.id());
+    slot.set(doc.as<JsonVariantConst>());
+  });
+  return ok;
+}
+
+size_t ConfigManager::restoreAll(JsonObjectConst in) {
+  // Write each entry's primary file from the matching sub-object in
+  // `in`. Atomic per-entry (atomicWrite via the existing snapshot/
+  // tmp/primary rotation). Returns count of entries actually written
+  // — caller usually reboots after a non-zero count so each service's
+  // begin() picks up the new files cleanly.
+  if (!_fs) return 0;
+  size_t written = 0;
+  forEachEntry([&](IConfigEntry& e) {
+    const char* p = e.primary().c_str();
+    if (!p || !*p) return;
+    JsonVariantConst slot = in[e.id().c_str()];
+    if (slot.isNull() || !slot.is<JsonObjectConst>()) return;
+    JsonObjectConst envelope = slot.as<JsonObjectConst>();
+    // The dumped payload is {"data": {...}, "meta": {...}}; restore
+    // only the "data" field through atomicWrite so meta (crc + ts)
+    // gets re-computed for the destination filesystem rather than
+    // restored verbatim from the source device.
+    JsonObjectConst dataConst;
+    bool legacy = false;
+    if (!extractData(envelope, dataConst, legacy)) return;
+    String backupPath = makeBackupPathFor(p);
+    String tmpPath    = makeTmpPathFor(p);
+    uint32_t outCrc = 0;
+    bool ok = atomicWrite(p,
+                          backupPath.c_str(),
+                          tmpPath.c_str(),
+                          dataConst,
+                          8192,
+                          &outCrc);
+    if (ok) {
+      written++;
+      e.stats().restores++;
+    }
+  });
+  return written;
+}
+
 bool ConfigManager::snapshotAll() {
   // Walk every registered entry and force-copy primary → primary.snapshot.
   // Returns true only if EVERY entry succeeded (or was a no-op because the

@@ -250,6 +250,32 @@ class ConfigManager {
     for (auto& e : _entries) if (e) cb(*e);
   }
 
+  // ---- bulk dump / restore (Phase 6 — mothership-driven backup) ----
+  //
+  // dumpAll walks every registered entry, reads its primary file
+  // verbatim (encrypted secrets travel as the same ENC: blobs they
+  // live as on disk — backup payloads can't leak credentials), and
+  // emits them under their entry id key:
+  //
+  //   { "lightState": { "data": {...}, "meta": {...} },
+  //     "wifi":       { "data": {...}, "meta": {...} },
+  //     ... }
+  //
+  // Returns false if a single read errors; partial dumps are not
+  // emitted — caller can retry.
+  //
+  // restoreAll is the reverse: walk each entry, fetch the matching
+  // sub-JSON from `in`, and overwrite the entry's primary file
+  // atomically. Skips entries absent from `in` (so a partial backup
+  // restore only touches what it carries). Returns the count of
+  // entries actually written. Caller should reboot after a non-zero
+  // count so each service's begin() picks up the restored data
+  // cleanly — restoreAll deliberately does NOT call ensureLoaded
+  // on each entry because the live state would diverge from disk
+  // until next reboot anyway.
+  bool dumpAll(JsonObject out);
+  size_t restoreAll(JsonObjectConst in);
+
   // ---- snapshot operations ----
   // Each primary file foo.json has a sibling foo.json.snapshot used as both
   // (a) the auto-rotated previous-primary recovery file (atomicWrite copies

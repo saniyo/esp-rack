@@ -232,6 +232,17 @@ class MothershipService : public StatefulService<MothershipSettings>,
   String         actionRestProxy(JsonObjectConst params,
                                   const String& reqId);
 
+  // Phase 6 — Bulk config dump / restore. Dump walks every registered
+  // ConfigManager entry and packs each {data, meta} envelope under the
+  // entry's id key into the result body (pushed onto _resultRing under
+  // the action's reqId). Restore is the reverse — server pushes the
+  // saved payload as params.configs and the handler walks ConfigManager
+  // to overwrite each primary file atomically; reboot is queued after
+  // (so each service's begin() picks up the restored data on next boot).
+  String         actionConfigDump(JsonObjectConst params, const String& reqId);
+  String         actionConfigRestore(JsonObjectConst params);
+
+
   // ── Phase 1 — Action result return channel ──
   //
   // dispatchActions writes one entry per processed action; the next
