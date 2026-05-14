@@ -5,6 +5,10 @@
 
 UploadFirmwareService::UploadFirmwareService(AsyncWebServer* server, SecurityManager* securityManager) :
     _securityManager(securityManager) {
+  // Multipart firmware upload — sticks with raw server->on because
+  // the 4-arg multipart shape doesn't fit WebEndpointMeta's
+  // handler/jsonHandler/internalHandler trio. registerManifest below
+  // surfaces the path in the manifest for client-side URL discovery.
   server->on(UPLOAD_FIRMWARE_PATH,
              HTTP_POST,
              std::bind(&UploadFirmwareService::uploadComplete, this, std::placeholders::_1),
@@ -17,13 +21,10 @@ UploadFirmwareService::UploadFirmwareService(AsyncWebServer* server, SecurityMan
                        std::placeholders::_5,
                        std::placeholders::_6));
 
-  // Form-schema endpoint for the 'upload' tab of the 'system' feature.
-  // Returns a page with a warning MessageField + a drag-drop UploadField
-  // whose url= points at UPLOAD_FIRMWARE_PATH.
-  server->on(UPLOAD_FIRMWARE_FORM_PATH,
-             HTTP_GET,
-             securityManager->wrapRequest(std::bind(&UploadFirmwareService::uploadForm, this, std::placeholders::_1),
-                                          AuthenticationPredicates::IS_ADMIN));
+  // Form-schema GET endpoint was previously bound here via raw
+  // server->on; now lives in registerManifest below as a normal
+  // WebEndpointMeta entry under the "uploadFirmware" page so it
+  // goes through WebManager like every other tab schema.
 #ifdef ESP8266
   Update.runAsync(true);
 #endif
@@ -31,13 +32,46 @@ UploadFirmwareService::UploadFirmwareService(AsyncWebServer* server, SecurityMan
 
 void UploadFirmwareService::registerManifest(WebManager* web) {
   if (!web) return;
+  using namespace std::placeholders;
+
+  // Form-schema GET — was raw server->on in the ctor, now declared
+  // through WebManager so the route binding lives next to the
+  // manifest metadata (same place an operator/developer looks for
+  // "what does this module expose").
+  WebPageSpec page;
+  page.id        = "uploadFirmware";
+  page.title     = "Upload Firmware";
+  page.component = "";  // no top-level page route; lives under system tab
+  page.auth      = WebAuthLevel::Admin;
+  // No menu entry — the system feature owns the visible tab.
+
+  {
+    WebEndpointMeta e;
+    e.method = "GET";
+    e.path   = UPLOAD_FIRMWARE_FORM_PATH;
+    e.role   = "form";
+    e.auth   = WebAuthLevel::Admin;
+    e.handler = std::bind(&UploadFirmwareService::uploadForm, this, _1);
+    page.endpoints.push_back(std::move(e));
+  }
+  {
+    // Multipart upload — manifest-visible, binding stays in ctor.
+    WebEndpointMeta e;
+    e.method = "POST";
+    e.path   = UPLOAD_FIRMWARE_PATH;
+    e.role   = "upload";
+    e.auth   = WebAuthLevel::Admin;
+    page.endpoints.push_back(std::move(e));
+  }
+  web->registerPage(std::move(page));
+
   WebTabSpec tab;
-  tab.key = "upload";
-  tab.title = "Upload Firmware";
+  tab.key      = "upload";
+  tab.title    = "Upload Firmware";
   tab.restPath = UPLOAD_FIRMWARE_FORM_PATH;
   tab.postable = false;
-  tab.auth = WebAuthLevel::Admin;
-  tab.order = 70;
+  tab.auth     = WebAuthLevel::Admin;
+  tab.order    = 70;
   web->addTabToFeature("system", tab);
 }
 

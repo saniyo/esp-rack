@@ -3,13 +3,25 @@
 
 #include <utility>
 
+#include <ArduinoJson.h>
+#include <AsyncJson.h>
+#include <ESPAsyncWebServer.h>
+
 #include <IWebFeatureEntry.h>
 #include <WebFeatureSpec.h>
 
-// Manifest-only entry for services that own raw AsyncWebServer handlers (e.g.
-// FileSystemService with 28 endpoints). WebPageEntry records the handler map
-// by `role` so the frontend can resolve URLs dynamically, but does NOT bind
-// any routes — the service is still responsible for its own server->on calls.
+// Owns a set of endpoints declared via a WebPageSpec. Each endpoint
+// in spec.endpoints[] may carry its own handler / jsonHandler /
+// internalHandler — registerEndpoints binds the appropriate one
+// against AsyncWebServer for browser-driven requests, and
+// proxyDispatch routes in-process calls from Mothership's
+// rest.proxy directly into internalHandler.
+//
+// Migration path away from `server->on(...)` scattered in service
+// constructors: a service builds its WebPageSpec with handlers
+// populated, hands it to web->registerPage(spec), and WebPageEntry
+// owns the binding lifecycle. The service itself stays out of the
+// raw AsyncWebServer API.
 class WebPageEntry : public IWebFeatureEntry {
  public:
   explicit WebPageEntry(WebPageSpec spec) : _spec(std::move(spec)) {}
@@ -17,7 +29,58 @@ class WebPageEntry : public IWebFeatureEntry {
   const char* id() const override { return _spec.id ? _spec.id : ""; }
   Kind kind() const override { return Kind::Page; }
 
-  void registerEndpoints(AsyncWebServer* /*server*/, SecurityManager* /*sm*/) override {}
+  void registerEndpoints(AsyncWebServer* server, SecurityManager* sm) override {
+    if (_mounted || !server) return;
+
+    for (const auto& e : _spec.endpoints) {
+      if (!e.path) continue;
+      const char* method = e.method ? e.method : "GET";
+      auto predicate = webAuthLevelToPredicate(e.auth);
+
+      if (e.jsonHandler) {
+        // POST/PUT/PATCH path that wants its body auto-parsed.
+        // AsyncCallbackJsonWebHandler buffers + parses + calls back.
+        // It accepts any method via setMethod() on the handler.
+        auto wrapped = sm
+            ? sm->wrapCallback(e.jsonHandler, predicate)
+            : e.jsonHandler;
+        auto* h = new AsyncCallbackJsonWebHandler(e.path, wrapped);
+        if (String(method) == "POST")       h->setMethod(HTTP_POST);
+        else if (String(method) == "PUT")    h->setMethod(HTTP_PUT);
+        else if (String(method) == "PATCH")  h->setMethod(HTTP_PATCH);
+        else if (String(method) == "DELETE") h->setMethod(HTTP_DELETE);
+        else                                  h->setMethod(HTTP_POST);
+        server->addHandler(h);
+        continue;
+      }
+
+      if (e.handler) {
+        auto wrapped = sm
+            ? sm->wrapRequest(e.handler, predicate)
+            : e.handler;
+        if (String(method) == "GET")          server->on(e.path, HTTP_GET, wrapped);
+        else if (String(method) == "POST")     server->on(e.path, HTTP_POST, wrapped);
+        else if (String(method) == "PUT")      server->on(e.path, HTTP_PUT, wrapped);
+        else if (String(method) == "DELETE")   server->on(e.path, HTTP_DELETE, wrapped);
+        else                                    server->on(e.path, HTTP_GET, wrapped);
+        continue;
+      }
+
+      // No handler nor jsonHandler — endpoint is bind-deferred (e.g.
+      // multipart upload that the service still registers manually,
+      // but wants to surface in the manifest + reach via rest.proxy
+      // through internalHandler).
+    }
+
+    // Auxiliary spec.actions[] (legacy / cross-cut button-style
+    // entries belonging to the same page) — bind with the same
+    // handler-only path; jsonHandler-on-action is rare but
+    // structurally supported through the WebActionEntry already.
+    // We don't replicate WebActionEntry's logic here; if a service
+    // needs an action, it should call web->registerAction(spec).
+
+    _mounted = true;
+  }
 
   void toJson(JsonObject& obj) const override {
     obj["id"] = _spec.id ? _spec.id : "";
@@ -69,8 +132,45 @@ class WebPageEntry : public IWebFeatureEntry {
     }
   }
 
+  // Phase 2 — rest.proxy entry point. Mothership walks every
+  // IWebFeatureEntry; WebPageEntry matches against each endpoint's
+  // (method, path) pair and invokes its internalHandler. Refuses
+  // (returns 501) when the endpoint is in the spec but no
+  // internalHandler is set — that's a deliberate opt-out on the
+  // service's part (e.g. multipart upload stays raw).
+  bool proxyDispatch(const char* method,
+                      const char* path,
+                      JsonVariant body,
+                      int& out_status,
+                      JsonVariant out_body) override {
+    if (!method || !path) return false;
+    for (const auto& e : _spec.endpoints) {
+      if (!e.path) continue;
+      if (String(e.path) != path) continue;
+      const char* want_method = e.method ? e.method : "GET";
+      if (String(want_method) != method) {
+        // Path matches but method doesn't — keep walking the list
+        // (a service might register the same path under two methods).
+        continue;
+      }
+      if (!e.internalHandler) {
+        out_status = 501;
+        JsonObject o = out_body.to<JsonObject>();
+        o["error"]   = "no_internal_handler";
+        o["message"] = "endpoint registered but doesn't expose an "
+                       "in-process handler — invoke via direct HTTP";
+        return true;
+      }
+      out_status = 200;
+      e.internalHandler(body, out_body, out_status);
+      return true;
+    }
+    return false;
+  }
+
  private:
   WebPageSpec _spec;
+  bool _mounted{false};
 };
 
 #endif

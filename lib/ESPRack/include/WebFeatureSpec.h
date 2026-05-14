@@ -65,6 +65,39 @@ struct WebEndpointMeta {
   const char* path = nullptr;
   WebAuthLevel auth = WebAuthLevel::Authenticated;
   const char* role = nullptr;
+
+  // ── Handlers ──
+  //
+  // Pick whichever shape matches the endpoint; WebPageEntry's
+  // registerEndpoints walks the spec and binds the right one:
+  //
+  //   handler         — plain GET (or POST without auto-parsed body)
+  //                     receives only the request, must do its own
+  //                     query / body parsing. Default registration:
+  //                     server->on(path, METHOD, wrap(handler))
+  //
+  //   jsonHandler     — POST / PUT / PATCH with a JSON body. Wrapped
+  //                     in an AsyncCallbackJsonWebHandler so the
+  //                     handler sees both the request and a parsed
+  //                     JsonVariant. Saves boilerplate body buffering.
+  //
+  //   internalHandler — in-process invocation for Mothership's
+  //                     rest.proxy. Bypasses AsyncWebServer entirely
+  //                     so the same operation works without HTTP plumbing
+  //                     (no JWT check, body is a JsonVariant the action
+  //                     handler already parsed). Status/body written
+  //                     to the out parameters.
+  //
+  // Setting `handler` AND `jsonHandler` is a misconfiguration — the
+  // first one set wins, jsonHandler preferred for body-aware methods.
+  // `internalHandler` is independent and works alongside either of
+  // the other two (the local-browser path uses handler/jsonHandler,
+  // the mothership path uses internalHandler).
+  std::function<void(AsyncWebServerRequest*)> handler;
+  std::function<void(AsyncWebServerRequest*, JsonVariant&)> jsonHandler;
+  std::function<void(JsonVariant /*in*/,
+                      JsonVariant /*out*/,
+                      int&        /*status*/)> internalHandler;
 };
 
 struct WebFeatureSpec {

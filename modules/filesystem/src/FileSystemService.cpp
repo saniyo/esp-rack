@@ -63,124 +63,39 @@ FileSystemService::FileSystemService(AsyncWebServer* server,
     : _server(server), _manager(manager), _sec(securityManager) {
   using namespace std::placeholders;
 
-  _server->on(FS_SCHEMA_PATH, HTTP_GET,
-              _sec->wrapRequest(std::bind(&FileSystemService::handleSchema, this, _1),
-                                AuthenticationPredicates::IS_ADMIN));
-
-  _server->on(FS_VOLUMES_PATH, HTTP_GET,
-              _sec->wrapRequest(std::bind(&FileSystemService::handleVolumes, this, _1),
-                                AuthenticationPredicates::IS_ADMIN));
-
-  _server->on(FS_FORMAT_STATUS_PATH, HTTP_GET,
-              _sec->wrapRequest(std::bind(&FileSystemService::handleFormatStatus, this, _1),
-                                AuthenticationPredicates::IS_ADMIN));
-
-  _server->on(FS_LIST_PATH, HTTP_GET,
-              _sec->wrapRequest(std::bind(&FileSystemService::handleList, this, _1),
-                                AuthenticationPredicates::IS_ADMIN));
-
-  _server->on(FS_STAT_PATH, HTTP_GET,
-              _sec->wrapRequest(std::bind(&FileSystemService::handleStat, this, _1),
-                                AuthenticationPredicates::IS_ADMIN));
-
-  _server->on(FS_DOWNLOAD_PATH, HTTP_GET,
-              _sec->wrapRequest(std::bind(&FileSystemService::handleDownload, this, _1),
-                                AuthenticationPredicates::IS_ADMIN));
-
-  // upload: multipart handler
+  // Multipart upload is the only endpoint that doesn't fit
+  // WebEndpointMeta's handler/jsonHandler/internalHandler trio —
+  // it needs the 4-arg server->on(path, method, finalHandler,
+  // bodyHandler) shape for chunked body delivery. Stays bound
+  // directly to AsyncWebServer; the manifest's WebPageSpec still
+  // lists it (without an internalHandler — caller surfaces 501
+  // through proxyDispatch, which is honest: the operator should
+  // hit the local /rest/fs/upload endpoint with a real HTTP client
+  // for multipart, not try to wrap it in an action JSON envelope).
   _server->on(FS_UPLOAD_PATH, HTTP_POST,
               std::bind(&FileSystemService::handleUploadDone, this, _1),
               std::bind(&FileSystemService::handleUpload, this, _1, _2, _3, _4, _5, _6));
-
-  // JSON POST handlers
-  auto mkdirHandler = new AsyncCallbackJsonWebHandler(
-      FS_MKDIR_PATH,
-      _sec->wrapCallback(std::bind(&FileSystemService::handleMkdir, this, _1, _2),
-                         AuthenticationPredicates::IS_ADMIN));
-  _server->addHandler(mkdirHandler);
-
-  auto deleteHandler = new AsyncCallbackJsonWebHandler(
-      FS_DELETE_PATH,
-      _sec->wrapCallback(std::bind(&FileSystemService::handleDelete, this, _1, _2),
-                         AuthenticationPredicates::IS_ADMIN));
-  _server->addHandler(deleteHandler);
-
-  auto renameHandler = new AsyncCallbackJsonWebHandler(
-      FS_RENAME_PATH,
-      _sec->wrapCallback(std::bind(&FileSystemService::handleRename, this, _1, _2),
-                         AuthenticationPredicates::IS_ADMIN));
-  _server->addHandler(renameHandler);
-
-  auto formatHandler = new AsyncCallbackJsonWebHandler(
-      FS_FORMAT_PATH,
-      _sec->wrapCallback(std::bind(&FileSystemService::handleFormat, this, _1, _2),
-                         AuthenticationPredicates::IS_ADMIN));
-  _server->addHandler(formatHandler);
-
-  auto unmountHandler = new AsyncCallbackJsonWebHandler(
-      FS_UNMOUNT_PATH,
-      _sec->wrapCallback(std::bind(&FileSystemService::handleUnmount, this, _1, _2),
-                         AuthenticationPredicates::IS_ADMIN));
-  _server->addHandler(unmountHandler);
-
-  auto mountHandler = new AsyncCallbackJsonWebHandler(
-      FS_MOUNT_PATH,
-      _sec->wrapCallback(std::bind(&FileSystemService::handleMount, this, _1, _2),
-                         AuthenticationPredicates::IS_ADMIN));
-  _server->addHandler(mountHandler);
-
-  _server->on(FS_ARCHIVE_STATUS_PATH, HTTP_GET,
-              _sec->wrapRequest(std::bind(&FileSystemService::handleArchiveStatus, this, _1),
-                                AuthenticationPredicates::IS_ADMIN));
-
-  _server->on(FS_ARCHIVE_DOWNLOAD_PATH, HTTP_GET,
-              _sec->wrapRequest(std::bind(&FileSystemService::handleArchiveDownload, this, _1),
-                                AuthenticationPredicates::IS_ADMIN));
-
-  auto archivePrepareHandler = new AsyncCallbackJsonWebHandler(
-      FS_ARCHIVE_PREPARE_PATH,
-      _sec->wrapCallback(std::bind(&FileSystemService::handleArchivePrepare, this, _1, _2),
-                         AuthenticationPredicates::IS_ADMIN));
-  _server->addHandler(archivePrepareHandler);
-
-  auto archiveCancelHandler = new AsyncCallbackJsonWebHandler(
-      FS_ARCHIVE_CANCEL_PATH,
-      _sec->wrapCallback(std::bind(&FileSystemService::handleArchiveCancel, this, _1, _2),
-                         AuthenticationPredicates::IS_ADMIN));
-  _server->addHandler(archiveCancelHandler);
-
-  _server->on(FS_HASH_STATUS_PATH, HTTP_GET,
-              _sec->wrapRequest(std::bind(&FileSystemService::handleHashStatus, this, _1),
-                                AuthenticationPredicates::IS_ADMIN));
-
-  auto hashStartHandler = new AsyncCallbackJsonWebHandler(
-      FS_HASH_START_PATH,
-      _sec->wrapCallback(std::bind(&FileSystemService::handleHashStart, this, _1, _2),
-                         AuthenticationPredicates::IS_ADMIN));
-  _server->addHandler(hashStartHandler);
-
-  auto hashCancelHandler = new AsyncCallbackJsonWebHandler(
-      FS_HASH_CANCEL_PATH,
-      _sec->wrapCallback(std::bind(&FileSystemService::handleHashCancel, this, _1, _2),
-                         AuthenticationPredicates::IS_ADMIN));
-  _server->addHandler(hashCancelHandler);
 }
-
-namespace {
-WebEndpointMeta fsEndpoint(const char* method, const char* path,
-                           const char* role, WebAuthLevel auth = WebAuthLevel::Admin) {
-  WebEndpointMeta e;
-  e.method = method;
-  e.path = path;
-  e.role = role;
-  e.auth = auth;
-  return e;
-}
-}  // namespace
 
 void FileSystemService::registerManifest(WebManager* web) {
   if (!web) return;
+  using namespace std::placeholders;
 
+  // Migration from raw server->on() to WebManager-driven binding:
+  // each endpoint declared here gets its handler/jsonHandler bound by
+  // WebPageEntry::registerEndpoints during web->begin(). No more
+  // bypass through the AsyncWebServer ctor.
+  //
+  // Local-browser-UI semantics unchanged — same paths, same auth
+  // predicates, same handlers. Bonus: Mothership's rest.proxy can
+  // now reach these endpoints (Phase 2) once each handler is twinned
+  // with an internalHandler. For this checkpoint the internalHandlers
+  // are absent; rest.proxy returns 501 with a clear "no_internal_handler"
+  // hint until the second pass fills them in.
+  //
+  // FS_UPLOAD_PATH is the one exception — its 4-arg multipart shape
+  // doesn't fit WebEndpointMeta. Listed here for manifest visibility
+  // but the actual binding stays in the ctor against AsyncWebServer.
   WebPageSpec page;
   page.id = "filesystem";
   page.title = "File System";
@@ -191,26 +106,162 @@ void FileSystemService::registerManifest(WebManager* web) {
   page.menu.auth = WebAuthLevel::Admin;
   page.auth = WebAuthLevel::Admin;
 
-  page.endpoints.push_back(fsEndpoint("GET",  FS_SCHEMA_PATH,           "schema"));
-  page.endpoints.push_back(fsEndpoint("GET",  FS_VOLUMES_PATH,          "volumes"));
-  page.endpoints.push_back(fsEndpoint("GET",  FS_LIST_PATH,             "list"));
-  page.endpoints.push_back(fsEndpoint("GET",  FS_STAT_PATH,             "stat"));
-  page.endpoints.push_back(fsEndpoint("GET",  FS_DOWNLOAD_PATH,         "download"));
-  page.endpoints.push_back(fsEndpoint("POST", FS_UPLOAD_PATH,           "upload"));
-  page.endpoints.push_back(fsEndpoint("POST", FS_MKDIR_PATH,            "mkdir"));
-  page.endpoints.push_back(fsEndpoint("POST", FS_DELETE_PATH,           "delete"));
-  page.endpoints.push_back(fsEndpoint("POST", FS_RENAME_PATH,           "rename"));
-  page.endpoints.push_back(fsEndpoint("POST", FS_FORMAT_PATH,           "format"));
-  page.endpoints.push_back(fsEndpoint("GET",  FS_FORMAT_STATUS_PATH,    "formatStatus"));
-  page.endpoints.push_back(fsEndpoint("POST", FS_UNMOUNT_PATH,          "unmount"));
-  page.endpoints.push_back(fsEndpoint("POST", FS_MOUNT_PATH,            "mount"));
-  page.endpoints.push_back(fsEndpoint("POST", FS_ARCHIVE_PREPARE_PATH,  "archivePrepare"));
-  page.endpoints.push_back(fsEndpoint("GET",  FS_ARCHIVE_STATUS_PATH,   "archiveStatus"));
-  page.endpoints.push_back(fsEndpoint("GET",  FS_ARCHIVE_DOWNLOAD_PATH, "archiveDownload"));
-  page.endpoints.push_back(fsEndpoint("POST", FS_ARCHIVE_CANCEL_PATH,   "archiveCancel"));
-  page.endpoints.push_back(fsEndpoint("POST", FS_HASH_START_PATH,       "hashStart"));
-  page.endpoints.push_back(fsEndpoint("GET",  FS_HASH_STATUS_PATH,      "hashStatus"));
-  page.endpoints.push_back(fsEndpoint("POST", FS_HASH_CANCEL_PATH,      "hashCancel"));
+  // Helper closures to cut boilerplate — these capture `this` so the
+  // member functions hit the right instance. Each `bind` retains the
+  // method's argument shape (request* / request* + json variant).
+  auto bindReq   = [this](void (FileSystemService::*m)(AsyncWebServerRequest*)) {
+    return std::bind(m, this, _1);
+  };
+  auto bindReqJs = [this](void (FileSystemService::*m)(AsyncWebServerRequest*, JsonVariant&)) {
+    return std::bind(m, this, _1, _2);
+  };
+
+  // ── GET endpoints (no body) ────────────────────────────────────────
+  {
+    WebEndpointMeta e;
+    e.method = "GET"; e.path = FS_SCHEMA_PATH; e.role = "schema";
+    e.auth = WebAuthLevel::Admin;
+    e.handler = bindReq(&FileSystemService::handleSchema);
+    page.endpoints.push_back(std::move(e));
+  }
+  {
+    WebEndpointMeta e;
+    e.method = "GET"; e.path = FS_VOLUMES_PATH; e.role = "volumes";
+    e.auth = WebAuthLevel::Admin;
+    e.handler = bindReq(&FileSystemService::handleVolumes);
+    page.endpoints.push_back(std::move(e));
+  }
+  {
+    WebEndpointMeta e;
+    e.method = "GET"; e.path = FS_LIST_PATH; e.role = "list";
+    e.auth = WebAuthLevel::Admin;
+    e.handler = bindReq(&FileSystemService::handleList);
+    page.endpoints.push_back(std::move(e));
+  }
+  {
+    WebEndpointMeta e;
+    e.method = "GET"; e.path = FS_STAT_PATH; e.role = "stat";
+    e.auth = WebAuthLevel::Admin;
+    e.handler = bindReq(&FileSystemService::handleStat);
+    page.endpoints.push_back(std::move(e));
+  }
+  {
+    WebEndpointMeta e;
+    e.method = "GET"; e.path = FS_DOWNLOAD_PATH; e.role = "download";
+    e.auth = WebAuthLevel::Admin;
+    e.handler = bindReq(&FileSystemService::handleDownload);
+    page.endpoints.push_back(std::move(e));
+  }
+  {
+    WebEndpointMeta e;
+    e.method = "GET"; e.path = FS_FORMAT_STATUS_PATH; e.role = "formatStatus";
+    e.auth = WebAuthLevel::Admin;
+    e.handler = bindReq(&FileSystemService::handleFormatStatus);
+    page.endpoints.push_back(std::move(e));
+  }
+  {
+    WebEndpointMeta e;
+    e.method = "GET"; e.path = FS_ARCHIVE_STATUS_PATH; e.role = "archiveStatus";
+    e.auth = WebAuthLevel::Admin;
+    e.handler = bindReq(&FileSystemService::handleArchiveStatus);
+    page.endpoints.push_back(std::move(e));
+  }
+  {
+    WebEndpointMeta e;
+    e.method = "GET"; e.path = FS_ARCHIVE_DOWNLOAD_PATH; e.role = "archiveDownload";
+    e.auth = WebAuthLevel::Admin;
+    e.handler = bindReq(&FileSystemService::handleArchiveDownload);
+    page.endpoints.push_back(std::move(e));
+  }
+  {
+    WebEndpointMeta e;
+    e.method = "GET"; e.path = FS_HASH_STATUS_PATH; e.role = "hashStatus";
+    e.auth = WebAuthLevel::Admin;
+    e.handler = bindReq(&FileSystemService::handleHashStatus);
+    page.endpoints.push_back(std::move(e));
+  }
+
+  // ── POST endpoints (JSON body, auto-parsed by AsyncCallbackJsonWebHandler) ─
+  {
+    WebEndpointMeta e;
+    e.method = "POST"; e.path = FS_MKDIR_PATH; e.role = "mkdir";
+    e.auth = WebAuthLevel::Admin;
+    e.jsonHandler = bindReqJs(&FileSystemService::handleMkdir);
+    page.endpoints.push_back(std::move(e));
+  }
+  {
+    WebEndpointMeta e;
+    e.method = "POST"; e.path = FS_DELETE_PATH; e.role = "delete";
+    e.auth = WebAuthLevel::Admin;
+    e.jsonHandler = bindReqJs(&FileSystemService::handleDelete);
+    page.endpoints.push_back(std::move(e));
+  }
+  {
+    WebEndpointMeta e;
+    e.method = "POST"; e.path = FS_RENAME_PATH; e.role = "rename";
+    e.auth = WebAuthLevel::Admin;
+    e.jsonHandler = bindReqJs(&FileSystemService::handleRename);
+    page.endpoints.push_back(std::move(e));
+  }
+  {
+    WebEndpointMeta e;
+    e.method = "POST"; e.path = FS_FORMAT_PATH; e.role = "format";
+    e.auth = WebAuthLevel::Admin;
+    e.jsonHandler = bindReqJs(&FileSystemService::handleFormat);
+    page.endpoints.push_back(std::move(e));
+  }
+  {
+    WebEndpointMeta e;
+    e.method = "POST"; e.path = FS_UNMOUNT_PATH; e.role = "unmount";
+    e.auth = WebAuthLevel::Admin;
+    e.jsonHandler = bindReqJs(&FileSystemService::handleUnmount);
+    page.endpoints.push_back(std::move(e));
+  }
+  {
+    WebEndpointMeta e;
+    e.method = "POST"; e.path = FS_MOUNT_PATH; e.role = "mount";
+    e.auth = WebAuthLevel::Admin;
+    e.jsonHandler = bindReqJs(&FileSystemService::handleMount);
+    page.endpoints.push_back(std::move(e));
+  }
+  {
+    WebEndpointMeta e;
+    e.method = "POST"; e.path = FS_ARCHIVE_PREPARE_PATH; e.role = "archivePrepare";
+    e.auth = WebAuthLevel::Admin;
+    e.jsonHandler = bindReqJs(&FileSystemService::handleArchivePrepare);
+    page.endpoints.push_back(std::move(e));
+  }
+  {
+    WebEndpointMeta e;
+    e.method = "POST"; e.path = FS_ARCHIVE_CANCEL_PATH; e.role = "archiveCancel";
+    e.auth = WebAuthLevel::Admin;
+    e.jsonHandler = bindReqJs(&FileSystemService::handleArchiveCancel);
+    page.endpoints.push_back(std::move(e));
+  }
+  {
+    WebEndpointMeta e;
+    e.method = "POST"; e.path = FS_HASH_START_PATH; e.role = "hashStart";
+    e.auth = WebAuthLevel::Admin;
+    e.jsonHandler = bindReqJs(&FileSystemService::handleHashStart);
+    page.endpoints.push_back(std::move(e));
+  }
+  {
+    WebEndpointMeta e;
+    e.method = "POST"; e.path = FS_HASH_CANCEL_PATH; e.role = "hashCancel";
+    e.auth = WebAuthLevel::Admin;
+    e.jsonHandler = bindReqJs(&FileSystemService::handleHashCancel);
+    page.endpoints.push_back(std::move(e));
+  }
+
+  // FS_UPLOAD_PATH — multipart, bound in ctor; manifest-visible only.
+  {
+    WebEndpointMeta e;
+    e.method = "POST"; e.path = FS_UPLOAD_PATH; e.role = "upload";
+    e.auth = WebAuthLevel::Admin;
+    // No handler set — WebPageEntry skips binding, ctor already bound
+    // the multipart-aware version against AsyncWebServer.
+    page.endpoints.push_back(std::move(e));
+  }
 
   web->registerPage(std::move(page));
 }
