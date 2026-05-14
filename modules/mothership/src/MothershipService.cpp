@@ -426,7 +426,7 @@ bool MothershipService::performOneCheckin(bool& outBurst) {
   http.setTimeout(15000);
   http.addHeader("Content-Type", "application/json");
 
-  // Body: {deviceId, fwVer, hwVer, hwRev, uptimeSec, freeHeap}
+  // Body: {deviceId, fwVer, hwVer, hwRev, uptimeSec, freeHeap, action_results[]}
   // All identity fields come from the single source of truth in
   // DeviceIdentity so this payload stays in lockstep with the X.509
   // cert subject + AutoUpdate URL + Identity tab readout. mTLS
@@ -437,7 +437,10 @@ bool MothershipService::performOneCheckin(bool& outBurst) {
   // bare ESP.getChipModel() ("ESP32-S3") so the fleet view shows the
   // memory variant — operator needs to tell N16R8 from N8R2 at a
   // glance when picking firmware.
-  DynamicJsonDocument req(1024);
+  //
+  // 4 KB doc — header fields + up to RESULT_RING_CAP=16 action_results
+  // each ~80 B of JSON. Well under the 16 KB the server accepts.
+  DynamicJsonDocument req(4096);
   req["deviceId"]  = _cert->subjectCN();
   req["fwVer"]     = DeviceIdentity::version();
   req["hwVer"]     = DeviceIdentity::chipModelFull();
@@ -448,6 +451,26 @@ bool MothershipService::performOneCheckin(bool& outBurst) {
   }
   req["uptimeSec"] = (uint32_t)(millis() / 1000);
   req["freeHeap"]  = ESP.getFreeHeap();
+
+  // Phase 1 — drain pending action results into the outbound body.
+  // Each entry came from a prior /checkin response whose actions[] we
+  // already dispatched; the server matches reqId back to the original
+  // queue entry. Emitting them here piggy-backs on the existing
+  // transport — no separate /api/v1/result endpoint needed.
+  if (!_resultRing.empty()) {
+    JsonArray results = req.createNestedArray("action_results");
+    for (const auto& r : _resultRing) {
+      JsonObject row = results.createNestedObject();
+      row["reqId"]   = r.reqId;
+      row["status"]  = r.status;
+      row["ok"]      = (r.status >= 200 && r.status < 300);
+      if (r.summary.length() > 0) row["summary"] = r.summary;
+    }
+    Serial.printf("[mship.do] emitting %u action_results\n",
+                  (unsigned)_resultRing.size());
+    _resultRing.clear();
+  }
+
   String body;
   serializeJson(req, body);
 
@@ -489,6 +512,16 @@ bool MothershipService::performOneCheckin(bool& outBurst) {
 }
 
 // ===== Phase 2.3 — Action dispatcher =====
+//
+// Phase 1 extension: every dispatched action also gets recorded in
+// _resultRing (with reqId from the action entry, status code, and the
+// handler's String summary). The next performOneCheckin emits this
+// ring under `action_results[]` so the server can match reqId to its
+// originally queued action and surface success/failure in the UI.
+//
+// "Unknown action type" is recorded with status 400 so the operator's
+// UI can flag protocol-version mismatches (server queued a type the
+// device doesn't yet implement).
 
 bool MothershipService::dispatchActions(JsonArrayConst actions) {
   bool any = false;
@@ -497,7 +530,9 @@ bool MothershipService::dispatchActions(JsonArrayConst actions) {
     JsonObjectConst a = v.as<JsonObjectConst>();
     String type = a["type"].as<String>();
     JsonObjectConst params = a["params"].as<JsonObjectConst>();
+    String reqId = a["reqId"].as<String>();
     String result;
+    int    status = 200;
 
     if (type == "update")          result = actionUpdate(params);
     else if (type == "renewCert")   result = actionRenewCert(params);
@@ -506,12 +541,40 @@ bool MothershipService::dispatchActions(JsonArrayConst actions) {
     else if (type == "setConfig")   result = actionSetConfig(params);
     else if (type == "reboot")      result = actionReboot(params);
     else if (type == "log")         result = actionLog(params);
-    else                             result = "unknown action type";
+    else { result = "unknown action type"; status = 400; }
 
-    Serial.printf("[mship.action] %s → %s\n", type.c_str(), result.c_str());
+    // Best-effort status classification — for now a "missing" /
+    // "no cert" / "no provider" failure stays inside the handler's
+    // return string and we treat it as 500. Phase 2 (rest.proxy)
+    // refines this with proper out_status from proxyDispatch.
+    if (status == 200 && result.startsWith("missing ")) status = 400;
+    if (status == 200 && result.startsWith("no "))      status = 503;
+    if (status == 200 && result.indexOf("failed") >= 0) status = 500;
+
+    Serial.printf("[mship.action] %s → %s (status=%d)\n",
+                  type.c_str(), result.c_str(), status);
+
+    // Only push if the action carried a reqId — the operator paths
+    // (UI form queue) all mint one server-side; bare protocol noise
+    // (legacy clients that never set reqId) doesn't pollute the ring.
+    if (reqId.length() > 0) {
+      pushActionResult(reqId, status, result);
+    }
+
     any = true;
   }
   return any;
+}
+
+void MothershipService::pushActionResult(const String& reqId,
+                                          int status,
+                                          const String& summary) {
+  if (_resultRing.size() >= RESULT_RING_CAP) {
+    Serial.printf("[mship.result] ring full, dropping head reqId=%s\n",
+                  _resultRing.front().reqId.c_str());
+    _resultRing.pop_front();
+  }
+  _resultRing.push_back({reqId, status, summary});
 }
 
 String MothershipService::actionUpdate(JsonObjectConst params) {

@@ -26,6 +26,7 @@
 #include <Arduino.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <deque>
 
 #define MOTHERSHIP_FILE      "/config/mothership.json"
 #define MOTHERSHIP_FORM_PATH "/rest/mothership"
@@ -198,6 +199,28 @@ class MothershipService : public StatefulService<MothershipSettings>,
   String         actionSetConfig(JsonObjectConst params);
   String         actionReboot(JsonObjectConst params);
   String         actionLog(JsonObjectConst params);
+
+  // ── Phase 1 — Action result return channel ──
+  //
+  // dispatchActions writes one entry per processed action; the next
+  // performOneCheckin drains the deque into the outbound JSON body
+  // under `action_results[]`. RAM-only (no flash persistence) — a
+  // reboot mid-handler loses the in-flight results, but the server
+  // can requeue any action whose result it didn't receive. Cap 16
+  // keeps the budget bounded (a stuck loop can't grow the queue
+  // unboundedly while WiFi is down); head is dropped on overflow.
+  struct ActionResult {
+    String   reqId;
+    int      status;     // HTTP-style: 200=ok, 4xx=client err, 5xx=device err
+    String   summary;    // human-readable one-liner; what the handler returned
+  };
+  std::deque<ActionResult> _resultRing;
+  static constexpr size_t  RESULT_RING_CAP = 16;
+
+  // Push a result entry — caller has already classified status.
+  // Drops the oldest entry on overflow so the device can never get
+  // stuck unable to record new results because of a backlog.
+  void pushActionResult(const String& reqId, int status, const String& summary);
 };
 
 #endif  // MothershipService_h
