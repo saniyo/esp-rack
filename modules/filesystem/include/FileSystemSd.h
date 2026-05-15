@@ -225,17 +225,17 @@ class FileSystemSd : public FileSystemBackend {
         bool isDir = child.isDirectory();
         child.close();
         if (isDir) removeRecursive(vfs, cp);
-        else { vfs.remove(cp.c_str()); _formatDone++; }
+        else { vfs.remove(cp.c_str()); _formatDone = _formatDone + 1; }
         vTaskDelay(1);
         child = f.openNextFile();
       }
       f.close();
       vfs.rmdir(path.c_str());
-      _formatDone++;
+      _formatDone = _formatDone + 1;
     } else {
       f.close();
       vfs.remove(path.c_str());
-      _formatDone++;
+      _formatDone = _formatDone + 1;
     }
   }
 };
