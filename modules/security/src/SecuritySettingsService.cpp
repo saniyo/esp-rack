@@ -154,6 +154,14 @@ void SecuritySettingsService::registerManifest(WebManager* web) {
   tab.auth     = WebAuthLevel::Admin;
   tab.order    = 50;
   web->addTabToFeature("system", tab);
+
+  // Phase 7c — make the user-CRUD endpoint reachable through the
+  // mship-ui reverse proxy (and Phase 7d ws-bridge). Without this
+  // call, GET /rest/securitySettings via mothership returns 404
+  // because HttpEndpoint mounts on AsyncWebServer only, bypassing
+  // WebManager's _entries that proxyDispatch walks.
+  _httpEndpoint.registerProxy(web, SECURITY_SETTINGS_PATH);
+  _jwtFormEndpoint.registerProxy(web, SECURITY_JWT_FORM_PATH);
 }
 
 void SecuritySettingsService::begin() {

@@ -8,6 +8,7 @@
 
 #include <SecurityManager.h>
 #include <StatefulService.h>
+#include <WebManager.h>
 
 #define HTTP_ENDPOINT_ORIGIN_ID "http"
 
@@ -172,6 +173,55 @@ class HttpEndpoint : public HttpGetEndpoint<T>, public HttpPostEndpoint<T> {
                size_t bufferSize = DEFAULT_BUFFER_SIZE) :
       HttpGetEndpoint<T>(stateReader, statefulService, server, servicePath, bufferSize),
       HttpPostEndpoint<T>(stateReader, stateUpdater, statefulService, server, servicePath, bufferSize) {
+  }
+
+  // Phase 7c — expose this endpoint through WebManager's proxy
+  // dispatch path so the mship-ui reverse proxy (and the Phase 7d
+  // ws-bridge that funnels through it) can reach it. Without this
+  // call, GET/POST hit the AsyncWebServer route locally on the LAN
+  // but rest.proxy / ws-bridge see no_handler_for_path. Pass the
+  // SAME servicePath the endpoint was constructed with.
+  //
+  // Pattern (one-liner in the owning service's constructor):
+  //   _httpEndpoint(read, update, this, server, PATH, this),
+  //   ...
+  //   _httpEndpoint.registerProxy(web, PATH);  // <- add this
+  void registerProxy(WebManager* web, const String& path) {
+    if (!web) return;
+    auto* svc        = HttpGetEndpoint<T>::_statefulService;
+    auto  stateReader = HttpGetEndpoint<T>::_stateReader;
+    auto  stateUpdater = HttpPostEndpoint<T>::_stateUpdater;
+
+    web->registerProxyEndpoint("GET", path,
+        [svc, stateReader](JsonVariant /*body*/, JsonVariant out,
+                            int& out_status) {
+          JsonObject obj = out.to<JsonObject>();
+          svc->read(obj, stateReader);
+          out_status = 200;
+          return true;
+        });
+    web->registerProxyEndpoint("POST", path,
+        [svc, stateReader, stateUpdater]
+        (JsonVariant body, JsonVariant out, int& out_status) {
+          if (!body.is<JsonObject>()) {
+            out_status = 400;
+            return true;
+          }
+          JsonObject in = body.as<JsonObject>();
+          StateUpdateResult outcome =
+              svc->updateWithoutPropagation(in, stateUpdater);
+          if (outcome == StateUpdateResult::ERROR) {
+            out_status = 400;
+            return true;
+          }
+          JsonObject ret = out.to<JsonObject>();
+          svc->read(ret, stateReader);
+          out_status = 200;
+          if (outcome == StateUpdateResult::CHANGED) {
+            svc->callUpdateHandlers(HTTP_ENDPOINT_ORIGIN_ID);
+          }
+          return true;
+        });
   }
 };
 
