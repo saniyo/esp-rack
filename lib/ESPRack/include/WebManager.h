@@ -2,6 +2,7 @@
 #define WebManager_h
 
 #include <cstring>
+#include <functional>
 #include <memory>
 #include <utility>
 #include <vector>
@@ -221,6 +222,20 @@ class WebManager {
       out_status = 400;
       return false;
     }
+    // Generic proxy-endpoint registry. Modules that mount their REST
+    // handler directly on AsyncWebServer (rather than as an
+    // IWebFeatureEntry — see e.g. FeaturesService, which only serves
+    // a tiny JSON of build-time flags) register an in-process handler
+    // here so the mothership rest.proxy path can reach them. Walked
+    // BEFORE _entries so a module can override an entry's proxy
+    // behaviour if needed.
+    for (auto& pe : _proxyEndpoints) {
+      if (pe.method != method) continue;
+      if (pe.path != path)     continue;
+      if (pe.handler(body, out_body, out_status)) {
+        return true;
+      }
+    }
     for (auto& e : _entries) {
       if (!e) continue;
       if (e->proxyDispatch(method, path, body, out_status, out_body)) {
@@ -229,6 +244,24 @@ class WebManager {
     }
     return false;
   }
+
+  // Register a generic in-process handler reachable via the
+  // rest.proxy mothership action. handler signature:
+  //   bool(JsonVariant body, JsonVariant out, int& out_status)
+  // Return true and fill out_body + out_status on a hit; false to
+  // fall through (e.g. wrong method).
+  using ProxyEndpointHandler =
+      std::function<bool(JsonVariant body, JsonVariant out, int& out_status)>;
+  void registerProxyEndpoint(const String& method,
+                              const String& path,
+                              ProxyEndpointHandler handler) {
+    ProxyEndpoint pe;
+    pe.method  = method;
+    pe.path    = path;
+    pe.handler = std::move(handler);
+    _proxyEndpoints.push_back(std::move(pe));
+  }
+
 
  private:
   void serveManifest(AsyncWebServerRequest* request);
@@ -240,6 +273,14 @@ class WebManager {
   const char* _deviceVersion{""};
 
   std::vector<std::unique_ptr<IWebFeatureEntry>> _entries;
+
+  struct ProxyEndpoint {
+    String               method;
+    String               path;
+    ProxyEndpointHandler handler;
+  };
+  std::vector<ProxyEndpoint> _proxyEndpoints;
+
 
   struct BuildFeature {
     const char* key;

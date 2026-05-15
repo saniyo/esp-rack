@@ -17,7 +17,10 @@ class FeaturesModule : public ESPRack::Module {
     d.id = "features"; d.version = "1.0.0"; d.priority = 5;
   }
   void onInstall(ESPRack::ModuleContext& ctx) override {
-    svc_.reset(new FeaturesService(ctx.server));
+    // Pass WebManager so the service also registers a proxy endpoint
+    // — without that, the mothership mship-ui reverse proxy returns
+    // 404 for /rest/features and the React app's bootstrap fails.
+    svc_.reset(new FeaturesService(ctx.server, ctx.web));
   }
  private:
   std::unique_ptr<FeaturesService> svc_;

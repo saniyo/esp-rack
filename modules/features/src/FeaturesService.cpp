@@ -1,12 +1,25 @@
 #include <FeaturesService.h>
+#include <WebManager.h>
 
-FeaturesService::FeaturesService(AsyncWebServer* server) {
+FeaturesService::FeaturesService(AsyncWebServer* server, WebManager* web) {
   server->on(FEATURES_SERVICE_PATH, HTTP_GET, std::bind(&FeaturesService::features, this, std::placeholders::_1));
+
+  // Phase 7c — mship-ui proxy can't reach paths registered directly
+  // on AsyncWebServer (rest.proxy walks WebManager entries only).
+  // Register an in-process handler that builds the same JSON so the
+  // operator browser sees /rest/features through the reverse proxy.
+  if (web) {
+    web->registerProxyEndpoint(
+        "GET", FEATURES_SERVICE_PATH,
+        [](JsonVariant /*body*/, JsonVariant out, int& out_status) {
+          buildFeaturesObject(out.to<JsonObject>());
+          out_status = 200;
+          return true;
+        });
+  }
 }
 
-void FeaturesService::features(AsyncWebServerRequest* request) {
-  AsyncJsonResponse* response = new AsyncJsonResponse(false, MAX_FEATURES_SIZE);
-  JsonObject root = response->getRoot();
+void FeaturesService::buildFeaturesObject(JsonObject root) {
 #if FT_ENABLED(FT_PROJECT)
   root["project"] = true;
 #else
@@ -52,6 +65,12 @@ void FeaturesService::features(AsyncWebServerRequest* request) {
 #else
   root["system_info"] = false;
 #endif
+}
+
+void FeaturesService::features(AsyncWebServerRequest* request) {
+  AsyncJsonResponse* response = new AsyncJsonResponse(false, MAX_FEATURES_SIZE);
+  JsonObject root = response->getRoot();
+  buildFeaturesObject(root);
   response->setLength();
   request->send(response);
 }
