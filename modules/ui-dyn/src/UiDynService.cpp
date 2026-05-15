@@ -1,5 +1,6 @@
 #include "UiDynService.h"
 #include <SecurityManager.h>
+#include <WebManager.h>
 
 static const char* methodToStr_(UiDynService::HttpMethod m) {
   switch (m) {
@@ -46,6 +47,22 @@ void UiDynService::begin() {
   }
 
   _mounted = true;
+}
+
+void UiDynService::registerProxy(WebManager* web) {
+  if (!web) return;
+  // Captures `this` — the manifest is rebuilt on every call so any
+  // control registered AFTER this point is reflected. Proxy lambda
+  // bypasses the JWT predicate the AsyncWebServer route enforces;
+  // the trust anchor for the proxy path is the mship-ui operator
+  // login on mothership, not a device-side JWT.
+  web->registerProxyEndpoint(
+      "GET", _path,
+      [this](JsonVariant /*body*/, JsonVariant out, int& out_status) {
+        this->toJson(out.to<JsonObject>());
+        out_status = 200;
+        return true;
+      });
 }
 
 UiDynService::ControlInfo* UiDynService::alloc_(const char* id) {

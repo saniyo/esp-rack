@@ -7,6 +7,7 @@
 #include <AsyncJson.h>
 
 class SecurityManager;
+class WebManager;
 
 #ifndef UI_DYN_SERVICE_PATH
 #define UI_DYN_SERVICE_PATH "/rest/uiDynamicManifest"
@@ -81,6 +82,12 @@ class UiDynService {
                size_t jsonCapacity = MAX_UI_DYN_SIZE);
 
   void begin();  // монтує GET endpoint (JWT protected якщо є securityManager)
+
+  // Phase 7c — also expose the manifest GET through WebManager's proxy
+  // dispatch so the mship-ui reverse proxy can reach it (proxyDispatch
+  // walks _entries + _proxyEndpoints, not the AsyncWebServer route
+  // table that begin() mounts on).
+  void registerProxy(WebManager* web);
 
   String registerControl(const ControlSpec& spec);
 

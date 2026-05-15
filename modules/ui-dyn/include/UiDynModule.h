@@ -16,6 +16,11 @@ class UiDynModule : public ESPRack::Module {
   }
   void onInstall(ESPRack::ModuleContext& ctx) override {
     svc_.reset(new UiDynService(ctx.server, ctx.security));
+    // Phase 7c — register the manifest GET as a proxy endpoint so
+    // the mship-ui reverse proxy (Phase 7d ws-bridge) can reach it.
+    // Without this the React app stuck on "Connecting to device..."
+    // because /rest/uiDynamicManifest 404'd through the proxy.
+    if (svc_ && ctx.web) svc_->registerProxy(ctx.web);
   }
   void onBegin() override { if (svc_) svc_->begin(); }
  private:

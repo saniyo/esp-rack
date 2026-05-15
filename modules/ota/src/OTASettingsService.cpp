@@ -55,6 +55,10 @@ void OTASettingsService::registerManifest(WebManager* web) {
   tab.auth = WebAuthLevel::Admin;
   tab.order = 60;
   web->addTabToFeature("system", tab);
+
+  // Phase 7c — mship-ui proxy reach for the typed config endpoint.
+  _httpEndpoint.registerProxy(web, OTA_SETTINGS_SERVICE_PATH);
+  _formEndpoint.registerProxy(web, OTA_SETTINGS_FORM_PATH);
 }
 
 void OTASettingsService::begin() {

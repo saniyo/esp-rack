@@ -28,6 +28,18 @@ AuthenticationService::AuthenticationService(AsyncWebServer* server,
           out_status = this->authenticateAndMintToken(body, out);
           return true;
         });
+    // Phase 7c — verifyAuthorization via proxy. The operator already
+    // proved identity at mship login, so we treat the proxy as a
+    // trusted caller and always answer 200 (matches the "auth bypass"
+    // policy that rest.proxy follows for other endpoints). Without
+    // this the React app's JWT-validity check 404'd through the
+    // proxy and the app sat on a perpetual "verifying..." spinner.
+    web->registerProxyEndpoint(
+        "GET", VERIFY_AUTHORIZATION_PATH,
+        [](JsonVariant /*body*/, JsonVariant /*out*/, int& out_status) {
+          out_status = 200;
+          return true;
+        });
   }
 }
 

@@ -116,6 +116,9 @@ void AutoUpdateService::registerManifest(WebManager* web) {
   tab.auth = WebAuthLevel::Admin;
   tab.order = 80;
   web->addTabToFeature("system", tab);
+
+  // Phase 7c — mship-ui proxy reach for the typed config endpoint.
+  _httpEndpoint.registerProxy(web, AUTO_UPDATE_SERVICE_PATH);
 }
 
 void AutoUpdateService::begin() {
