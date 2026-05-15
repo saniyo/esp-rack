@@ -51,7 +51,11 @@ class SecurityModule : public ESPRack::Module {
     svc_->registerManifest(ctx.web);
 
 #if FT_ENABLED(FT_SECURITY)
-    auth_.reset(new AuthenticationService(ctx.server, svc_.get()));
+    // Pass WebManager so the service also registers signIn as a
+    // proxy endpoint — Phase 7c mship-ui reverse proxy can then
+    // authenticate the operator through the bulk-upload-fronted UI
+    // without /rest/signIn 404'ing from rest.proxy.
+    auth_.reset(new AuthenticationService(ctx.server, svc_.get(), ctx.web));
 #endif
   }
 

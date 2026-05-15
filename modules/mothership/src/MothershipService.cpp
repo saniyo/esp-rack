@@ -333,12 +333,20 @@ void MothershipService::runCheckinLoop() {
     // until it elapses.
     uint32_t cur_s = (uint32_t)(millis() / 1000);
     if (_state.next_checkin_at_s != 0 && cur_s < _state.next_checkin_at_s) {
-      // Sleep until next_checkin_at_s; wake every 5s to pick up an
-      // operator pause / interval change without waiting full duration.
-      // ulTaskNotifyTake supports both: a setCadence notify pokes the
-      // task awake, otherwise the 5s timeout limits the staleness of
-      // any cert-availability / wifi-up transition we missed.
-      ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(5000));
+      // Sleep exactly long enough to reach next_checkin_at_s — but
+      // cap at 5 s so stale state (wifi just came back, cadence
+      // override just expired, cert just rotated) gets re-evaluated
+      // within bounded latency even if no one sends a notify. A
+      // setCadence notify pokes the task awake earlier than the
+      // computed timeout. Previously this was hard-coded 5000 ms
+      // regardless of how far away next_checkin_at_s was, which
+      // tanked /rest/* RTT under cadence_override_period_s=1:
+      // after a "no-op" check-in the loop slept 5 s instead of 1 s,
+      // making every queued action a ~6 s round-trip.
+      uint32_t wait_ms = (_state.next_checkin_at_s - cur_s) * 1000u;
+      if (wait_ms > 5000u) wait_ms = 5000u;
+      if (wait_ms < 50u)   wait_ms = 50u;   // floor so we yield even on tight cycles
+      ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(wait_ms));
       continue;
     }
 

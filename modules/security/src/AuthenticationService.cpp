@@ -1,8 +1,11 @@
 #include <AuthenticationService.h>
+#include <WebManager.h>
 
 #if FT_ENABLED(FT_SECURITY)
 
-AuthenticationService::AuthenticationService(AsyncWebServer* server, SecurityManager* securityManager) :
+AuthenticationService::AuthenticationService(AsyncWebServer* server,
+                                              SecurityManager* securityManager,
+                                              WebManager* web) :
     _securityManager(securityManager),
     _signInHandler(SIGN_IN_PATH,
                    std::bind(&AuthenticationService::signIn, this, std::placeholders::_1, std::placeholders::_2)) {
@@ -12,37 +15,55 @@ AuthenticationService::AuthenticationService(AsyncWebServer* server, SecurityMan
   _signInHandler.setMethod(HTTP_POST);
   _signInHandler.setMaxContentLength(MAX_AUTHENTICATION_SIZE);
   server->addHandler(&_signInHandler);
+
+  // Phase 7c — mship-ui reverse proxy needs to authenticate the
+  // operator without traversing AsyncWebServer (proxyDispatch walks
+  // WebManager registry, not the server's route table). Register the
+  // same signIn flow as a proxy endpoint so the operator's React app
+  // can mint a JWT through the reverse-proxy path.
+  if (web) {
+    web->registerProxyEndpoint(
+        "POST", SIGN_IN_PATH,
+        [this](JsonVariant body, JsonVariant out, int& out_status) {
+          out_status = this->authenticateAndMintToken(body, out);
+          return true;
+        });
+  }
 }
 
-/**
- * Verifys that the request supplied a valid JWT.
- */
+int AuthenticationService::authenticateAndMintToken(JsonVariantConst body,
+                                                     JsonVariant out) {
+  if (!body.is<JsonObjectConst>()) {
+    return 400;
+  }
+  String username = body["username"] | "";
+  String password = body["pwd"]      | "";
+  Authentication authentication =
+      _securityManager->authenticate(username, password);
+  if (!authentication.authenticated) {
+    return 401;
+  }
+  JsonObject obj = out.to<JsonObject>();
+  obj["access_token"] = _securityManager->generateJWT(authentication.user);
+  return 200;
+}
+
 void AuthenticationService::verifyAuthorization(AsyncWebServerRequest* request) {
   Authentication authentication = _securityManager->authenticateRequest(request);
   request->send(authentication.authenticated ? 200 : 401);
 }
 
-/**
- * Signs in a user if the username and password match. Provides a JWT to be used in the Authorization header in
- * subsequent requests.
- */
 void AuthenticationService::signIn(AsyncWebServerRequest* request, JsonVariant& json) {
-  if (json.is<JsonObject>()) {
-    String username = json["username"];
-    String password = json["pwd"];
-    Authentication authentication = _securityManager->authenticate(username, password);
-    if (authentication.authenticated) {
-      User* user = authentication.user;
-      AsyncJsonResponse* response = new AsyncJsonResponse(false, MAX_AUTHENTICATION_SIZE);
-      JsonObject jsonObject = response->getRoot();
-      jsonObject["access_token"] = _securityManager->generateJWT(user);
-      response->setLength();
-      request->send(response);
-      return;
-    }
+  AsyncJsonResponse* response = new AsyncJsonResponse(false, MAX_AUTHENTICATION_SIZE);
+  JsonVariant out = response->getRoot();
+  int status = authenticateAndMintToken(json, out);
+  if (status == 200) {
+    response->setLength();
+    request->send(response);
+  } else {
+    delete response;
+    request->send(status);
   }
-  AsyncWebServerResponse* response = request->beginResponse(401);
-  request->send(response);
 }
 
 #endif // end FT_ENABLED(FT_SECURITY)
