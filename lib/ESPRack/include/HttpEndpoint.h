@@ -8,7 +8,14 @@
 
 #include <SecurityManager.h>
 #include <StatefulService.h>
-#include <WebManager.h>
+
+// WebManager forward-declared only — circular include otherwise
+// (WebManager.h -> WebFeatureDelegate.h -> HttpEndpoint.h -> here).
+// registerProxy() below is templated on the WebManager* parameter so
+// the call to `web->registerProxyEndpoint(...)` becomes a dependent
+// name and lookup defers until instantiation, by which point the
+// consumer has already included <WebManager.h>.
+class WebManager;
 
 #define HTTP_ENDPOINT_ORIGIN_ID "http"
 
@@ -186,7 +193,13 @@ class HttpEndpoint : public HttpGetEndpoint<T>, public HttpPostEndpoint<T> {
   //   _httpEndpoint(read, update, this, server, PATH, this),
   //   ...
   //   _httpEndpoint.registerProxy(web, PATH);  // <- add this
-  void registerProxy(WebManager* web, const String& path) {
+  //
+  // Templated on W so `web->registerProxyEndpoint(...)` is a dependent
+  // name (lookup deferred to instantiation, by which point consumers
+  // have already included <WebManager.h>). Dodges the WebManager.h
+  // <-> WebFeatureDelegate.h <-> HttpEndpoint.h include cycle.
+  template<typename W>
+  void registerProxy(W* web, const String& path) {
     if (!web) return;
     auto* svc        = HttpGetEndpoint<T>::_statefulService;
     auto  stateReader = HttpGetEndpoint<T>::_stateReader;
