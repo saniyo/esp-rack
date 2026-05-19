@@ -248,6 +248,11 @@ long-poll). Default інтервал з `MOTHERSHIP_INTERVAL_MIN` (5 хв). Як
 
 ### Phase 3 — WireGuard Tunnel (on-demand direct access)
 
+> **🛠 Implementation lives in [wireguard-tunnel.md](./wireguard-tunnel.md)**
+> — that doc is the authoritative plan (operator-confirmed, code in
+> progress on `feature/wireguard-tunnel`). The summary in this section
+> is preserved as historical motivation.
+
 **Goal:** Пристрій за NAT/firewall може отримати команду від мазершіпа
 "відкрий тунель", після чого VPS бачить пристрій по wg-IP і може робити
 direct HTTPS / SSH / debug-port.
