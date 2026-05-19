@@ -90,6 +90,10 @@ struct CertManagerSettings {
   static StateUpdateResult staUpd(JsonObject& root, CertManagerSettings& s);
 };
 
+// Forward-declare so we don't have to pull the wireguard module's
+// public header just to know the type of the optional pointer.
+class IWireguardProvider;
+
 class CertManagerService : public StatefulService<CertManagerSettings>,
                            public ICertProvider {
  public:
@@ -98,6 +102,15 @@ class CertManagerService : public StatefulService<CertManagerSettings>,
   void registerManifest(WebManager* web);
   void begin();
   void loop();
+
+  // Phase WG.3 — let the enroll flow include the device's WG
+  // public key in the CSR payload so the mothership can pre-allocate
+  // a tunnel IP and add the peer at enrollment time. Optional:
+  // setting null (or never calling this setter) preserves the
+  // pre-WG enrollment behaviour. Wired by CertManagerModule after
+  // WireGuardModule installs (the module priorities make this
+  // available before begin() runs the first enroll).
+  void setWireguardProvider(IWireguardProvider* wg) { _wg = wg; }
 
   // ICertProvider
   State state() const override { return _state.runtime_state; }
@@ -112,6 +125,10 @@ class CertManagerService : public StatefulService<CertManagerSettings>,
   ConfigDelegate<CertManagerSettings>      _cfg;
   WebFeatureEntry<CertManagerSettings>*    _feature{nullptr};
   ITLSProvider*                            _tls{nullptr};
+  // Optional — set via setWireguardProvider after WireGuardModule
+  // installs (priorities 12 vs 14, but the App pointer is stable
+  // throughout, so plain late-bind is enough).
+  IWireguardProvider*                      _wg{nullptr};
 
   // Recompute runtime_state from on-disk fields after every load /
   // mutation. Runs in begin() and after successful enroll/rotate.

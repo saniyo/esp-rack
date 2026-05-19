@@ -1,5 +1,6 @@
 #include <CertManagerService.h>
 #include <ITLSProvider.h>
+#include <IWireguardProvider.h>
 #include <WebManager.h>
 
 // mbedtls bindings for ECDSA-P256 keypair + PKCS#10 CSR + cert
@@ -831,11 +832,22 @@ bool CertManagerService::postCsrToMothership(const String& csrPem,
   http.addHeader("Content-Type", "application/json");
   http.addHeader("Authorization", String("Bearer ") + bootstrapToken);
 
-  // Body: {"deviceId": "...", "csr_pem": "..."}
-  // Allocate enough for csr_pem (~480 B base64) + framing.
+  // Body: {"deviceId": "...", "csr_pem": "...", "wg_pubkey": "..."}
+  // Allocate enough for csr_pem (~480 B base64) + WG pubkey (44 B)
+  // + framing.
   DynamicJsonDocument req(2048);
   req["deviceId"] = deviceSubjectCN();
   req["csr_pem"]  = csrPem;
+  // Phase WG.3 — include our WG public key so the mothership can
+  // pre-allocate a tunnel IP and add the peer at enrollment time.
+  // Optional: skipped when no WireGuard module is installed, or
+  // when keypair generation failed at boot.
+  if (_wg) {
+    String wgPub = _wg->publicKey();
+    if (wgPub.length() > 0) {
+      req["wg_pubkey"] = wgPub;
+    }
+  }
   String reqBody;
   serializeJson(req, reqBody);
 

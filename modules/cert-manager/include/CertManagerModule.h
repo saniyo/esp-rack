@@ -33,16 +33,31 @@ class CertManagerModule : public ESPRack::Module {
     // pattern MqttModule / TelegramModule use.
     if (ctx.app) ctx.app->setCert(svc_.get());
 
+    // Stash app pointer so onBegin can pick up WireGuardModule's
+    // late-bound provider once all installs are complete.
+    app_ = ctx.app;
+
     svc_->registerManifest(ctx.web);
   }
 
-  void onBegin() override { if (svc_) svc_->begin(); }
+  void onBegin() override {
+    if (!svc_) return;
+    // Phase WG.3 — by the time onBegin runs, every Module's
+    // onInstall has already executed (Builder phases the loop:
+    // all installs first, then all begins). So app->wireguard()
+    // is either populated (WireGuardModule was installed) or
+    // permanently null. Bind it once into the cert service so the
+    // enroll flow knows whether to include a wg_pubkey field.
+    if (app_) svc_->setWireguardProvider(app_->wireguard());
+    svc_->begin();
+  }
   void onLoop()  override { if (svc_) svc_->loop();  }
 
   CertManagerService* service() { return svc_.get(); }
 
  private:
   std::unique_ptr<CertManagerService> svc_;
+  ESPRack::App* app_{nullptr};
 };
 
 #endif
