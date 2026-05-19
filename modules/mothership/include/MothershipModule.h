@@ -18,6 +18,8 @@
 #include "MothershipService.h"
 #include <memory>
 
+class IWireguardProvider;
+
 class MothershipModule : public ESPRack::Module {
  public:
   void describe(ESPRack::ModuleDescriptor& d) override {
@@ -26,9 +28,13 @@ class MothershipModule : public ESPRack::Module {
   }
 
   void onInstall(ESPRack::ModuleContext& ctx) override {
-    ITLSProvider*  tls  = ctx.app ? ctx.app->tls()  : nullptr;
-    ICertProvider* cert = ctx.app ? ctx.app->cert() : nullptr;
-    svc_.reset(new MothershipService(ctx.cfgMgr, tls, cert));
+    ITLSProvider*       tls  = ctx.app ? ctx.app->tls()  : nullptr;
+    ICertProvider*      cert = ctx.app ? ctx.app->cert() : nullptr;
+    // Optional — only present when WireGuardModule is installed
+    // ahead of us (priority 14 < 35). When absent, openTunnel
+    // actions gracefully fall through with "no wireguard provider".
+    IWireguardProvider* wg   = ctx.app ? ctx.app->wireguard() : nullptr;
+    svc_.reset(new MothershipService(ctx.cfgMgr, tls, cert, wg));
 
     // Late-bind IMothershipProvider into App. Phase 3 (WireGuard
     // module) and any other later consumer can pull state via

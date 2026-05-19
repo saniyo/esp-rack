@@ -45,6 +45,7 @@
 class WebManager;
 class ITLSProvider;
 class ICertProvider;
+class IWireguardProvider;
 
 struct MothershipSettings {
   // ── Persisted config ──
@@ -72,7 +73,8 @@ class MothershipService : public StatefulService<MothershipSettings>,
  public:
   MothershipService(ConfigManager* cfgMgr,
                     ITLSProvider* tls,
-                    ICertProvider* cert);
+                    ICertProvider* cert,
+                    IWireguardProvider* wg = nullptr);
 
   void registerManifest(WebManager* web);
   void begin();
@@ -90,6 +92,10 @@ class MothershipService : public StatefulService<MothershipSettings>,
   WebFeatureEntry<MothershipSettings>*    _feature{nullptr};
   ITLSProvider*                            _tls{nullptr};
   ICertProvider*                           _cert{nullptr};
+  // Optional — populated by MothershipModule from app->wireguard()
+  // when WireGuardModule is installed in the consumer. Null when
+  // the consumer doesn't want tunneling.
+  IWireguardProvider*                      _wg{nullptr};
 
   // Refresh runtime_state + status_label from persisted fields +
   // CertProvider readiness. Runs in begin(), after every update,
@@ -130,6 +136,7 @@ class MothershipService : public StatefulService<MothershipSettings>,
   String         actionUpdate(JsonObjectConst params);
   String         actionRenewCert(JsonObjectConst params);
   String         actionOpenTunnel(JsonObjectConst params);
+  String         actionCloseTunnel(JsonObjectConst params);
   String         actionSetConfig(JsonObjectConst params);
   String         actionReboot(JsonObjectConst params);
   String         actionLog(JsonObjectConst params);

@@ -1,6 +1,7 @@
 #include <MothershipService.h>
 #include <ITLSProvider.h>
 #include <ICertProvider.h>
+#include <IWireguardProvider.h>
 #include <WebManager.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
@@ -126,7 +127,8 @@ StateUpdateResult MothershipSettings::staUpd(JsonObject& root,
 
 MothershipService::MothershipService(ConfigManager* cfgMgr,
                                      ITLSProvider* tls,
-                                     ICertProvider* cert)
+                                     ICertProvider* cert,
+                                     IWireguardProvider* wg)
     : StatefulService<MothershipSettings>(),
       _cfg(cfgMgr,
            "mothership",
@@ -139,7 +141,8 @@ MothershipService::MothershipService(ConfigManager* cfgMgr,
            nullptr /*validator*/,
            MothershipSettings::buildForm /*formReader*/),
       _tls(tls),
-      _cert(cert) {
+      _cert(cert),
+      _wg(wg) {
   addUpdateHandler([this](const String& origin) {
     // Refresh state-machine ONLY for non-tick origins. The tick path
     // (mship.tick-start / mship.tick-end) sets runtime_state
@@ -435,6 +438,7 @@ bool MothershipService::dispatchActions(JsonArrayConst actions) {
     if (type == "update")          result = actionUpdate(params);
     else if (type == "renewCert")   result = actionRenewCert(params);
     else if (type == "openTunnel")  result = actionOpenTunnel(params);
+    else if (type == "closeTunnel") result = actionCloseTunnel(params);
     else if (type == "setConfig")   result = actionSetConfig(params);
     else if (type == "reboot")      result = actionReboot(params);
     else if (type == "log")         result = actionLog(params);
@@ -470,9 +474,44 @@ String MothershipService::actionRenewCert(JsonObjectConst params) {
 }
 
 String MothershipService::actionOpenTunnel(JsonObjectConst params) {
-  // Phase 3 wires this into WireGuardModule. For now ack.
+  // Phase 3 — bring the device's WireGuard tunnel up using the
+  // triplet the mothership supplies in the action params.
+  //
+  // Params shape:
+  //   { "server_pubkey": "...base64...",
+  //     "endpoint":      "1.2.3.4:51820",
+  //     "assigned_ip":   "10.99.0.7" }
+  //
+  // Any/all fields can be empty — IWireguardProvider::up() falls
+  // back to its cached values from the previous openTunnel cycle.
+  // The tunnel goes up synchronously here; the actual handshake
+  // completes asynchronously in the lib's internal task. Operator-
+  // facing "tunnel is live" signal is via the action_result we
+  // push to the ring (status 200) plus a follow-up status read
+  // on the device's check-in payload (next pass after up()).
+  if (!_wg) {
+    return "no wireguard provider — install WireGuardModule";
+  }
+  String srv = params["server_pubkey"].as<String>();
+  String ep  = params["endpoint"].as<String>();
+  String ip  = params["assigned_ip"].as<String>();
+  bool ok = _wg->up(srv, ep, ip);
+  if (!ok) {
+    return "wireguard up() failed";
+  }
+  return String("tunnel up, assigned=") + _wg->assignedIp();
+}
+
+String MothershipService::actionCloseTunnel(JsonObjectConst params) {
+  // Phase 3 — bring the tunnel back down. Sent by mothership after
+  // operator session idle timeout, or on explicit close. Idempotent:
+  // a closeTunnel when already down just acks.
   (void)params;
-  return "deferred to phase 3";
+  if (!_wg) {
+    return "no wireguard provider — install WireGuardModule";
+  }
+  _wg->down();
+  return "tunnel down";
 }
 
 String MothershipService::actionSetConfig(JsonObjectConst params) {

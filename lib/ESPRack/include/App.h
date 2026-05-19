@@ -40,6 +40,7 @@ class ITLSProvider;        // forward — populated by core App ctor
 class TLSContextService;   // forward — concrete impl, owned by App
 class ICertProvider;       // forward — populated by CertManagerModule
 class IMothershipProvider; // forward — populated by MothershipModule
+class IWireguardProvider;  // forward — populated by WireGuardModule
 
 namespace ESPRack {
 
@@ -115,6 +116,12 @@ class App {
   IMothershipProvider* mothership()                  { return mothership_; }
   void                 setMothership(IMothershipProvider* p) { mothership_ = p; }
 
+  // IWireguardProvider late-binding — populated by WireGuardModule.
+  // MothershipService::actionOpenTunnel / actionCloseTunnel call into
+  // this to bring the on-demand tunnel up/down.
+  IWireguardProvider* wireguard()                    { return wireguard_; }
+  void                setWireguard(IWireguardProvider* p) { wireguard_ = p; }
+
   // Read-only device identity — useful for AutoUpdateModule etc. that
   // pass these to their underlying service ctor. Set once at App
   // construction.
@@ -147,6 +154,7 @@ class App {
   ITLSProvider*       tls_      {nullptr};   // points at tlsContext_.get()
   ICertProvider*      cert_     {nullptr};   // populated by CertManagerModule
   IMothershipProvider* mothership_ {nullptr}; // populated by MothershipModule
+  IWireguardProvider* wireguard_ {nullptr};  // populated by WireGuardModule
 
   std::vector<std::unique_ptr<Module>> modules_;
   bool             begun_ {false};
