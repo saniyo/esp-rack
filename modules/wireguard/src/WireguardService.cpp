@@ -35,10 +35,12 @@ namespace {
 
 void WireguardSettings::readConfig(WireguardSettings& s,
                                     JsonObject& root) {
-  // SecretsVault layer wraps `priv_key` automatically because the
-  // field name ends in "_key" — our discovered-secrets convention
-  // catches anything matching that pattern, so the on-disk value is
-  // always ENC:... base64. We just write the in-memory plaintext.
+  // priv_key is the only secret in this config — pub_key, peer
+  // pubkey, endpoint, and tunnel IP are all server-disclosed public
+  // data. SecretsVault encrypts priv_key at rest because buildForm()
+  // declares it as addSecretField (auto-discovery detects FieldType::
+  // SECRET, not the field name — earlier comment in this file was
+  // wrong, fixed here). On-disk value lands as `ENC:...base64...`.
   root["priv_key"]       = s.priv_key;
   root["pub_key"]        = s.pub_key;
   root["server_pub_key"] = s.server_pub_key;
@@ -49,7 +51,26 @@ void WireguardSettings::readConfig(WireguardSettings& s,
 StateUpdateResult WireguardSettings::update(JsonObject& root,
                                               WireguardSettings& s) {
   bool ch = false;
-  ch |= FormBuilder::updateValue(root, "priv_key",       s.priv_key);
+
+  // priv_key is the sensitive field. SecretsVault dual-parses the
+  // same way cert-manager's PEM blobs are handled: adopt only if
+  // the incoming JSON has a non-empty value. At boot we MUST take
+  // the decrypted value off disk. On every form POST the field
+  // comes through as the same plaintext (AF::R round-trip) which
+  // is fine — empty/missing wouldn't clobber. Without this guard,
+  // a form save with a redacted/null priv_key field would wipe
+  // our keypair and break the tunnel until next factory boot.
+  if (root.containsKey("priv_key")) {
+    JsonVariant v = root["priv_key"];
+    if (!v.isNull()) {
+      String incoming = v.as<String>();
+      if (incoming.length() > 0 && incoming != s.priv_key) {
+        s.priv_key = incoming;
+        ch = true;
+      }
+    }
+  }
+
   ch |= FormBuilder::updateValue(root, "pub_key",        s.pub_key);
   ch |= FormBuilder::updateValue(root, "server_pub_key", s.server_pub_key);
   ch |= FormBuilder::updateValue(root, "endpoint",       s.endpoint);
@@ -102,6 +123,32 @@ void WireguardSettings::buildForm(WireguardSettings& s,
       "tab is read-only for diagnostics. Use the 'Open UI' button "
       "on the device's panel page (mothership side) to bring it up.",
       level("info"), icon("Info"));
+
+  // ── INTERNALS ──────────────────────────────────────────────────
+  // The device's Curve25519 private key — generated locally on first
+  // boot and never leaves the device. Marked as addSecretField so
+  // SecretsVault's auto-discovery picks it up (it scans for
+  // FieldType::SECRET in the form schema, not field-name patterns)
+  // and encrypts the on-disk value in /config/wireguard.json as
+  // ENC:...base64... Read-only — there's no operator-meaningful
+  // reason to edit it; rotating means clearing it and rebooting
+  // (the service regenerates a fresh pair on next ensureKeypair()
+  // when the field is empty).
+  JsonArray intl = FormBuilder::createForm(root, "internals",
+                                            "Sensitive material (encrypted on disk)");
+  FormBuilder::addMessageField(intl, "m_internals_warn",
+      "The device's Curve25519 private key. Generated locally on "
+      "first boot, never transmitted. Encrypted at rest by "
+      "SecretsVault — eye icon reveals plaintext for debug. Do NOT "
+      "modify by hand: edits via this UI are discarded on save "
+      "(AF::R). To rotate the keypair, clear this field manually "
+      "and reboot the device (next ensureKeypair() generates a fresh "
+      "pair, and the next enrollment ships the new public half).",
+      level("warning"), icon("Warning"));
+  FormBuilder::addSecretField(intl, "priv_key", AF::R,
+                              s.priv_key.c_str(),
+                              label("Device private key (Curve25519)"),
+                              icon("Key"));
 }
 
 void WireguardSettings::staRead(WireguardSettings& s,
@@ -160,6 +207,15 @@ void WireguardService::registerManifest(WebManager* web) {
   statusTab.postable = false;
   statusTab.live     = true;
   spec.tabs.push_back(statusTab);
+
+  WebTabSpec internalsTab;
+  internalsTab.key      = "internals";
+  internalsTab.title    = "Internals";
+  internalsTab.restPath = WG_FORM_PATH;
+  internalsTab.postable = false;     // priv_key is AF::R; never accept writes
+  internalsTab.auth     = WebAuthLevel::Admin;
+  internalsTab.order    = 90;
+  spec.tabs.push_back(internalsTab);
 
   _feature = web->registerFeature<WireguardSettings>(
       std::move(spec), this,
