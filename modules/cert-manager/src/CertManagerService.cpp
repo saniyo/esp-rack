@@ -1,6 +1,8 @@
 #include <CertManagerService.h>
 #include <ITLSProvider.h>
 #include <IWireguardProvider.h>
+#include <IMothershipProfileProvider.h>
+#include <App.h>
 #include <WebManager.h>
 
 // mbedtls bindings for ECDSA-P256 keypair + PKCS#10 CSR + cert
@@ -39,7 +41,7 @@ void CertManagerSettings::readConfig(CertManagerSettings& s, JsonObject& root) {
   root["not_after_ts"]  = s.not_after_ts;
 
   root["recovery_token"]  = s.recovery_token;
-  root["mothership_url"]  = s.mothership_url;
+  root["pki_base_url"]    = s.pki_base_url;
   // bootstrap_token intentionally omitted — never persists.
 }
 
@@ -84,7 +86,7 @@ StateUpdateResult CertManagerSettings::update(JsonObject& root,
   ch |= FormBuilder::updateValue(root, "serial_hex",      s.serial_hex);
   ch |= FormBuilder::updateValue(root, "subject_cn",      s.subject_cn);
   ch |= FormBuilder::updateValue(root, "not_after_ts",    s.not_after_ts);
-  ch |= FormBuilder::updateValue(root, "mothership_url",  s.mothership_url);
+  ch |= FormBuilder::updateValue(root, "pki_base_url",    s.pki_base_url);
 
   // Bootstrap token IS the only secret field that the form is
   // EXPECTED to mutate (operator types it during enrollment). Plain
@@ -177,22 +179,26 @@ void CertManagerSettings::buildForm(CertManagerSettings& s, JsonObject& root) {
       level("warning"), icon("Warning"));
 
   // ── SETTINGS ────────────────────────────────────────────────────────
-  // Mothership endpoint config. Survives reboot. Operator can repoint
-  // the device at staging / dev mock server without reflashing.
+  // PKI endpoint override. Empty (default) → cert-manager follows the
+  // active Mothership profile (one base URL feeds /checkin + /enroll +
+  // /recover). Non-empty → operator-pinned base for enroll/recover,
+  // letting them run a separate CA server without touching the
+  // Mothership profile.
   JsonArray set = FormBuilder::createForm(root, "settings",
-                                          "Mothership endpoint");
+                                          "PKI endpoint");
 
-  FormBuilder::addTextField(set, "mothership_url", AF::RW,
-                            s.mothership_url.c_str(),
-                            label("Enroll URL"),
-                            placeholder(FACTORY_MOTHERSHIP_ENROLL_URL),
+  FormBuilder::addTextField(set, "pki_base_url", AF::RW,
+                            s.pki_base_url.c_str(),
+                            label("PKI Base URL (optional override)"),
+                            placeholder("https://ca.example.com:8443"),
                             icon("Cloud"));
 
   FormBuilder::addMessageField(set, "m_settings_help",
-      "URL of the mothership /api/v1/enroll endpoint. Default points "
-      "at \"mothership.local\" — repoint to a development mock server "
-      "during testing (e.g. https://192.168.1.50:8443/api/v1/enroll). "
-      "Save before clicking Enroll on the Enrollment tab.",
+      "Leave empty to follow the active Mothership profile — the "
+      "device hits enroll/recover on the same Base URL as check-in. "
+      "Set it when the CA lives on a separate host (e.g. air-gapped "
+      "internal CA). Endpoint paths /api/v1/enroll + /api/v1/recover "
+      "are appended automatically; do NOT include them here.",
       level("info"), icon("Info"));
 
   // ── RECOVERY ────────────────────────────────────────────────────────
@@ -797,6 +803,38 @@ void CertManagerService::runEnrollment(const String& bootstrapToken) {
   _enrollTask = nullptr;
 }
 
+// ===== PKI URL resolution =====
+//
+// Two-step fallback:
+//   1. If operator pinned a `pki_base_url` on the Settings tab,
+//      use that (lets them point at a CA host that's separate from
+//      the regular Mothership).
+//   2. Otherwise read app->mothershipProfile()->enrollUrl() — the
+//      active Mothership profile's Base URL with /api/v1/enroll
+//      appended.
+// Returns empty when neither resolves — callers MUST treat empty
+// as "skip the request" with a clear log message.
+
+String CertManagerService::effectiveEnrollUrl() const {
+  if (_state.pki_base_url.length() > 0) {
+    return _state.pki_base_url + "/api/v1/enroll";
+  }
+  if (_app && _app->mothershipProfile()) {
+    return _app->mothershipProfile()->enrollUrl();
+  }
+  return String();
+}
+
+String CertManagerService::effectiveRecoverUrl() const {
+  if (_state.pki_base_url.length() > 0) {
+    return _state.pki_base_url + "/api/v1/recover";
+  }
+  if (_app && _app->mothershipProfile()) {
+    return _app->mothershipProfile()->recoverUrl();
+  }
+  return String();
+}
+
 bool CertManagerService::postCsrToMothership(const String& csrPem,
                                               const String& bootstrapToken,
                                               String& outCertPem,
@@ -806,8 +844,10 @@ bool CertManagerService::postCsrToMothership(const String& csrPem,
   outCaBundlePem = String();
   outRecoveryToken = String();
 
-  if (_state.mothership_url.length() == 0) {
-    Serial.println("[cert.enroll] mothership_url empty");
+  String enroll_url = effectiveEnrollUrl();
+  if (enroll_url.length() == 0) {
+    Serial.println("[cert.enroll] no enroll URL — pick a Mothership "
+                    "profile (or set PKI Base URL on the Settings tab)");
     return false;
   }
 
@@ -824,7 +864,7 @@ bool CertManagerService::postCsrToMothership(const String& csrPem,
   secureClient.setTimeout(20000);
 
   HTTPClient http;
-  if (!http.begin(secureClient, _state.mothership_url)) {
+  if (!http.begin(secureClient, enroll_url)) {
     Serial.println("[cert.enroll] HTTPClient.begin failed");
     return false;
   }
@@ -852,7 +892,7 @@ bool CertManagerService::postCsrToMothership(const String& csrPem,
   serializeJson(req, reqBody);
 
   Serial.printf("[cert.enroll] POST %s, body=%u B\n",
-                _state.mothership_url.c_str(),
+                enroll_url.c_str(),
                 (unsigned)reqBody.length());
 
   int code = http.POST(reqBody);

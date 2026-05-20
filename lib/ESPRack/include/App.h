@@ -38,9 +38,10 @@ class ITelegramProvider;   // forward — populated by TelegramModule
 class IMqttProvider;       // forward — populated by MqttModule
 class ITLSProvider;        // forward — populated by core App ctor
 class TLSContextService;   // forward — concrete impl, owned by App
-class ICertProvider;       // forward — populated by CertManagerModule
-class IMothershipProvider; // forward — populated by MothershipModule
-class IWireguardProvider;  // forward — populated by WireGuardModule
+class ICertProvider;                // forward — populated by CertManagerModule
+class IMothershipProvider;          // forward — populated by MothershipModule
+class IMothershipProfileProvider;   // forward — populated by MothershipModule
+class IWireguardProvider;           // forward — populated by WireGuardModule
 
 namespace ESPRack {
 
@@ -116,6 +117,16 @@ class App {
   IMothershipProvider* mothership()                  { return mothership_; }
   void                 setMothership(IMothershipProvider* p) { mothership_ = p; }
 
+  // IMothershipProfileProvider late-binding — populated by
+  // MothershipModule (same module, separate interface — same service
+  // implements both). CertManagerService reads enroll/recover URLs
+  // through this provider at request time instead of carrying its
+  // own URL fields, so a profile switch in Mothership UI applies
+  // to PKI flows transparently. Null when MothershipModule isn't
+  // installed — consumers must guard accordingly.
+  IMothershipProfileProvider* mothershipProfile()                  { return mothershipProfile_; }
+  void                        setMothershipProfile(IMothershipProfileProvider* p) { mothershipProfile_ = p; }
+
   // IWireguardProvider late-binding — populated by WireGuardModule.
   // MothershipService::actionOpenTunnel / actionCloseTunnel call into
   // this to bring the on-demand tunnel up/down.
@@ -154,6 +165,7 @@ class App {
   ITLSProvider*       tls_      {nullptr};   // points at tlsContext_.get()
   ICertProvider*      cert_     {nullptr};   // populated by CertManagerModule
   IMothershipProvider* mothership_ {nullptr}; // populated by MothershipModule
+  IMothershipProfileProvider* mothershipProfile_ {nullptr};  // ditto
   IWireguardProvider* wireguard_ {nullptr};  // populated by WireGuardModule
 
   std::vector<std::unique_ptr<Module>> modules_;

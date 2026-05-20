@@ -13,16 +13,62 @@
 
 void MothershipSettings::readConfig(MothershipSettings& s, JsonObject& root) {
   root["enabled"]      = s.enabled;
-  root["checkin_url"]  = s.checkin_url;
   root["interval_min"] = s.interval_min;
+  root["active_name"]  = s.active_name;
+
+  // Profiles flatten to fixed slot fields for FormBuilder
+  // compatibility — read every slot, treating empty name as "unused".
+  while (s.profiles.size() < (size_t)MOTHERSHIP_PROFILE_SLOTS) {
+    s.profiles.push_back(MothershipProfile{});
+  }
+  for (int i = 0; i < MOTHERSHIP_PROFILE_SLOTS; ++i) {
+    char key[32];
+    snprintf(key, sizeof(key), "profile_%d_name", i);
+    root[key] = s.profiles[(size_t)i].name;
+    snprintf(key, sizeof(key), "profile_%d_url", i);
+    root[key] = s.profiles[(size_t)i].base_url;
+  }
 }
 
 StateUpdateResult MothershipSettings::update(JsonObject& root,
                                               MothershipSettings& s) {
   bool ch = false;
   ch |= FormBuilder::updateValue(root, "enabled",      s.enabled);
-  ch |= FormBuilder::updateValue(root, "checkin_url",  s.checkin_url);
   ch |= FormBuilder::updateValue(root, "interval_min", s.interval_min);
+
+  // Per-slot profile fields first — operator may have renamed a slot
+  // in the same Save action that switched the active dropdown, so we
+  // need the new names already in `_state.profiles[]` before we
+  // translate the active-index back to active_name below.
+  while (s.profiles.size() < (size_t)MOTHERSHIP_PROFILE_SLOTS) {
+    s.profiles.push_back(MothershipProfile{});
+  }
+  for (int i = 0; i < MOTHERSHIP_PROFILE_SLOTS; ++i) {
+    char key[32];
+    snprintf(key, sizeof(key), "profile_%d_name", i);
+    ch |= FormBuilder::updateValue(root, key, s.profiles[(size_t)i].name);
+    snprintf(key, sizeof(key), "profile_%d_url", i);
+    ch |= FormBuilder::updateValue(root, key, s.profiles[(size_t)i].base_url);
+  }
+
+  // Active selector — dropdown sends an int slot index (0..N-1).
+  // Translate to the slot's NAME for persistence so reordering
+  // doesn't silently switch what's active. -1 = "(none)".
+  if (root.containsKey("active_idx")) {
+    int idx = root["active_idx"].as<int>();
+    String new_active;
+    if (idx >= 0 && idx < (int)s.profiles.size()
+        && s.profiles[(size_t)idx].name.length() > 0) {
+      new_active = s.profiles[(size_t)idx].name;
+    }
+    if (new_active != s.active_name) {
+      s.active_name = new_active;
+      ch = true;
+    }
+  } else {
+    // Legacy / direct API write: accept active_name string too.
+    ch |= FormBuilder::updateValue(root, "active_name", s.active_name);
+  }
   return ch ? StateUpdateResult::CHANGED : StateUpdateResult::UNCHANGED;
 }
 
@@ -80,11 +126,6 @@ void MothershipSettings::buildForm(MothershipSettings& s, JsonObject& root) {
 
   FormBuilder::addSwitchField(set, "enabled", AF::RW, s.enabled,
                               label("Enabled"), icon("PowerSettingsNew"));
-  FormBuilder::addTextField(set, "checkin_url", AF::RW,
-                            s.checkin_url.c_str(),
-                            label("Check-in URL"),
-                            placeholder(FACTORY_MOTHERSHIP_CHECKIN_URL),
-                            icon("Cloud"));
   FormBuilder::addNumberField(set, "interval_min", AF::RW,
                               (double)s.interval_min,
                               minVal(1), maxVal(60), format("0"),
@@ -96,6 +137,84 @@ void MothershipSettings::buildForm(MothershipSettings& s, JsonObject& root) {
       "drain the queue, then returns to this base interval. "
       "Default 5 min keeps load light on the mothership; tune to "
       "your fleet size.",
+      level("info"), icon("Info"));
+
+  // ── PROFILES ─────────────────────────────────────────────────────
+  // Two named endpoint presets so the operator doesn't have to retype
+  // the IP every time the device moves between networks (home /
+  // office). One Base URL per profile feeds all three endpoint paths
+  // (/enroll, /checkin, /recover) — server contract is fixed, paths
+  // are derived at request time. Cert-manager reads its enroll +
+  // recover URLs through the same active profile, so a single Save
+  // here repoints the whole mothership relationship.
+  JsonArray pf = FormBuilder::createForm(root, "profiles",
+                                          "Mothership profiles");
+
+  // Ensure slots exist for the form render.
+  while (s.profiles.size() < (size_t)MOTHERSHIP_PROFILE_SLOTS) {
+    s.profiles.push_back(MothershipProfile{});
+  }
+
+  // Resolve the active profile name → slot index. -1 if no match
+  // (operator cleared the slot whose name was active, or boot state).
+  int active_idx = -1;
+  for (int i = 0; i < MOTHERSHIP_PROFILE_SLOTS; ++i) {
+    if (s.profiles[(size_t)i].name.length() > 0
+        && s.profiles[(size_t)i].name == s.active_name) {
+      active_idx = i; break;
+    }
+  }
+
+  // Active profile dropdown — labels combine the slot name with its
+  // URL host so the operator can distinguish two same-named slots at
+  // a glance. FormBuilder's opt(label, value) helper takes the label
+  // pointer — keep the String storage alive until the dropdown call
+  // returns by parking it in a local vector.
+  String slot_labels[MOTHERSHIP_PROFILE_SLOTS];
+  for (int i = 0; i < MOTHERSHIP_PROFILE_SLOTS; ++i) {
+    String lab = s.profiles[(size_t)i].name;
+    if (lab.length() == 0) lab = String("(slot ") + (i + 1) + ")";
+    String url = s.profiles[(size_t)i].base_url;
+    if (url.length() > 0) lab += String(" — ") + url;
+    slot_labels[i] = lab;
+  }
+  // addDropdownField is variadic over its opt() args. We unroll the
+  // two-slot case explicitly because MOTHERSHIP_PROFILE_SLOTS is a
+  // compile-time constant of 2 — keeps the code static + readable
+  // without dynamic template juggling. If the slot count ever grows
+  // we'll switch to a builder-pattern wrapper.
+  static_assert(MOTHERSHIP_PROFILE_SLOTS == 2,
+      "active_idx dropdown is hard-wired for two slots");
+  FormBuilder::addDropdownField(pf, "active_idx", AF::RW,
+                                  active_idx,
+                                  label("Active profile"),
+                                  icon("CloudQueue"),
+                                  opt(slot_labels[0].c_str(), 0),
+                                  opt(slot_labels[1].c_str(), 1));
+
+  // Per-slot Name + Base URL pairs.
+  for (int i = 0; i < MOTHERSHIP_PROFILE_SLOTS; ++i) {
+    char keyN[32], keyU[32];
+    char labelN[32], labelU[32];
+    snprintf(keyN, sizeof(keyN), "profile_%d_name", i);
+    snprintf(keyU, sizeof(keyU), "profile_%d_url",  i);
+    snprintf(labelN, sizeof(labelN), "Slot %d name", i + 1);
+    snprintf(labelU, sizeof(labelU), "Slot %d Base URL", i + 1);
+    FormBuilder::addTextField(pf, keyN, AF::RW,
+                              s.profiles[(size_t)i].name.c_str(),
+                              label(labelN), icon("Label"));
+    FormBuilder::addTextField(pf, keyU, AF::RW,
+                              s.profiles[(size_t)i].base_url.c_str(),
+                              label(labelU),
+                              placeholder(FACTORY_MOTHERSHIP_BASE_URL),
+                              icon("Cloud"));
+  }
+  FormBuilder::addMessageField(pf, "m_profiles_help",
+      "Base URL = 'https://host:port' with no trailing slash. "
+      "Both /api/v1/checkin (Mothership) and /api/v1/enroll + "
+      "/api/v1/recover (PKI / cert-manager) are derived from the "
+      "Active profile's Base URL. Switch profiles → device hits a "
+      "different server on next tick without any other field edit.",
       level("info"), icon("Info"));
 }
 
@@ -203,6 +322,30 @@ void MothershipService::registerManifest(WebManager* web) {
 
 void MothershipService::begin() {
   (void)_cfg.ensureLoaded();
+
+  // Seed two default profile slots on cold boot (when ensureLoaded
+  // hasn't populated them from /config/mothership.json). Operator
+  // edits names + URLs through the UI; we never re-seed.
+  if (_state.profiles.size() < (size_t)MOTHERSHIP_PROFILE_SLOTS) {
+    update([](MothershipSettings& s) {
+      while (s.profiles.size() < (size_t)MOTHERSHIP_PROFILE_SLOTS) {
+        MothershipProfile p;
+        if (s.profiles.empty()) {
+          p.name     = "Home";
+          p.base_url = FACTORY_MOTHERSHIP_BASE_URL;
+        } else {
+          p.name     = "Work";
+          p.base_url = "";  // operator fills in
+        }
+        s.profiles.push_back(p);
+      }
+      if (s.active_name.length() == 0) {
+        s.active_name = "Home";
+      }
+      return StateUpdateResult::CHANGED;
+    }, "mship.seed-profiles");
+  }
+
   refreshRuntimeState();
 
   // Spawn the check-in task once at boot. Inside the loop the task
@@ -268,12 +411,12 @@ void MothershipService::runCheckinLoop() {
     // is alive and what's gating it. Also fires immediately at iter 1.
     if (loopIter == 1 || (loopIter % 6) == 0) {
       Serial.printf("[mship.loop iter=%u] enabled=%d hasCert=%d wifi=%d "
-                    "wantTick=%d nextAt=%u nowAt=%u url-len=%u\n",
+                    "wantTick=%d nextAt=%u nowAt=%u active='%s'\n",
                     (unsigned)loopIter, (int)en, (int)hasC, (int)wlan,
                     (int)wantTick,
                     (unsigned)_state.next_checkin_at_s,
                     (unsigned)(millis() / 1000),
-                    (unsigned)_state.checkin_url.length());
+                    _state.active_name.c_str());
     }
 
     if (!wantTick) {
@@ -344,15 +487,20 @@ void MothershipService::runCheckinLoop() {
 
 bool MothershipService::performOneCheckin(bool& outBurst) {
   outBurst = false;
+  // Snapshot URL up-front — derived from active profile at this
+  // moment. If the operator switches profile mid-flight the current
+  // tick finishes against the old URL and the next tick picks up
+  // the new one.
+  String checkin_url = _state.checkinUrl();
   Serial.printf("[mship.do] enter — tls=%p cert=%p url-len=%u\n",
                 (void*)_tls, (void*)_cert,
-                (unsigned)_state.checkin_url.length());
+                (unsigned)checkin_url.length());
   if (!_tls || !_cert) {
     Serial.println("[mship.do] EARLY: missing tls or cert provider");
     return false;
   }
-  if (_state.checkin_url.length() == 0) {
-    Serial.println("[mship.do] EARLY: checkin_url empty");
+  if (checkin_url.length() == 0) {
+    Serial.println("[mship.do] EARLY: no active mothership profile");
     return false;
   }
 
@@ -365,8 +513,8 @@ bool MothershipService::performOneCheckin(bool& outBurst) {
 
   HTTPClient http;
   Serial.printf("[mship.do] step3: http.begin(%s)\n",
-                _state.checkin_url.c_str());
-  if (!http.begin(client, _state.checkin_url)) {
+                checkin_url.c_str());
+  if (!http.begin(client, checkin_url)) {
     Serial.println("[mship.do] EARLY: http.begin failed");
     return false;
   }
@@ -388,7 +536,7 @@ bool MothershipService::performOneCheckin(bool& outBurst) {
   serializeJson(req, body);
 
   Serial.printf("[mship] POST %s, body=%u B\n",
-                _state.checkin_url.c_str(),
+                checkin_url.c_str(),
                 (unsigned)body.length());
 
   int code = http.POST(body);

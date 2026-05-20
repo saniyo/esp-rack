@@ -67,11 +67,21 @@ struct CertManagerSettings {
   // Empty until Phase 1.5 sets it on first enroll.
   String  recovery_token;
 
-  // ── Persisted endpoint config ──
-  // Mothership enrollment URL. Configurable at runtime so operator
-  // can repoint the device at staging / dev mock server without a
-  // reflash. Defaulted to FACTORY_MOTHERSHIP_ENROLL_URL on first boot.
-  String  mothership_url{FACTORY_MOTHERSHIP_ENROLL_URL};
+  // ── Persisted PKI endpoint override ──
+  // When EMPTY (default): cert-manager follows the active Mothership
+  //                       profile (app->mothershipProfile()->...);
+  //                       enroll and recover URLs come from the same
+  //                       base URL as checkin.
+  // When NON-EMPTY:       cert-manager uses this base URL ("https://
+  //                       host:port", no trailing /) for enroll +
+  //                       recovery, decoupled from the Mothership
+  //                       profile. Lets the operator run a separate
+  //                       CA server (e.g. air-gapped internal CA)
+  //                       while keeping the regular Mothership host
+  //                       for check-in / commands.
+  // Endpoint paths are fixed per server contract (/api/v1/enroll,
+  // /api/v1/recover) and appended at request time.
+  String  pki_base_url;
 
   // ── Runtime (not persisted) ──
   // Bootstrap token for first enrollment. Operator types it in the
@@ -93,11 +103,19 @@ struct CertManagerSettings {
 // Forward-declare so we don't have to pull the wireguard module's
 // public header just to know the type of the optional pointer.
 class IWireguardProvider;
+// Forward decl — App.h is heavy; we only need the pointer here.
+namespace ESPRack { class App; }
 
 class CertManagerService : public StatefulService<CertManagerSettings>,
                            public ICertProvider {
  public:
   CertManagerService(ConfigManager* cfgMgr, ITLSProvider* tls);
+
+  // Wires the framework App into the service so PKI URL resolution
+  // can fall back to the active Mothership profile when the operator
+  // hasn't pinned a separate pki_base_url. Called by the consuming
+  // Module after MothershipModule installs.
+  void setApp(ESPRack::App* app) { _app = app; }
 
   void registerManifest(WebManager* web);
   void begin();
@@ -105,11 +123,7 @@ class CertManagerService : public StatefulService<CertManagerSettings>,
 
   // Phase WG.3 — let the enroll flow include the device's WG
   // public key in the CSR payload so the mothership can pre-allocate
-  // a tunnel IP and add the peer at enrollment time. Optional:
-  // setting null (or never calling this setter) preserves the
-  // pre-WG enrollment behaviour. Wired by CertManagerModule after
-  // WireGuardModule installs (the module priorities make this
-  // available before begin() runs the first enroll).
+  // a tunnel IP and add the peer at enrollment time. Optional.
   void setWireguardProvider(IWireguardProvider* wg) { _wg = wg; }
 
   // ICertProvider
@@ -129,6 +143,14 @@ class CertManagerService : public StatefulService<CertManagerSettings>,
   // installs (priorities 12 vs 14, but the App pointer is stable
   // throughout, so plain late-bind is enough).
   IWireguardProvider*                      _wg{nullptr};
+  ESPRack::App*                            _app{nullptr};
+
+  // Resolve enroll / recover URLs at request time, picking either
+  // the operator-pinned pki_base_url (Settings tab) or the active
+  // Mothership profile (when pki_base_url is empty). Returns empty
+  // when neither path resolves to a usable URL.
+  String effectiveEnrollUrl() const;
+  String effectiveRecoverUrl() const;
 
   // Recompute runtime_state from on-disk fields after every load /
   // mutation. Runs in begin() and after successful enroll/rotate.

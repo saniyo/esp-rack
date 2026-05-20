@@ -41,6 +41,12 @@ class MothershipModule : public ESPRack::Module {
     // `app->mothership()->state()` etc.
     if (ctx.app) ctx.app->setMothership(svc_.get());
 
+    // Same service also provides IMothershipProfileProvider —
+    // cert-manager reads enroll/recover URLs through this so a
+    // profile switch in the Mothership UI applies to PKI flows
+    // transparently.
+    if (ctx.app) ctx.app->setMothershipProfile(svc_.get());
+
     svc_->registerManifest(ctx.web);
   }
 

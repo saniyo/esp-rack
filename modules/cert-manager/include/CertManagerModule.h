@@ -34,8 +34,12 @@ class CertManagerModule : public ESPRack::Module {
     if (ctx.app) ctx.app->setCert(svc_.get());
 
     // Stash app pointer so onBegin can pick up WireGuardModule's
-    // late-bound provider once all installs are complete.
+    // late-bound provider once all installs are complete. Also bind
+    // it into the service NOW so PKI URL resolution can fall back
+    // to app->mothershipProfile() at request time (mothership module
+    // installs at priority 35, may or may not be present by 12).
     app_ = ctx.app;
+    if (app_) svc_->setApp(app_);
 
     svc_->registerManifest(ctx.web);
   }
