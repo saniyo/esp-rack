@@ -85,11 +85,22 @@ void WireguardSettings::buildForm(WireguardSettings& s,
                               (double)s.rx_bytes, format("0"),
                               label("Rx bytes"), icon("Download"));
 
-  FormBuilder::addMessageField(st, "m_info",
+  FormBuilder::addMessageField(st, "m_config_where",
+      "Configuration lives on the mothership, not here. The operator "
+      "sets the subnet, port, and public endpoint once at "
+      "/mothership/wg on the server. The triplet (server pubkey + "
+      "endpoint + this device's tunnel IP) is delivered to the "
+      "device through the /api/v1/enroll response and on every "
+      "openTunnel action — that's why the Server endpoint row "
+      "above is empty until the first enrollment + openTunnel cycle "
+      "completes against a properly configured mothership.",
+      level("info"), icon("Settings"));
+  FormBuilder::addMessageField(st, "m_lifecycle",
       "Tunnel is on-demand. It comes up only when an operator opens "
       "this device's UI panel on the mothership dashboard, and is "
       "torn down after idle timeout. No manual controls here — this "
-      "tab is read-only for diagnostics.",
+      "tab is read-only for diagnostics. Use the 'Open UI' button "
+      "on the device's panel page (mothership side) to bring it up.",
       level("info"), icon("Info"));
 }
 
