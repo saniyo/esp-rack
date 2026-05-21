@@ -11,8 +11,9 @@
 #include <ESPFS.h>
 
 #define MAX_ESP_STATUS_SIZE 1024
-#define SYSTEM_STATUS_SERVICE_PATH "/rest/systemStatus"
-#define SYSTEM_STATUS_FORM_PATH    "/rest/system/status"
+#define SYSTEM_STATUS_SERVICE_PATH   "/rest/systemStatus"
+#define SYSTEM_STATUS_FORM_PATH      "/rest/system/status"
+#define SYSTEM_IDENTITY_FORM_PATH    "/rest/system/identity"
 
 class WebManager;
 
@@ -35,11 +36,19 @@ class SystemStatus {
   // versions; passing _web through every call site would be noise.
   void buildForm(JsonObject& root);
 
+  // Builds the 'identity' sub-form into `root`. Pure DeviceIdentity
+  // readout (project, MAC, eFuse UID, flash UID, canonical device
+  // ID). Lives in its own tab so the Status tab stays focused on
+  // runtime metrics (heap / fs / modules) and the immutable identity
+  // doesn't get lost in the noise.
+  void buildIdentityForm(JsonObject& root);
+
  private:
   WebManager* _web{nullptr};
 
   void systemStatus(AsyncWebServerRequest* request);
   void systemStatusForm(AsyncWebServerRequest* request);
+  void systemIdentityForm(AsyncWebServerRequest* request);
 };
 
 #endif  // end SystemStatus_h

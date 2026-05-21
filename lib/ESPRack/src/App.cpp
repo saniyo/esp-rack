@@ -5,6 +5,20 @@
 #include "Version.h"
 #include "WebFeatureSpec.h"
 #include "TLSContextService.h"
+#include "DeviceIdentity.h"
+
+// Firmware-tag anchors — keep the strings emitted in FwTags.cpp
+// alive through --gc-sections. A function-local volatile load isn't
+// enough (compiler drops the load as a dead store before the linker
+// even sees a use), so we read each through Serial.printf below —
+// the printf's external side effect anchors the symbol references
+// the linker needs to keep .rodata alive into firmware.bin where
+// the update-server's regex grep finds them.
+extern "C" {
+extern const char ESPRACK_TAG_BASE[];
+extern const char ESPRACK_TAG_FLV[];
+extern const char ESPRACK_TAG_VER[];
+}
 
 #include <ESPAsyncWebServer.h>
 #include <WiFi.h>
@@ -66,6 +80,27 @@ App::App(AsyncWebServer* server, const char* deviceName, const char* deviceVersi
     // of init-list sequence; -Wreorder fires if these don't match.
     tlsContext_   {std::unique_ptr<TLSContextService>(new TLSContextService())},
     tls_          {tlsContext_.get()} {
+  // Publish the canonical identity strings to DeviceIdentity so every
+  // consumer reads the same source of truth — CertManagerService
+  // (Subject CN), AutoUpdateService (HTTP headers / URL query),
+  // MothershipService (checkin payload), SystemStatus (Identity tab).
+  // On Arduino-ESP32 esp_app_get_description() leaks "arduino-lib-
+  // builder" through, so we override with what Builder("...","...")
+  // got and what the consumer's factory_settings.ini declared.
+  DeviceIdentity::setProjectName(deviceName_.c_str());
+  DeviceIdentity::setVersion(deviceVersion_.c_str());
+#ifdef FACTORY_HW_REVISION
+  DeviceIdentity::setHwRevision(FACTORY_HW_REVISION);
+#endif
+
+  // Anchor firmware tags by reading them through Serial.printf (the
+  // compiler can't elide the printf — it has external side effects),
+  // which gives the linker undefined references to each TAG symbol
+  // that --gc-sections can't drop. Doubles as a useful boot-log line
+  // identifying which project/flavor/version is running.
+  Serial.printf("[fw] %s | %s | %s\n",
+                ESPRACK_TAG_BASE, ESPRACK_TAG_FLV, ESPRACK_TAG_VER);
+
   // Framework-owned UI shell — registered BEFORE Builder runs module
   // onInstall, so that modules calling addTabToFeature("system", ...)
   // find a parent. The buildFeatures map (exposed via /rest/uiManifest)

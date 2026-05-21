@@ -2,6 +2,7 @@
 #include "AutoUpdateService.h"
 
 #include <WebManager.h>
+#include <DeviceIdentity.h>
 
 #ifdef ESP32
 #include <HTTPClient.h>
@@ -19,31 +20,20 @@ static String buildUpdateUrl(const String& baseUrl, const String& basePlatform, 
   return url;
 }
 
+// HW suffix used in the update URL's `flv=` and matched against the
+// server's HW_FLAVOR_TAG_<flv> embedded in firmware binaries.
+// Delegates to DeviceIdentity so the value is the SAME string that
+// ends up in the cert, the mothership checkin payload, and the
+// Identity tab readout — a divergence here would silently make
+// AutoUpdate fetch the wrong firmware flavor (boot-loop on PSRAM
+// mode mismatch). Format: "esp32s3-n16r8v" (chip model lowercased,
+// dashes stripped, then "-" + DeviceIdentity::hwSuffix()).
 static String computeHwSuffix() {
-  String chip = "unknown";
-#ifdef ESP32
-  chip = ESP.getChipModel();
-#elif defined(ESP8266)
-  chip = "esp8266";
-#endif
+  String chip = DeviceIdentity::chipModel();
   chip.toLowerCase();
   chip.replace("-", "");
   chip.replace(" ", "");
-
-  uint32_t flashBytes = ESP.getFlashChipSize();
-  int flashMB = (int)((flashBytes + 512UL * 1024UL) / (1024UL * 1024UL));
-
-  int psramMB = 0;
-#ifdef ESP32
-  uint32_t psramBytes = ESP.getPsramSize();
-  psramMB = (int)((psramBytes + 512UL * 1024UL) / (1024UL * 1024UL));
-#endif
-
-  String suffix = chip + "-n" + String(flashMB);
-  if (psramMB > 0) {
-    suffix += "r" + String(psramMB);
-  }
-  return suffix;
+  return chip + "-" + DeviceIdentity::hwSuffix();
 }
 
 AutoUpdateService::AutoUpdateService(AsyncWebServer* server,

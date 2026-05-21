@@ -2,6 +2,7 @@
 #include <ITLSProvider.h>
 #include <ICertProvider.h>
 #include <IWireguardProvider.h>
+#include <DeviceIdentity.h>
 #include <WebManager.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
@@ -425,14 +426,20 @@ bool MothershipService::performOneCheckin(bool& outBurst) {
   http.setTimeout(15000);
   http.addHeader("Content-Type", "application/json");
 
-  // Body: {deviceId, fwVer, hwVer, uptimeSec, freeHeap}
-  // Server uses deviceId (subject CN from cert) for routing; the
-  // mTLS handshake guarantees the device IS that CN, server doesn't
-  // need to trust the JSON-side claim.
+  // Body: {deviceId, fwVer, hwVer, hwRev, uptimeSec, freeHeap}
+  // All identity fields come from the single source of truth in
+  // DeviceIdentity so this payload stays in lockstep with the
+  // X.509 cert subject + AutoUpdate URL + Identity tab readout.
+  // mTLS handshake guarantees the device IS that subject CN; the
+  // JSON-side deviceId is for human-readable log lines / DB row
+  // lookups only.
   DynamicJsonDocument req(1024);
   req["deviceId"]  = _cert->subjectCN();
-  req["fwVer"]     = "v0.1.6-pre";   // TODO: thread from App::deviceVersion
-  req["hwVer"]     = ESP.getChipModel();
+  req["fwVer"]     = DeviceIdentity::version();
+  req["hwVer"]     = DeviceIdentity::chipModelFull();   // "ESP32-S3-N16R8V"
+  if (DeviceIdentity::hwRevision().length() > 0) {
+    req["hwRev"]   = DeviceIdentity::hwRevision();
+  }
   req["uptimeSec"] = (uint32_t)(millis() / 1000);
   req["freeHeap"]  = ESP.getFreeHeap();
   String body;

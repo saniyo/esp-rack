@@ -3,6 +3,7 @@
 #include <IWireguardProvider.h>
 #include <IMothershipProfileProvider.h>
 #include <App.h>
+#include <DeviceIdentity.h>
 #include <WebManager.h>
 
 // mbedtls bindings for ECDSA-P256 keypair + PKCS#10 CSR + cert
@@ -682,21 +683,15 @@ bool CertManagerService::buildCsr(const String& keyPem,
   return ok;
 }
 
-// Subject CN = "device-<mac-hex-lowercase-no-sep>". Stable per-device,
-// matches what server-side admin UI shows when reviewing pending
-// enrollments. Used by buildCsr and exposed as a status field once
-// the cert is signed.
+// Subject CN comes from the single source of truth: DeviceIdentity.
+// Format = "<project>-<mac12>-<uid8>" — see
+// lib/ESPRack/include/DeviceIdentity.h for the rationale and per-
+// segment guarantees. Same string lands in the X.509 cert, in the
+// /api/v1/checkin deviceId field, on the mothership Identity tab,
+// and in AutoUpdate's HTTP did= query — everything reads through
+// the canonical helper, so a format change propagates atomically.
 String CertManagerService::deviceSubjectCN() const {
-#if defined(ESP32)
-  uint8_t mac[6] = {0};
-  esp_read_mac(mac, ESP_MAC_WIFI_STA);
-  char buf[24];
-  snprintf(buf, sizeof(buf), "device-%02x%02x%02x%02x%02x%02x",
-           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-  return String(buf);
-#else
-  return String("device-unknown");
-#endif
+  return DeviceIdentity::canonical();
 }
 
 // ===== Phase 1.5 — Enrollment HTTPS POST =====
