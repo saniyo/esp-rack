@@ -36,6 +36,16 @@ class IWireguardProvider {
   // unreachable / handshake stalled.
   virtual bool isUp() const = 0;
 
+  // True if the device knows ALL THREE pieces required to dial the
+  // tunnel: server pubkey, server endpoint, and the assigned tunnel
+  // IP. False until the first successful enrollment+openTunnel
+  // cycle. Mothership reads this bit on every check-in — when a
+  // trusted device reports hasTriplet=false the server auto-
+  // provisions a peer and queues an openTunnel action with the
+  // fresh triplet, so the operator doesn't have to click anything
+  // in the dashboard.
+  virtual bool hasTriplet() const = 0;
+
   // Assigned tunnel IP given by the mothership during the most
   // recent openTunnel cycle, e.g. "10.99.0.7". Empty if the tunnel
   // has never been brought up (so AsyncWebServer doesn't try to

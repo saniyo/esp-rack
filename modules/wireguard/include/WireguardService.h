@@ -86,6 +86,11 @@ class WireguardService : public StatefulService<WireguardSettings>,
   // ── IWireguardProvider ──
   String   publicKey() const override        { return _state.pub_key; }
   bool     isUp() const override             { return _state.is_up; }
+  bool     hasTriplet() const override       {
+    return _state.server_pub_key.length() > 0
+        && _state.endpoint.length() > 0
+        && _state.assigned_ip.length() > 0;
+  }
   String   assignedIp() const override       { return _state.assigned_ip; }
   int32_t  lastHandshakeAgeSec() const override;
   uint32_t txBytes() const override          { return _state.tx_bytes; }

@@ -486,6 +486,24 @@ bool MothershipService::performOneCheckin(bool& outBurst) {
   req["uptimeSec"] = (uint32_t)(millis() / 1000);
   req["freeHeap"]  = ESP.getFreeHeap();
 
+  // WG self-report — server-side _handle_checkin uses this block to
+  // auto-provision a peer + queue openTunnel when a trusted device
+  // (= valid mTLS cert) reports it has a public key but no triplet.
+  // Means the operator never has to click "Open UI" or hand-add a
+  // peer in /mothership/wg — first check-in after the device boots
+  // (or after the operator initialises mothership WG for the first
+  // time) ships the triplet on the very next response.
+  //
+  // Omitted entirely when the consumer doesn't install WireGuardModule
+  // (_wg == nullptr) — server's parsing is null-safe (block-missing
+  // path leaves WG provisioning alone).
+  if (_wg) {
+    JsonObject wg = req.createNestedObject("wg");
+    wg["pubkey"]      = _wg->publicKey();
+    wg["has_triplet"] = _wg->hasTriplet();
+    wg["is_up"]       = _wg->isUp();
+  }
+
   // Phase 5 — manifest_rev is a 32-bit CRC over the device's manifest
   // metadata that changes only when the operator changes the
   // installed-module set (firmware rebuild). Calculated lazily on the
