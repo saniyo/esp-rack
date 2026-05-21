@@ -10,129 +10,57 @@
 #include <esp_system.h>
 
 // ===== Persistence =====
+//
+// readConfig / update are flat sequences — no loops, no conditionals,
+// no snprintf'd keys. See feedback_static_forms memory for the
+// catastrophic-debugging story behind this rule. Every JSON key is a
+// string literal so ArduinoJson's zero-copy linked-string semantics
+// have a stable backing.
 
 void MothershipSettings::readConfig(MothershipSettings& s, JsonObject& root) {
-  root["enabled"]      = s.enabled;
-  root["interval_min"] = s.interval_min;
-  root["active_name"]  = s.active_name;
-
-  // Profiles flatten to fixed slot fields for FormBuilder
-  // compatibility — read every slot, treating empty name as "unused".
-  while (s.profiles.size() < (size_t)MOTHERSHIP_PROFILE_SLOTS) {
-    s.profiles.push_back(MothershipProfile{});
-  }
-  for (int i = 0; i < MOTHERSHIP_PROFILE_SLOTS; ++i) {
-    char key[32];
-    snprintf(key, sizeof(key), "profile_%d_name", i);
-    root[key] = s.profiles[(size_t)i].name;
-    snprintf(key, sizeof(key), "profile_%d_url", i);
-    root[key] = s.profiles[(size_t)i].base_url;
-  }
+  root["enabled"]        = s.enabled;
+  root["interval_min"]   = s.interval_min;
+  root["active_idx"]     = s.active_idx;
+  root["profile_0_name"] = s.profile_a.name;
+  root["profile_0_url"]  = s.profile_a.base_url;
+  root["profile_1_name"] = s.profile_b.name;
+  root["profile_1_url"]  = s.profile_b.base_url;
 }
 
 StateUpdateResult MothershipSettings::update(JsonObject& root,
                                               MothershipSettings& s) {
   bool ch = false;
-
-  // update() is called in three shapes:
-  //
-  //   (a) Boot — ConfigDelegate applies /config/mothership.json:
-  //       flat root with every persisted key at top level.
-  //   (b) Settings tab Save (React): wrapped { "settings": {...} }
-  //       with only enabled + interval_min inside.
-  //   (c) Profiles tab Save (React): wrapped { "profiles": {...} }
-  //       with active_idx + profile_X_name + profile_X_url inside.
-  //
-  // We merge inputs from root + any nested "settings" / "profiles"
-  // sub-objects so the same code path handles all three. NTP / MQTT /
-  // WiFi do the equivalent (root + nested "settings"). Without the
-  // unwrap, form Saves silently no-op because the React payload's
-  // keys never appear at root level.
-  JsonObject settings_src = root;
-  if (root.containsKey("settings") && root["settings"].is<JsonObject>()) {
-    settings_src = root["settings"].as<JsonObject>();
-  }
-  JsonObject profiles_src = root;
-  if (root.containsKey("profiles") && root["profiles"].is<JsonObject>()) {
-    profiles_src = root["profiles"].as<JsonObject>();
-  }
-
-  ch |= FormBuilder::updateValue(settings_src, "enabled",      s.enabled);
-  ch |= FormBuilder::updateValue(settings_src, "interval_min", s.interval_min);
-
-  // Per-slot profile fields first — operator may have renamed a slot
-  // in the same Save action that switched the active dropdown, so we
-  // need the new names already in `_state.profiles[]` before we
-  // translate the active-index back to active_name below.
-  while (s.profiles.size() < (size_t)MOTHERSHIP_PROFILE_SLOTS) {
-    s.profiles.push_back(MothershipProfile{});
-  }
-  for (int i = 0; i < MOTHERSHIP_PROFILE_SLOTS; ++i) {
-    char key[32];
-    snprintf(key, sizeof(key), "profile_%d_name", i);
-    ch |= FormBuilder::updateValue(profiles_src, key,
-                                     s.profiles[(size_t)i].name);
-    snprintf(key, sizeof(key), "profile_%d_url", i);
-    ch |= FormBuilder::updateValue(profiles_src, key,
-                                     s.profiles[(size_t)i].base_url);
-  }
-
-  // Active selector — dropdown sends an int slot index (0..N-1).
-  // Translate to the slot's NAME for persistence so reordering
-  // doesn't silently switch what's active. -1 = "(none)".
-  if (profiles_src.containsKey("active_idx")) {
-    int idx = profiles_src["active_idx"].as<int>();
-    String new_active;
-    if (idx >= 0 && idx < (int)s.profiles.size()
-        && s.profiles[(size_t)idx].name.length() > 0) {
-      new_active = s.profiles[(size_t)idx].name;
-    }
-    if (new_active != s.active_name) {
-      s.active_name = new_active;
-      ch = true;
-    }
-  } else {
-    // Boot path / direct API write: accept active_name string at root.
-    ch |= FormBuilder::updateValue(root, "active_name", s.active_name);
-  }
+  ch |= FormBuilder::updateValue(root, "enabled",        s.enabled);
+  ch |= FormBuilder::updateValue(root, "interval_min",   s.interval_min);
+  ch |= FormBuilder::updateValue(root, "active_idx",     s.active_idx);
+  ch |= FormBuilder::updateValue(root, "profile_0_name", s.profile_a.name);
+  ch |= FormBuilder::updateValue(root, "profile_0_url",  s.profile_a.base_url);
+  ch |= FormBuilder::updateValue(root, "profile_1_name", s.profile_b.name);
+  ch |= FormBuilder::updateValue(root, "profile_1_url",  s.profile_b.base_url);
   return ch ? StateUpdateResult::CHANGED : StateUpdateResult::UNCHANGED;
 }
 
 // ===== Form schema =====
-// Phase 2.1: Status (RO live readouts) + Settings (RW URL / interval /
-// enabled toggle). Phase 2.4 adds a command-log table to Status.
+//
+// Fully static — zero loops, zero conditionals, zero derived values
+// computed during the GET. Every addX() call hands FormBuilder a
+// direct state field; the frontend takes care of presentation. The
+// only "logic" lives in the helper getters of MothershipSettings
+// (activeBaseUrl, etc.) which run only when the check-in task
+// actually needs a URL, never on form render.
+//
+// All JSON keys are string literals — see feedback_static_forms
+// memory for why snprintf'd keys are catastrophic.
 void MothershipSettings::buildForm(MothershipSettings& s, JsonObject& root) {
   // ── STATUS ───────────────────────────────────────────────────────
   JsonArray st = FormBuilder::createForm(root, "status",
                                           "Mothership client status");
-
   FormBuilder::addTextField(st, "status", AF::R, s.status_label.c_str(),
                             label("State"), icon("Cloud"),
                             colorMap("LastOk:success,CheckingIn:info,"
                                      "Idle:info,LastFail:error,"
                                      "NeedsCert:warning,Disabled:default,"
                                      "default:info"));
-
-  // Derived "X seconds ago" / "next in X seconds" — computed at form-
-  // render time from last_checkin_at_s + millis()/interval_min. WS
-  // pushes refresh these without a full REST GET.
-  uint32_t now_s = (uint32_t)(millis() / 1000);
-  int32_t  last_ago = (s.last_checkin_at_s == 0)
-                        ? -1
-                        : (int32_t)(now_s - s.last_checkin_at_s);
-  int32_t  next_in  = (s.next_checkin_at_s == 0 || !s.enabled)
-                        ? -1
-                        : (s.next_checkin_at_s > now_s
-                            ? (int32_t)(s.next_checkin_at_s - now_s)
-                            : 0);
-  FormBuilder::addNumberField(st, "last_checkin_ago", AF::R,
-                              (double)last_ago, format("0"),
-                              label("Last check-in (s ago)"),
-                              icon("Schedule"), unit("s"));
-  FormBuilder::addNumberField(st, "next_checkin_in",  AF::R,
-                              (double)next_in, format("0"),
-                              label("Next check-in"),
-                              icon("Update"), unit("s"));
   FormBuilder::addNumberField(st, "success_count", AF::R,
                               (double)s.success_count, format("0"),
                               label("Successful check-ins"),
@@ -141,15 +69,10 @@ void MothershipSettings::buildForm(MothershipSettings& s, JsonObject& root) {
                               (double)s.fail_count, format("0"),
                               label("Failed check-ins"),
                               icon("ErrorOutline"));
-  FormBuilder::addMessageField(st, "m_status_phase",
-      "Phase 2.1 — settings UI is live. Phase 2.2 will start actual "
-      "HTTPS check-ins; until then the counters stay at zero.",
-      level("info"), icon("Info"));
 
   // ── SETTINGS ─────────────────────────────────────────────────────
   JsonArray set = FormBuilder::createForm(root, "settings",
                                            "Mothership client config");
-
   FormBuilder::addSwitchField(set, "enabled", AF::RW, s.enabled,
                               label("Enabled"), icon("PowerSettingsNew"));
   FormBuilder::addNumberField(set, "interval_min", AF::RW,
@@ -157,116 +80,51 @@ void MothershipSettings::buildForm(MothershipSettings& s, JsonObject& root) {
                               minVal(1), maxVal(60), format("0"),
                               label("Check-in interval"),
                               icon("Timer"), unit("min"));
-  FormBuilder::addMessageField(set, "m_settings_help",
-      "Adaptive polling — when a check-in returns one or more "
-      "actions the device drops to a 10-second burst cadence to "
-      "drain the queue, then returns to this base interval. "
-      "Default 5 min keeps load light on the mothership; tune to "
-      "your fleet size.",
-      level("info"), icon("Info"));
 
   // ── PROFILES ─────────────────────────────────────────────────────
-  // Two named endpoint presets so the operator doesn't have to retype
-  // the IP every time the device moves between networks (home /
-  // office). One Base URL per profile feeds all three endpoint paths
-  // (/enroll, /checkin, /recover) — server contract is fixed, paths
-  // are derived at request time. Cert-manager reads its enroll +
-  // recover URLs through the same active profile, so a single Save
-  // here repoints the whole mothership relationship.
   JsonArray pf = FormBuilder::createForm(root, "profiles",
                                           "Mothership profiles");
-
-  // Ensure slots exist for the form render.
-  while (s.profiles.size() < (size_t)MOTHERSHIP_PROFILE_SLOTS) {
-    s.profiles.push_back(MothershipProfile{});
-  }
-
-  // Resolve the active profile name → slot index. -1 if no match
-  // (operator cleared the slot whose name was active, or boot state).
-  int active_idx = -1;
-  for (int i = 0; i < MOTHERSHIP_PROFILE_SLOTS; ++i) {
-    if (s.profiles[(size_t)i].name.length() > 0
-        && s.profiles[(size_t)i].name == s.active_name) {
-      active_idx = i; break;
-    }
-  }
-
-  // Active profile dropdown — labels combine the slot name with its
-  // URL host so the operator can distinguish two same-named slots at
-  // a glance. FormBuilder's opt(label, value) helper takes the label
-  // pointer — keep the String storage alive until the dropdown call
-  // returns by parking it in a local vector.
-  String slot_labels[MOTHERSHIP_PROFILE_SLOTS];
-  for (int i = 0; i < MOTHERSHIP_PROFILE_SLOTS; ++i) {
-    String lab = s.profiles[(size_t)i].name;
-    if (lab.length() == 0) lab = String("(slot ") + (i + 1) + ")";
-    String url = s.profiles[(size_t)i].base_url;
-    if (url.length() > 0) lab += String(" — ") + url;
-    slot_labels[i] = lab;
-  }
-  // addDropdownField is variadic over its opt() args. We unroll the
-  // two-slot case explicitly because MOTHERSHIP_PROFILE_SLOTS is a
-  // compile-time constant of 2 — keeps the code static + readable
-  // without dynamic template juggling. If the slot count ever grows
-  // we'll switch to a builder-pattern wrapper.
-  static_assert(MOTHERSHIP_PROFILE_SLOTS == 2,
-      "active_idx dropdown is hard-wired for two slots");
+  // Dropdown — literal labels, integer values. Frontend can fancy up
+  // the display (slot + URL) if needed; the form-build path stays
+  // loop-free.
   FormBuilder::addDropdownField(pf, "active_idx", AF::RW,
-                                  active_idx,
-                                  label("Active profile"),
-                                  icon("CloudQueue"),
-                                  opt(slot_labels[0].c_str(), 0),
-                                  opt(slot_labels[1].c_str(), 1));
-
-  // Per-slot Name + Base URL pairs.
-  for (int i = 0; i < MOTHERSHIP_PROFILE_SLOTS; ++i) {
-    char keyN[32], keyU[32];
-    char labelN[32], labelU[32];
-    snprintf(keyN, sizeof(keyN), "profile_%d_name", i);
-    snprintf(keyU, sizeof(keyU), "profile_%d_url",  i);
-    snprintf(labelN, sizeof(labelN), "Slot %d name", i + 1);
-    snprintf(labelU, sizeof(labelU), "Slot %d Base URL", i + 1);
-    FormBuilder::addTextField(pf, keyN, AF::RW,
-                              s.profiles[(size_t)i].name.c_str(),
-                              label(labelN), icon("Label"));
-    FormBuilder::addTextField(pf, keyU, AF::RW,
-                              s.profiles[(size_t)i].base_url.c_str(),
-                              label(labelU),
-                              placeholder(FACTORY_MOTHERSHIP_BASE_URL),
-                              icon("Cloud"));
-  }
-  FormBuilder::addMessageField(pf, "m_profiles_help",
-      "Base URL = 'https://host:port' with no trailing slash. "
-      "Both /api/v1/checkin (Mothership) and /api/v1/enroll + "
-      "/api/v1/recover (PKI / cert-manager) are derived from the "
-      "Active profile's Base URL. Switch profiles → device hits a "
-      "different server on next tick without any other field edit.",
-      level("info"), icon("Info"));
+                                (int)s.active_idx,
+                                opt("Profile 1", 0),
+                                opt("Profile 2", 1),
+                                label("Active profile"),
+                                icon("CheckCircle"));
+  // Per-slot editor — keys MUST be string literals (not stack
+  // char-arrays), because ArduinoJson stores `field[const char*]` as
+  // a zero-copy linked string. A `char buf[32]` from a `for` loop
+  // body goes out of scope before AsyncJsonResponse serializes, and
+  // all four keys end up pointing at the same garbage stack slot —
+  // which is exactly why typing into Profile 1's name field made
+  // Profile 2's name field appear to change too. Unrolled, slot
+  // count = 2 baked into the form shape.
+  FormBuilder::addTextField(pf, "profile_0_name", AF::RW,
+                            s.profile_a.name.c_str(),
+                            label("Profile 1 name"), icon("Label"));
+  FormBuilder::addTextField(pf, "profile_0_url", AF::RW,
+                            s.profile_a.base_url.c_str(),
+                            label("Profile 1 base URL"),
+                            placeholder("https://host:8443"),
+                            icon("Cloud"));
+  FormBuilder::addTextField(pf, "profile_1_name", AF::RW,
+                            s.profile_b.name.c_str(),
+                            label("Profile 2 name"), icon("Label"));
+  FormBuilder::addTextField(pf, "profile_1_url", AF::RW,
+                            s.profile_b.base_url.c_str(),
+                            label("Profile 2 base URL"),
+                            placeholder("https://host:8443"),
+                            icon("Cloud"));
 }
 
 // ===== WS push =====
-void MothershipSettings::staRead(MothershipSettings& s, JsonObject& root) {
-  root["status"]        = s.status_label;
-  root["success_count"] = s.success_count;
-  root["fail_count"]    = s.fail_count;
-
-  // Live countdown — recomputed every WS tick so the operator sees a
-  // ticking next-checkin timer without refreshing the tab.
-  uint32_t now_s = (uint32_t)(millis() / 1000);
-  root["last_checkin_ago"] = (s.last_checkin_at_s == 0)
-                                ? -1
-                                : (int32_t)(now_s - s.last_checkin_at_s);
-  root["next_checkin_in"]  = (s.next_checkin_at_s == 0 || !s.enabled)
-                                ? -1
-                                : (s.next_checkin_at_s > now_s
-                                    ? (int32_t)(s.next_checkin_at_s - now_s)
-                                    : 0);
-}
-
-StateUpdateResult MothershipSettings::staUpd(JsonObject& root,
-                                              MothershipSettings& s) {
-  return update(root, s);
-}
+// Removed — Status tab is live=false in registerManifest. The
+// React UI re-fetches via REST when the operator switches back to
+// the tab; no need for tick-driven WS pushes here, and dropping
+// them eliminates the WS-vs-REST race that was stalling the
+// spinner on tab switch.
 
 // ===== Service =====
 
@@ -320,14 +178,17 @@ void MothershipService::registerManifest(WebManager* web) {
   spec.auth       = WebAuthLevel::Admin;
   spec.restRead   = MOTHERSHIP_FORM_PATH;
   spec.restUpdate = MOTHERSHIP_FORM_PATH;
-  spec.wsPath     = MOTHERSHIP_WS_PATH;
 
   WebTabSpec statusTab;
   statusTab.key      = "status";
   statusTab.title    = "Status";
   statusTab.restPath = MOTHERSHIP_FORM_PATH;
   statusTab.postable = false;
-  statusTab.live     = true;
+  // live=false intentionally — Status fields are flat counters +
+  // label; the operator can pull-to-refresh by re-opening the tab.
+  // The WS-tick path used to race REST GET on tab-switch and stall
+  // the spinner; dropping the live=true sidesteps that.
+  statusTab.live     = false;
   spec.tabs.push_back(statusTab);
 
   WebTabSpec settingsTab;
@@ -339,12 +200,6 @@ void MothershipService::registerManifest(WebManager* web) {
   settingsTab.order    = 20;
   spec.tabs.push_back(settingsTab);
 
-  // Profiles tab — must be declared here so the React UI knows to
-  // render it. Without this, buildForm still emits the "profiles"
-  // section in the JSON response but no tab references it, leaving
-  // the dropdown + slot fields completely hidden (and confusing the
-  // UI's section/tab pairing — a likely cause of the intermittent
-  // spinner stalls reported in early testing).
   WebTabSpec profilesTab;
   profilesTab.key      = "profiles";
   profilesTab.title    = "Profiles";
@@ -354,45 +209,22 @@ void MothershipService::registerManifest(WebManager* web) {
   profilesTab.order    = 30;
   spec.tabs.push_back(profilesTab);
 
-  // 16 KB REST buffer — Status (6 fields + message), Settings (2 +
-  // message), Profiles (dropdown + 4 textfields + message) and the
-  // wrapper structure together overflow the previous 8 KB cap once
-  // the dropdown's options array is included. Symptom: React form
-  // hangs on "Loading Status…" because the GET /rest/mothership
-  // response truncates / fails serialization. WS buffer stays 4 KB
-  // (live push only carries the status six fields, no form schema).
+  // Two-arg overload uses the same reader/updater for REST only —
+  // no separate WS variant because there's no WS subscription
+  // (status tab is live=false). 16 KB REST buffer covers all three
+  // sections comfortably.
   _feature = web->registerFeature<MothershipSettings>(
       std::move(spec), this,
       MothershipSettings::buildForm,  MothershipSettings::update,
-      MothershipSettings::staRead,    MothershipSettings::staUpd,
-      16384, 4096);
+      16384);
 }
 
 void MothershipService::begin() {
   (void)_cfg.ensureLoaded();
-
-  // Seed two default profile slots on cold boot (when ensureLoaded
-  // hasn't populated them from /config/mothership.json). Operator
-  // edits names + URLs through the UI; we never re-seed.
-  if (_state.profiles.size() < (size_t)MOTHERSHIP_PROFILE_SLOTS) {
-    update([](MothershipSettings& s) {
-      while (s.profiles.size() < (size_t)MOTHERSHIP_PROFILE_SLOTS) {
-        MothershipProfile p;
-        if (s.profiles.empty()) {
-          p.name     = "Home";
-          p.base_url = FACTORY_MOTHERSHIP_BASE_URL;
-        } else {
-          p.name     = "Work";
-          p.base_url = "";  // operator fills in
-        }
-        s.profiles.push_back(p);
-      }
-      if (s.active_name.length() == 0) {
-        s.active_name = "Home";
-      }
-      return StateUpdateResult::CHANGED;
-    }, "mship.seed-profiles");
-  }
+  // No seed step needed — in-struct initialisers on profile_a /
+  // profile_b / active_idx already give the empty-config first boot
+  // a sane defaults state. ensureLoaded overlays any persisted
+  // values; missing keys preserve the in-struct defaults.
 
   refreshRuntimeState();
 
@@ -464,7 +296,9 @@ void MothershipService::runCheckinLoop() {
                     (int)wantTick,
                     (unsigned)_state.next_checkin_at_s,
                     (unsigned)(millis() / 1000),
-                    _state.active_name.c_str());
+                    (_state.active_idx == 0
+                      ? _state.profile_a.name.c_str()
+                      : _state.profile_b.name.c_str()));
     }
 
     if (!wantTick) {
