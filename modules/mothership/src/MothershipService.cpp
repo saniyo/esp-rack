@@ -313,11 +313,18 @@ void MothershipService::registerManifest(WebManager* web) {
   settingsTab.order    = 20;
   spec.tabs.push_back(settingsTab);
 
+  // 16 KB REST buffer — Status (6 fields + message), Settings (2 +
+  // message), Profiles (dropdown + 4 textfields + message) and the
+  // wrapper structure together overflow the previous 8 KB cap once
+  // the dropdown's options array is included. Symptom: React form
+  // hangs on "Loading Status…" because the GET /rest/mothership
+  // response truncates / fails serialization. WS buffer stays 4 KB
+  // (live push only carries the status six fields, no form schema).
   _feature = web->registerFeature<MothershipSettings>(
       std::move(spec), this,
       MothershipSettings::buildForm,  MothershipSettings::update,
       MothershipSettings::staRead,    MothershipSettings::staUpd,
-      8192, 4096);
+      16384, 4096);
 }
 
 void MothershipService::begin() {
