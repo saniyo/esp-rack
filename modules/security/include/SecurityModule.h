@@ -38,7 +38,7 @@ class SecurityModule : public ESPRack::Module {
   }
 
   void onInstall(ESPRack::ModuleContext& ctx) override {
-    svc_.reset(new SecuritySettingsService(ctx.server, ctx.cfgMgr));
+    svc_.reset(new SecuritySettingsService(ctx.cfgMgr));
 
     // Late-bind the real SecurityManager into App AND WebManager so
     // every subsequent module's wrapRequest/wrapCallback captures it

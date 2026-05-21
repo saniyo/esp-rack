@@ -2,9 +2,10 @@
 #ifndef AutoUpdateService_h
 #define AutoUpdateService_h
 
-#include <HttpEndpoint.h>
+#include <StatefulService.h>
 #include <ConfigManager.h>
 #include <ConfigDelegate.h>
+#include <WebFeatureDelegate.h>
 #include <Arduino.h>
 
 #ifdef ESP32
@@ -187,9 +188,7 @@ class AutoUpdateSettings {
 
 class AutoUpdateService : public StatefulService<AutoUpdateSettings> {
  public:
-  AutoUpdateService(AsyncWebServer* server,
-                    ConfigManager* cfgMgr,
-                    SecurityManager* securityManager,
+  AutoUpdateService(ConfigManager* cfgMgr,
                     const char* deviceName,
                     const char* deviceVersion);
 
@@ -222,8 +221,8 @@ class AutoUpdateService : public StatefulService<AutoUpdateSettings> {
 
  private:
   t_update_progress_callback _progressCallback;
-  HttpEndpoint<AutoUpdateSettings> _httpEndpoint;
   ConfigDelegate<AutoUpdateSettings> _cfg;
+  WebFeatureEntry<AutoUpdateSettings>* _feature{nullptr};
 
   bool _wifiConnected;
   bool _checkedOnce;

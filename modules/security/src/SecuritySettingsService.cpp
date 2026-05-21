@@ -115,14 +115,7 @@ StateUpdateResult SecuritySettings::update(JsonObject& root, SecuritySettings& s
   return changed ? StateUpdateResult::CHANGED : StateUpdateResult::UNCHANGED;
 }
 
-SecuritySettingsService::SecuritySettingsService(AsyncWebServer* server, ConfigManager* cfgMgr) :
-    _httpEndpoint(SecuritySettings::read,
-                  SecuritySettings::update,
-                  this, server, SECURITY_SETTINGS_PATH, this),
-    _jwtFormEndpoint(SecuritySettings::buildJwtForm,
-                     SecuritySettings::update,
-                     this, server, SECURITY_JWT_FORM_PATH, this,
-                     AuthenticationPredicates::IS_ADMIN),
+SecuritySettingsService::SecuritySettingsService(ConfigManager* cfgMgr) :
     _cfg(cfgMgr,
          "security",
          SECURITY_SETTINGS_FILE,
@@ -143,9 +136,47 @@ SecuritySettingsService::SecuritySettingsService(AsyncWebServer* server, ConfigM
 
 void SecuritySettingsService::registerManifest(WebManager* web) {
   if (!web) return;
-  // System area gets the JWT-only tab. The user-CRUD lives on the
-  // standalone /security React page (mounted via AuthenticatedRouting),
-  // not as a System sub-tab.
+
+  // Full-state feature — /rest/securitySettings carries the entire
+  // {jwt_secret, users[]} shape consumed by the standalone /security
+  // React page (Users CRUD). No menu entry: the React app owns its
+  // own route mounted via AuthenticatedRouting, not a System sub-tab.
+  // Auth is Authenticated rather than Admin because the React page
+  // does an admin-level check itself before showing edit affordances;
+  // legacy /security clients (older devices on the same network) rely
+  // on this lower bar.
+  {
+    WebFeatureSpec spec;
+    spec.id         = "security";
+    spec.title      = "Security";
+    spec.component  = "";  // no menu — /security route is hard-coded
+    spec.auth       = WebAuthLevel::Authenticated;
+    spec.restRead   = SECURITY_SETTINGS_PATH;
+    spec.restUpdate = SECURITY_SETTINGS_PATH;
+    _fullFeature = web->registerFeature<SecuritySettings>(
+        std::move(spec), this,
+        SecuritySettings::read, SecuritySettings::update,
+        2048);
+  }
+
+  // JWT-only feature — single-field DynamicFeature form under the
+  // System tab. Admin-only since changing the JWT secret invalidates
+  // every issued token (forces all clients to re-auth).
+  {
+    WebFeatureSpec spec;
+    spec.id         = "securityJwt";
+    spec.title      = "JWT Secret";
+    spec.component  = "";  // sub-tab of `system`
+    spec.auth       = WebAuthLevel::Admin;
+    spec.restRead   = SECURITY_JWT_FORM_PATH;
+    spec.restUpdate = SECURITY_JWT_FORM_PATH;
+    _jwtFeature = web->registerFeature<SecuritySettings>(
+        std::move(spec), this,
+        SecuritySettings::buildJwtForm, SecuritySettings::update,
+        1024);
+  }
+
+  // Wire the JWT form as a tab under the compound `system` feature.
   WebTabSpec tab;
   tab.key      = "jwt";
   tab.title    = "JWT Secret";
@@ -154,14 +185,6 @@ void SecuritySettingsService::registerManifest(WebManager* web) {
   tab.auth     = WebAuthLevel::Admin;
   tab.order    = 50;
   web->addTabToFeature("system", tab);
-
-  // Phase 7c — make the user-CRUD endpoint reachable through the
-  // mship-ui reverse proxy (and Phase 7d ws-bridge). Without this
-  // call, GET /rest/securitySettings via mothership returns 404
-  // because HttpEndpoint mounts on AsyncWebServer only, bypassing
-  // WebManager's _entries that proxyDispatch walks.
-  _httpEndpoint.registerProxy(web, SECURITY_SETTINGS_PATH);
-  _jwtFormEndpoint.registerProxy(web, SECURITY_JWT_FORM_PATH);
 }
 
 void SecuritySettingsService::begin() {
@@ -293,7 +316,7 @@ ArJsonRequestHandlerFunction SecuritySettingsService::wrapCallback(ArJsonRequest
 
 User ADMIN_USER = User(FACTORY_ADMIN_USERNAME, FACTORY_ADMIN_PASSWORD, true);
 
-SecuritySettingsService::SecuritySettingsService(AsyncWebServer* server, ConfigManager* cfgMgr) : SecurityManager() {
+SecuritySettingsService::SecuritySettingsService(ConfigManager* cfgMgr) : SecurityManager() {
 }
 SecuritySettingsService::~SecuritySettingsService() {
 }

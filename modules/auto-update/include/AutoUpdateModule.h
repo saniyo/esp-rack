@@ -14,7 +14,7 @@ class AutoUpdateModule : public ESPRack::Module {
   }
   void onInstall(ESPRack::ModuleContext& ctx) override {
     svc_.reset(new AutoUpdateService(
-        ctx.server, ctx.cfgMgr, ctx.security,
+        ctx.cfgMgr,
         ctx.deviceName    ? ctx.deviceName    : "",
         ctx.deviceVersion ? ctx.deviceVersion : ""));
     svc_->registerManifest(ctx.web);

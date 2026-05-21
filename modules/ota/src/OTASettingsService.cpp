@@ -14,12 +14,7 @@ void OTASettings::buildForm(OTASettings& settings, JsonObject& root) {
                               icon("Lock"));
 }
 
-OTASettingsService::OTASettingsService(AsyncWebServer* server,
-                                       ConfigManager* cfgMgr,
-                                       SecurityManager* securityManager) :
-    _httpEndpoint(OTASettings::read, OTASettings::update, this, server, OTA_SETTINGS_SERVICE_PATH, securityManager),
-    _formEndpoint(OTASettings::buildForm, OTASettings::update, this, server, OTA_SETTINGS_FORM_PATH, securityManager,
-                  AuthenticationPredicates::IS_ADMIN),
+OTASettingsService::OTASettingsService(ConfigManager* cfgMgr) :
     _cfg(cfgMgr,
          "ota",
          OTA_SETTINGS_FILE,
@@ -34,11 +29,10 @@ OTASettingsService::OTASettingsService(AsyncWebServer* server,
   WiFi.onEvent(std::bind(&OTASettingsService::onStationModeGotIP, this, std::placeholders::_1, std::placeholders::_2),
                WiFiEvent_t::ARDUINO_EVENT_WIFI_STA_GOT_IP);
 #endif
-  // POST /rest/otaSettings or /rest/ota/settings → update() applies state →
-  // this handler runs synchronously after the response is queued (see
-  // HttpEndpoint sync-fix), reconfigures ArduinoOTA, and persists via
-  // ConfigManager (snapshot rotation handled by atomicWrite). OTA now
-  // shows up in the Config Manager tab alongside every other config.
+  // POST /rest/ota/settings → update() applies state → this handler
+  // runs after the response is queued, reconfigures ArduinoOTA, and
+  // persists via ConfigManager. OTA lives in the Config Manager tab
+  // alongside every other config.
   addUpdateHandler([this](const String& origin) {
     configureArduinoOTA();
     _cfg.saveIfChanged(origin);
@@ -47,6 +41,24 @@ OTASettingsService::OTASettingsService(AsyncWebServer* server,
 
 void OTASettingsService::registerManifest(WebManager* web) {
   if (!web) return;
+
+  // OTA is a sub-tab of the compound `system` feature. We still
+  // register a feature so WebManager owns the endpoint binding + auth
+  // wrapper + proxy reach (same pipeline as wifi / ntp / mqtt).
+  // No menu entry: the system feature owns the visible menu slot.
+  WebFeatureSpec spec;
+  spec.id         = "ota";
+  spec.title      = "OTA Settings";
+  spec.component  = "";  // sub-tab, system feature provides the page
+  spec.auth       = WebAuthLevel::Admin;
+  spec.restRead   = OTA_SETTINGS_FORM_PATH;
+  spec.restUpdate = OTA_SETTINGS_FORM_PATH;
+
+  _feature = web->registerFeature<OTASettings>(
+      std::move(spec), this,
+      OTASettings::buildForm, OTASettings::update,
+      2048);
+
   WebTabSpec tab;
   tab.key = "ota";
   tab.title = "OTA Settings";
@@ -55,10 +67,6 @@ void OTASettingsService::registerManifest(WebManager* web) {
   tab.auth = WebAuthLevel::Admin;
   tab.order = 60;
   web->addTabToFeature("system", tab);
-
-  // Phase 7c — mship-ui proxy reach for the typed config endpoint.
-  _httpEndpoint.registerProxy(web, OTA_SETTINGS_SERVICE_PATH);
-  _formEndpoint.registerProxy(web, OTA_SETTINGS_FORM_PATH);
 }
 
 void OTASettingsService::begin() {

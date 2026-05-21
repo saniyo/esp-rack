@@ -13,7 +13,7 @@ class OTAModule : public ESPRack::Module {
     d.requires_ = {"wifi"};
   }
   void onInstall(ESPRack::ModuleContext& ctx) override {
-    svc_.reset(new OTASettingsService(ctx.server, ctx.cfgMgr, ctx.security));
+    svc_.reset(new OTASettingsService(ctx.cfgMgr));
     svc_->registerManifest(ctx.web);
   }
   void onBegin() override { if (svc_) svc_->begin(); }

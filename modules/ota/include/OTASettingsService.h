@@ -1,9 +1,11 @@
 #ifndef OTASettingsService_h
 #define OTASettingsService_h
 
-#include <HttpEndpoint.h>
+#include <StatefulService.h>
 #include <ConfigManager.h>
 #include <ConfigDelegate.h>
+#include <FormBuilder.h>
+#include <WebFeatureDelegate.h>
 
 #ifdef ESP32
 #include <ESPmDNS.h>
@@ -27,7 +29,6 @@
 #endif
 
 #define OTA_SETTINGS_FILE         "/config/otaSettings.json"
-#define OTA_SETTINGS_SERVICE_PATH "/rest/otaSettings"
 #define OTA_SETTINGS_FORM_PATH    "/rest/ota/settings"
 
 class OTASettings {
@@ -47,14 +48,8 @@ class OTASettings {
     root["pwd"] = s.password;
   }
 
-  // ---- Legacy HttpEndpoint reader -- emits same shape as readConfig.
-  // Kept distinct so callers that need to swap one without affecting
-  // the other have an obvious seam.
-  static void read(OTASettings& s, JsonObject& root) { readConfig(s, root); }
-
   // ---- Unified update: accepts either flat fields or the
-  // DynamicSettings { settings: {...} } envelope. The legacy
-  // HttpEndpoint and the form POST path both come through here.
+  // DynamicSettings { settings: {...} } envelope.
   static StateUpdateResult update(JsonObject& root, OTASettings& s) {
     JsonObject src = root;
     if (root.containsKey("settings") && root["settings"].is<JsonObject>()) {
@@ -79,9 +74,7 @@ class WebManager;
 
 class OTASettingsService : public StatefulService<OTASettings> {
  public:
-  OTASettingsService(AsyncWebServer* server,
-                     ConfigManager* cfgMgr,
-                     SecurityManager* securityManager);
+  OTASettingsService(ConfigManager* cfgMgr);
 
   // Contribute the 'ota' tab to the compound 'system' feature.
   void registerManifest(WebManager* web);
@@ -90,9 +83,8 @@ class OTASettingsService : public StatefulService<OTASettings> {
   void loop();
 
  private:
-  HttpEndpoint<OTASettings>     _httpEndpoint;
-  HttpEndpoint<OTASettings>     _formEndpoint;
   ConfigDelegate<OTASettings>   _cfg;
+  WebFeatureEntry<OTASettings>* _feature{nullptr};
   ArduinoOTAClass*              _arduinoOTA{nullptr};
 
   void configureArduinoOTA();

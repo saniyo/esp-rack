@@ -52,15 +52,10 @@ static String computeHwSuffix() {
   return chip + "-" + DeviceIdentity::hwSuffix();
 }
 
-AutoUpdateService::AutoUpdateService(AsyncWebServer* server,
-                                     ConfigManager* cfgMgr,
-                                     SecurityManager* securityManager,
+AutoUpdateService::AutoUpdateService(ConfigManager* cfgMgr,
                                      const char* deviceName,
                                      const char* deviceVersion)
-    : _httpEndpoint(AutoUpdateSettings::buildForm,
-                    AutoUpdateSettings::update,
-                    this, server, AUTO_UPDATE_SERVICE_PATH, securityManager),
-      _cfg(cfgMgr,
+    : _cfg(cfgMgr,
            "autoUpdate",
            AUTO_UPDATE_SETTINGS_FILE,
            4096,
@@ -108,6 +103,23 @@ AutoUpdateService::AutoUpdateService(AsyncWebServer* server,
 
 void AutoUpdateService::registerManifest(WebManager* web) {
   if (!web) return;
+
+  // Sub-tab of the compound `system` feature. WebManager owns the
+  // endpoint binding + auth wrapper + proxy reach — same pipeline
+  // as wifi / ntp / mqtt now.
+  WebFeatureSpec spec;
+  spec.id         = "autoUpdate";
+  spec.title      = "Auto Update";
+  spec.component  = "";  // sub-tab, system feature owns the menu slot
+  spec.auth       = WebAuthLevel::Admin;
+  spec.restRead   = AUTO_UPDATE_SERVICE_PATH;
+  spec.restUpdate = AUTO_UPDATE_SERVICE_PATH;
+
+  _feature = web->registerFeature<AutoUpdateSettings>(
+      std::move(spec), this,
+      AutoUpdateSettings::buildForm, AutoUpdateSettings::update,
+      4096);
+
   WebTabSpec tab;
   tab.key = "autoUpdate";
   tab.title = "Auto Update";
@@ -116,9 +128,6 @@ void AutoUpdateService::registerManifest(WebManager* web) {
   tab.auth = WebAuthLevel::Admin;
   tab.order = 80;
   web->addTabToFeature("system", tab);
-
-  // Phase 7c — mship-ui proxy reach for the typed config endpoint.
-  _httpEndpoint.registerProxy(web, AUTO_UPDATE_SERVICE_PATH);
 }
 
 void AutoUpdateService::begin() {

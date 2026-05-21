@@ -5,9 +5,10 @@
 #include <Features.h>
 #include <SecurityManager.h>
 #include <SecurityHash.h>
-#include <HttpEndpoint.h>
+#include <StatefulService.h>
 #include <ConfigManager.h>
 #include <ConfigDelegate.h>
+#include <WebFeatureDelegate.h>
 #include <map>
 
 class PresenceService;
@@ -86,7 +87,7 @@ class SecuritySettings {
 
 class SecuritySettingsService : public StatefulService<SecuritySettings>, public SecurityManager {
  public:
-  SecuritySettingsService(AsyncWebServer* server, ConfigManager* cfgMgr);
+  SecuritySettingsService(ConfigManager* cfgMgr);
 
   void registerManifest(WebManager* web);
   void begin();
@@ -106,11 +107,16 @@ class SecuritySettingsService : public StatefulService<SecuritySettings>, public
   void setPresenceService(PresenceService* presence) { _presence = presence; }
 
  private:
-  HttpEndpoint<SecuritySettings>   _httpEndpoint;     // /rest/securitySettings — full state, used by /security React page
-  HttpEndpoint<SecuritySettings>   _jwtFormEndpoint;  // /rest/system/jwt/form — DynamicFeature single-field form for System/JWT tab
-  ConfigDelegate<SecuritySettings> _cfg;
-  ArduinoJsonJWT                   _jwtHandler;
-  PresenceService*                 _presence{nullptr};
+  ConfigDelegate<SecuritySettings>     _cfg;
+  // Two features — same StatefulService, different paths/auth/readers.
+  // /rest/securitySettings (full state, used by /security React Users
+  // page) and /rest/system/jwt/form (JWT-only DynamicFeature form
+  // under the System tab). WebManager owns both endpoint bindings,
+  // dispatches proxy reach, and applies the right auth predicate.
+  WebFeatureEntry<SecuritySettings>*   _fullFeature{nullptr};
+  WebFeatureEntry<SecuritySettings>*   _jwtFeature{nullptr};
+  ArduinoJsonJWT                       _jwtHandler;
+  PresenceService*                     _presence{nullptr};
 
   void configureJWTHandler();
 
@@ -129,7 +135,7 @@ class SecuritySettingsService : public StatefulService<SecuritySettings>, public
 
 class SecuritySettingsService : public SecurityManager {
  public:
-  SecuritySettingsService(AsyncWebServer* server, ConfigManager* cfgMgr);
+  SecuritySettingsService(ConfigManager* cfgMgr);
   ~SecuritySettingsService();
 
   // No-op manifest hook keeps ESPReact wiring identical between FT modes.
