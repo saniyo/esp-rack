@@ -81,6 +81,28 @@ void MothershipSettings::buildForm(MothershipSettings& s, JsonObject& root) {
                                      "Idle:info,LastFail:error,"
                                      "NeedsCert:warning,Disabled:default,"
                                      "default:info"));
+  // Active-profile readout — operator should be able to glance at
+  // Status and see WHICH endpoint the device is currently talking to
+  // without flipping over to the Profiles tab. Two read-only rows
+  // (name + URL) instead of one combined "Profile 1 (https://…)" so
+  // long URLs don't overflow the row's text field on small screens.
+  //
+  // Ternary on active_idx is the ONE branch we allow in buildForm —
+  // it picks a literal struct field whose lifetime outlives the
+  // serialise pass. No snprintf'd keys, no loops, see
+  // feedback_static_forms memory for why that matters.
+  FormBuilder::addTextField(st, "active_profile_name", AF::R,
+                            (s.active_idx == 0
+                              ? s.profile_a.name.c_str()
+                              : s.profile_b.name.c_str()),
+                            label("Active profile"),
+                            icon("Sync"));
+  FormBuilder::addTextField(st, "active_profile_url", AF::R,
+                            (s.active_idx == 0
+                              ? s.profile_a.base_url.c_str()
+                              : s.profile_b.base_url.c_str()),
+                            label("Endpoint base URL"),
+                            icon("Public"));
   FormBuilder::addNumberField(st, "success_count", AF::R,
                               (double)s.success_count, format("0"),
                               label("Successful check-ins"),
