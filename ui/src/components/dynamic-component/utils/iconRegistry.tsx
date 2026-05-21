@@ -83,6 +83,11 @@ import CalendarToday from '@mui/icons-material/CalendarToday';
 import AccessTime from '@mui/icons-material/AccessTime';
 import SettingsBackupRestore from '@mui/icons-material/SettingsBackupRestore';
 import NetworkPing from '@mui/icons-material/NetworkPing';
+import Cast from '@mui/icons-material/Cast';
+import Download from '@mui/icons-material/Download';
+import Key from '@mui/icons-material/Key';
+import Public from '@mui/icons-material/Public';
+import VpnLock from '@mui/icons-material/VpnLock';
 
 export const ICON_MAP: Record<string, SvgIconComponent> = {
   Update,
@@ -152,6 +157,11 @@ export const ICON_MAP: Record<string, SvgIconComponent> = {
   Computer,
   Router,
   Language,
+  Cast,
+  Download,
+  Key,
+  Public,
+  VpnLock,
 };
 
 export function resolveIcon(name?: string | null): SvgIconComponent | null {

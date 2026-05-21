@@ -86,12 +86,17 @@ void WireguardSettings::buildForm(WireguardSettings& s,
                                           "Tunnel status");
 
   String state_label = s.is_up ? "Up" : "Down";
+  // PowerSettingsNew — clearer Up/Down semantic than VpnLock (which
+  // implied "VPN with lock" — wrong concept for on-demand reverse-
+  // access tunnel). Color flips to success when the tunnel is up.
   FormBuilder::addTextField(st, "state", AF::R, state_label.c_str(),
-                            label("State"), icon("VpnLock"),
+                            label("State"), icon("PowerSettingsNew"),
                             colorMap("Up:success,Down:default"));
+  // Router — the tunnel IP is the device's address inside the WG
+  // overlay network, semantically a network-routing identifier.
   FormBuilder::addTextField(st, "assigned_ip", AF::R,
                             s.assigned_ip.c_str(),
-                            label("Tunnel IP"), icon("Public"));
+                            label("Tunnel IP"), icon("Router"));
   FormBuilder::addTextField(st, "endpoint", AF::R,
                             s.endpoint.c_str(),
                             label("Server endpoint"), icon("Cloud"));
