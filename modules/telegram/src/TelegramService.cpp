@@ -3,7 +3,7 @@
 #include <WebManager.h>
 #include <WebFeatureSpec.h>
 #include <FormBuilder.h>
-#include <SettingValue.h>
+#include <DeviceIdentity.h>
 
 // ─── ctor / dtor ────────────────────────────────────────────────────
 TelegramService::TelegramService(ConfigManager* cfgMgr)
@@ -167,13 +167,11 @@ void TelegramService::begin() {
   _cli.setInsecure();
   ensureBotToken(_state.botToken);
 
-  // Auto-fill deviceLabel on first boot when the operator hasn't set
-  // one. Same identifier the cert CN / mothership use, so chat readers
-  // can match a bot message back to a specific device. Operator can
-  // clear the field in Settings to disable the prefix.
-  if (_state.deviceLabel.length() == 0) {
-    _state.deviceLabel = SettingValue::format("#{device_id}");
-  }
+  // ALWAYS overwrite. deviceLabel is runtime-derived, not persisted —
+  // single source of truth for device identity across cert / MQTT /
+  // mothership / AutoUpdate / Telegram. Any value an older firmware
+  // version may have written to disk is replaced here.
+  _state.deviceLabel = DeviceIdentity::canonical();
 
   updateStatusLabel();
 

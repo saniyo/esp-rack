@@ -1,5 +1,6 @@
 #include <MqttSettingsService.h>
 #include <WebManager.h>
+#include <DeviceIdentity.h>
 
 // ─── mqttTopicMatches ───────────────────────────────────────────────
 // MQTT v3.1.1 §4.7 wildcard matcher. Walks pattern + topic level by
@@ -326,10 +327,12 @@ void MqttSettingsService::registerManifest(WebManager* web) {
 void MqttSettingsService::begin() {
   (void)_cfg.ensureLoaded();
 
-  // Client-id placeholder expansion only if user left the default/empty.
-  if (_state.clientId.length() == 0) {
-    _state.clientId = SettingValue::format(FACTORY_MQTT_CLIENT_ID);
-  }
+  // ALWAYS overwrite whatever was loaded from /config/mqttSettings.json.
+  // clientId is single-source-of-truth identity — operator cannot
+  // override it, and any stale value an older firmware version saved
+  // gets replaced here. See MqttSettingsService.h::clientId for the
+  // rationale.
+  _state.clientId = DeviceIdentity::canonical();
 
   if (_state.enabled) {
     Serial.println(F("MQTT is enabled, configuring..."));

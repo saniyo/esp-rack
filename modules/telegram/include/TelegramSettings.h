@@ -25,12 +25,13 @@ struct TelegramSettings {
   String        chatId;
   String        topicId;          // optional message_thread_id
 
-  // Device-identity label, parallel to MQTT's clientId. Defaults to the
-  // canonical Device ID (#{device_id} via SettingValue::format on first
-  // boot when empty) so chat readers can tell devices apart when several
-  // devices share one bot/chat. Prepended to every outgoing message body
-  // as `[deviceLabel] <message>` — operator can override or clear via
-  // Settings tab to opt out of the prefix (empty string skips prefix).
+  // Device-identity label, parallel to MQTT's clientId. RUNTIME-ONLY:
+  // overwritten on every begin() with DeviceIdentity::canonical() —
+  // not persisted, not exposed as an editable field. Lives in the
+  // struct so the Settings tab can display it (read-only) and doSend /
+  // enqueueMessage can read it as a message prefix. Single source of
+  // truth: identical to the cert CN, mothership deviceId, AutoUpdate
+  // did=, and the MQTT clientId; no operator override path exists.
   String        deviceLabel;
 
   bool          enabled{false};

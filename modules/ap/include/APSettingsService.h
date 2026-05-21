@@ -22,9 +22,13 @@
 #ifndef FACTORY_AP_PROVISION_MODE
 #define FACTORY_AP_PROVISION_MODE AP_MODE_ALWAYS
 #endif
-#ifndef FACTORY_AP_SSID
-#define FACTORY_AP_SSID "ESP-React-#{unique_id}"
-#endif
+// AP SSID is NOT operator-configurable. It is recomputed on every
+// startAP() from DeviceIdentity — canonical Device ID when it fits the
+// 32-octet IEEE 802.11 SSID limit, else the compact "<project>-<uid8>"
+// form. Single source of truth for the device's broadcast identity.
+// FACTORY_AP_SSID macro intentionally absent; any value an older
+// /config/apSettings.json may carry under "ssid" is ignored on load
+// and overwritten on the next save.
 #ifndef FACTORY_AP_PASSWORD
 #define FACTORY_AP_PASSWORD "esp-react"
 #endif
@@ -66,7 +70,10 @@ class APSettings {
  public:
   // persisted config
   uint8_t provisionMode = FACTORY_AP_PROVISION_MODE;
-  String ssid;  // resolved in APSettingsService::begin via SettingValue::format
+  // ssid is RUNTIME-ONLY — overwritten on every begin() / startAP() from
+  // DeviceIdentity. Not persisted, not exposed as an editable field.
+  // Lives in the struct purely so WiFi.softAP() can take the c_str().
+  String ssid;
   String password = FACTORY_AP_PASSWORD;
   uint8_t channel = FACTORY_AP_CHANNEL;
   bool ssidHidden = FACTORY_AP_SSID_HIDDEN;
@@ -102,7 +109,9 @@ class APSettings {
   /* ----- CONFIG persistence ----- */
   static void readConfig(APSettings& s, JsonObject& root) {
     root["provision_mode"] = s.provisionMode;
-    root["ssid"] = s.ssid;
+    // ssid intentionally NOT persisted — recomputed every boot from
+    // DeviceIdentity so it can never drift out of sync with the cert /
+    // MQTT clientId / mothership deviceId.
     root["pwd"] = s.password;
     root["channel"] = s.channel;
     root["ssid_hidden"] = s.ssidHidden;

@@ -31,15 +31,13 @@
 #ifndef FACTORY_MQTT_PASSWORD
 #define FACTORY_MQTT_PASSWORD ""
 #endif
-#ifndef FACTORY_MQTT_CLIENT_ID
-// Defaults to the canonical Device ID (project-mac-uid8) so the broker
-// sees the same identifier the cert CN / mothership use. Some legacy
-// brokers cap clientId at 23 chars (MQTT 3.1 spec) — those need an
-// operator override to #{device_id_short} (project-uid8) or a custom
-// string. Modern brokers (mosquitto >=1.6, EMQX, HiveMQ, AWS IoT,
-// Azure) accept up to 65 535 chars, so the canonical form fits.
-#define FACTORY_MQTT_CLIENT_ID "#{device_id}"
-#endif
+// clientId is NOT operator-configurable. It is computed at every
+// connect from DeviceIdentity::canonical() so it stays in lock-step
+// with the cert CN / mothership deviceId / AutoUpdate did= — one
+// source of truth for the device's on-the-wire identity. The
+// FACTORY_MQTT_CLIENT_ID macro is intentionally absent; any value an
+// older /config/mqttSettings.json may carry under "client_id" is
+// ignored on load and overwritten on the next save.
 #ifndef FACTORY_MQTT_KEEP_ALIVE
 #define FACTORY_MQTT_KEEP_ALIVE 16
 #endif
@@ -70,7 +68,11 @@ class MqttSettings {
   uint16_t port = FACTORY_MQTT_PORT;
   String username = FACTORY_MQTT_USERNAME;
   String password = FACTORY_MQTT_PASSWORD;
-  String clientId;  // filled on begin() via SettingValue::format if empty
+  // clientId is RUNTIME-ONLY — overwritten on every begin() with
+  // DeviceIdentity::canonical(). Not persisted, not exposed in the
+  // form. Lives in the struct purely so AsyncMqttClient::setClientId
+  // can take the c_str(); see configureMqtt() in the .cpp.
+  String clientId;
   uint16_t keepAlive = FACTORY_MQTT_KEEP_ALIVE;
   bool cleanSession = FACTORY_MQTT_CLEAN_SESSION;
   uint16_t maxTopicLength = FACTORY_MQTT_MAX_TOPIC_LENGTH;
@@ -154,7 +156,9 @@ class MqttSettings {
     root["port"] = s.port;
     root["username"] = s.username;
     root["pwd"] = s.password;
-    root["client_id"] = s.clientId;
+    // client_id intentionally NOT persisted — recomputed every boot
+    // from DeviceIdentity::canonical() so it can never drift out of
+    // sync with the cert CN / mothership identity.
     root["keep_alive"] = s.keepAlive;
     root["clean_session"] = s.cleanSession;
     root["max_topic_length"] = s.maxTopicLength;
@@ -307,8 +311,14 @@ class MqttSettings {
                               label("Username"), icon("Lock"));
     FormBuilder::addSecretField(set, "pwd", AF::RW, s.password.c_str(),
                                 label("Password"), icon("Lock"));
-    FormBuilder::addTextField(set, "client_id_cfg", AF::RW, s.clientId.c_str(),
-                              label("Client ID"), icon("Memory"));
+    // Client ID is read-only — auto-derived from DeviceIdentity at every
+    // connect so it stays in lock-step with the cert / mothership /
+    // AutoUpdate identity. The Status tab's `client_id` row above shows
+    // the same value while connected; this row mirrors it in the Settings
+    // tab so the operator can confirm the broker-side identifier without
+    // tab-switching.
+    FormBuilder::addTextField(set, "client_id_cfg", AF::R, s.clientId.c_str(),
+                              label("Client ID (auto)"), icon("Memory"));
     FormBuilder::addNumberField(set, "keep_alive", AF::RW, s.keepAlive,
                                 label("Keep alive"),
                                 minVal(1), maxVal(600), format("0"), unit("s"), icon("Timer"));
@@ -332,9 +342,10 @@ class MqttSettings {
     changed |= FormBuilder::updateValue(src, "port", s.port);
     changed |= FormBuilder::updateValue(src, "username", s.username);
     changed |= FormBuilder::updateValue(src, "pwd", s.password);
-    // both persistence key ("client_id") and settings-tab key ("client_id_cfg") map to clientId
-    changed |= FormBuilder::updateValue(src, "client_id", s.clientId);
-    changed |= FormBuilder::updateValue(src, "client_id_cfg", s.clientId);
+    // client_id / client_id_cfg deliberately NOT read from the form —
+    // the field is display-only; runtime value comes from begin() /
+    // configureMqtt() via DeviceIdentity::canonical(). Older JSON
+    // configs that still carry "client_id" are silently ignored.
     changed |= FormBuilder::updateValue(src, "keep_alive", s.keepAlive);
     changed |= FormBuilder::updateValue(src, "clean_session", s.cleanSession);
     changed |= FormBuilder::updateValue(src, "max_topic_length", s.maxTopicLength);

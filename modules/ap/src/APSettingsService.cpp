@@ -1,5 +1,6 @@
 #include <APSettingsService.h>
 #include <WebManager.h>
+#include <DeviceIdentity.h>
 
 /* ================= Static runtime emitters ================= */
 static uint8_t currentAPStatus(uint8_t provisionMode) {
@@ -35,7 +36,12 @@ void APSettings::buildForm(APSettings& s, JsonObject& root) {
                                 opt("When WiFi Disconnected", AP_MODE_DISCONNECTED),
                                 opt("Never", AP_MODE_NEVER),
                                 icon("SettingsInputAntenna"));
-  FormBuilder::addTextField (set, "ssid",     AF::RW, s.ssid.c_str(), icon("Wifi"));
+  // SSID is read-only — auto-derived from DeviceIdentity at every
+  // startAP() so the broadcast name stays in lock-step with the cert /
+  // MQTT clientId / mothership identity. Single source of truth: no
+  // operator override surface exists.
+  FormBuilder::addTextField (set, "ssid",     AF::R, s.ssid.c_str(),
+                             label("SSID (auto)"), icon("Wifi"));
   FormBuilder::addSecretField(set, "pwd", AF::RW, s.password.c_str(),
                               icon("Lock"));
   FormBuilder::addDropdownField(set, "channel", AF::RW, (int)s.channel,
@@ -76,7 +82,8 @@ StateUpdateResult APSettings::update(JsonObject& root, APSettings& s) {
     }
     n.provisionMode = (uint8_t)pm;
   }
-  if (src.containsKey("ssid"))        n.ssid        = src["ssid"].as<String>();
+  // ssid deliberately ignored on POST — display-only field; runtime
+  // value is set in begin() / startAP() from DeviceIdentity.
   if (src.containsKey("pwd"))         n.password    = src["pwd"].as<String>();
   if (src.containsKey("channel"))     n.channel     = (uint8_t)(src["channel"] | (int)FACTORY_AP_CHANNEL);
   if (src.containsKey("ssid_hidden")) n.ssidHidden  = src["ssid_hidden"] | (bool)FACTORY_AP_SSID_HIDDEN;
@@ -154,9 +161,17 @@ void APSettingsService::registerManifest(WebManager* web) {
 void APSettingsService::begin() {
   (void)_cfg.ensureLoaded();
 
-  if (_state.ssid.length() == 0) {
-    _state.ssid = SettingValue::format(FACTORY_AP_SSID);
-  }
+  // ALWAYS overwrite ssid — single source of truth, recomputed from
+  // DeviceIdentity on every boot regardless of any stale value an older
+  // firmware may have written to disk. Pick canonical when it fits the
+  // 32-octet IEEE 802.11 SSID limit, otherwise compact "<project>-<uid8>"
+  // (drops the MAC segment, still uniquely identifies the device via
+  // the eFuse uid).
+  String canonical = DeviceIdentity::canonical();
+  _state.ssid = (canonical.length() <= 32)
+                    ? canonical
+                    : (DeviceIdentity::projectName() + "-" + DeviceIdentity::uidHex8());
+
   if (!_state.localIP)    _state.localIP.fromString(FACTORY_AP_LOCAL_IP);
   if (!_state.gatewayIP)  _state.gatewayIP.fromString(FACTORY_AP_GATEWAY_IP);
   if (!_state.subnetMask) _state.subnetMask.fromString(FACTORY_AP_SUBNET_MASK);
