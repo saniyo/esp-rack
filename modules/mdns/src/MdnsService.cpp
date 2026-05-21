@@ -329,10 +329,13 @@ void MdnsService::buildForm(JsonObject& root) {
       colorMap("Active:success,Stopped:warning,default:info"));
 
   FormBuilder::addMessageField(fields, "m_resolve_help",
-      "Type a *.local hostname (or anything resolvable via mDNS) and "
-      "press Resolve. The discovered IP is shown in the snackbar and "
-      "cached in the row below.",
-      level("info"), icon("Info"));
+      "Type a concrete hostname such as 'mothership.local' or "
+      "'living-room-pi.local' and press Resolve. mDNS does not support "
+      "wildcards — entering '*.local' literally will fail. The "
+      "discovered IP is shown in the snackbar and cached in the row "
+      "below.",
+      level("info"), icon("Info"),
+      label("How to resolve"));
   FormBuilder::addTextField(fields, "resolve_host", AF::RW, "",
       label("Hostname"),
       placeholder("mothership.local"),
