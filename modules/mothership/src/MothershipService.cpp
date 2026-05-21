@@ -427,8 +427,15 @@ bool MothershipService::performOneCheckin(bool& outBurst) {
   // tick finishes against the old URL and the next tick picks up
   // the new one.
   String checkin_url = _state.checkinUrl();
-  Serial.printf("[mship.do] enter — tls=%p cert=%p url-len=%u\n",
-                (void*)_tls, (void*)_cert,
+  // Debug pointers used to live here as `tls=%p cert=%p` — convenient
+  // when wiring the providers up, but PlatformIO's
+  // Esp32ExceptionDecoder VSCode plugin treats every 0x3fXXXXXX in the
+  // Serial stream as a candidate code address and shells out to
+  // xtensa-addr2line on it, then logs a confusing decode failure for
+  // each heap pointer it sees. Both pointers are guaranteed non-null
+  // by the early-returns below, so the diagnostic info wasn't pulling
+  // weight anyway.
+  Serial.printf("[mship.do] enter — url-len=%u\n",
                 (unsigned)checkin_url.length());
   if (!_tls || !_cert) {
     Serial.println("[mship.do] EARLY: missing tls or cert provider");
