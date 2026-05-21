@@ -10,6 +10,7 @@ void TelegramSettings::readConfig(TelegramSettings& s, JsonObject& root) {
   root["token"]            = s.botToken;
   root["chat"]             = s.chatId;
   root["topic"]            = s.topicId;
+  root["device_label"]     = s.deviceLabel;
   root["ena"]              = s.enabled;
   root["interval_ms"]      = s.sendIntervalMs;
   root["parse_mode"]       = s.parseMode;
@@ -34,6 +35,7 @@ StateUpdateResult TelegramSettings::upd(JsonObject& j, TelegramSettings& s) {
   cfgChanged |= FormBuilder::updateValue(src, "token",          s.botToken);
   cfgChanged |= FormBuilder::updateValue(src, "chat",           s.chatId);
   cfgChanged |= FormBuilder::updateValue(src, "topic",          s.topicId);
+  cfgChanged |= FormBuilder::updateValue(src, "device_label",   s.deviceLabel);
   cfgChanged |= FormBuilder::updateValue(src, "ena",            s.enabled);
   cfgChanged |= FormBuilder::updateValue(src, "interval_ms",    s.sendIntervalMs);
   cfgChanged |= FormBuilder::updateValue(src, "parse_mode",     s.parseMode);
@@ -142,6 +144,14 @@ void TelegramSettings::buildForm(TelegramSettings& s, JsonObject& root) {
   FormBuilder::addTextField(set, "topic", AF::RW, s.topicId.c_str(),
                             label("Default Topic ID"), icon("Topic"),
                             placeholder("optional, numeric thread ID"));
+  // Device label — parallel to MQTT clientId. Defaults to the canonical
+  // Device ID on first boot via SettingValue::format("#{device_id}").
+  // Prepended to every outgoing message as `[label] <text>` so chat
+  // readers can distinguish devices sharing a single bot. Operator can
+  // clear the field to disable the prefix.
+  FormBuilder::addTextField(set, "device_label", AF::RW, s.deviceLabel.c_str(),
+                            label("Device Label"), icon("Badge"),
+                            placeholder("Prefixed to every message; clear to disable"));
   FormBuilder::addSwitchField(set, "ena", AF::RW, s.enabled,
                               label("Enabled"), icon("Sync"));
 

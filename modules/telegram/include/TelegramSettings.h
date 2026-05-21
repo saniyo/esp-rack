@@ -24,6 +24,15 @@ struct TelegramSettings {
   String        botToken;
   String        chatId;
   String        topicId;          // optional message_thread_id
+
+  // Device-identity label, parallel to MQTT's clientId. Defaults to the
+  // canonical Device ID (#{device_id} via SettingValue::format on first
+  // boot when empty) so chat readers can tell devices apart when several
+  // devices share one bot/chat. Prepended to every outgoing message body
+  // as `[deviceLabel] <message>` — operator can override or clear via
+  // Settings tab to opt out of the prefix (empty string skips prefix).
+  String        deviceLabel;
+
   bool          enabled{false};
   // Minimum interval between outbound sends in milliseconds. Lower bound
   // keeps us under Telegram's ~30 msg/s per-bot ceiling; higher values

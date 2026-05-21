@@ -3,6 +3,7 @@
 #include <WebManager.h>
 #include <WebFeatureSpec.h>
 #include <FormBuilder.h>
+#include <SettingValue.h>
 
 // ─── ctor / dtor ────────────────────────────────────────────────────
 TelegramService::TelegramService(ConfigManager* cfgMgr)
@@ -165,6 +166,15 @@ void TelegramService::begin() {
   (void)_cfg.ensureLoaded();
   _cli.setInsecure();
   ensureBotToken(_state.botToken);
+
+  // Auto-fill deviceLabel on first boot when the operator hasn't set
+  // one. Same identifier the cert CN / mothership use, so chat readers
+  // can match a bot message back to a specific device. Operator can
+  // clear the field in Settings to disable the prefix.
+  if (_state.deviceLabel.length() == 0) {
+    _state.deviceLabel = SettingValue::format("#{device_id}");
+  }
+
   updateStatusLabel();
 
   // Persistence + UI sync handler — fires on every state change
@@ -259,7 +269,16 @@ ESPRack::MessagingSendId TelegramService::doSend(
   if (prefix.length() == 0) {
     prefix = rec->name + String(": ");
   }
-  m->text = prefix + text;
+  // Device-label outer prefix (mirrors MQTT clientId — same canonical
+  // ID identifies the device on either transport). Empty deviceLabel
+  // skips the prefix entirely so operator can opt out per-device. Built
+  // as a separate leading line so Markdown link-syntax mis-parsing of
+  // brackets doesn't apply to the message body below.
+  String labelPrefix;
+  if (_state.deviceLabel.length() > 0) {
+    labelPrefix = String("[") + _state.deviceLabel + "] ";
+  }
+  m->text = labelPrefix + prefix + text;
 
   if (xQueueSend(_q, &m, 0) != pdTRUE) {
     delete m;
@@ -345,7 +364,14 @@ void TelegramService::enqueueMessage(const String& chatId,
   m->chatOverride   = chatId;
   m->topicOverride  = topicId;
   m->tokenOverride  = tokenOverride;
-  m->text           = text;
+  // Device-label prefix on the legacy path too — same justification as
+  // doSend above. Operator who clears deviceLabel disables the prefix
+  // on both code paths uniformly.
+  if (_state.deviceLabel.length() > 0) {
+    m->text = String("[") + _state.deviceLabel + "] " + text;
+  } else {
+    m->text = text;
+  }
   m->parseMode      = opt.parseMode;
   m->silent         = opt.silent;
 

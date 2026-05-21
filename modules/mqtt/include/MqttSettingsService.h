@@ -32,7 +32,13 @@
 #define FACTORY_MQTT_PASSWORD ""
 #endif
 #ifndef FACTORY_MQTT_CLIENT_ID
-#define FACTORY_MQTT_CLIENT_ID "#{platform}-#{unique_id}"
+// Defaults to the canonical Device ID (project-mac-uid8) so the broker
+// sees the same identifier the cert CN / mothership use. Some legacy
+// brokers cap clientId at 23 chars (MQTT 3.1 spec) — those need an
+// operator override to #{device_id_short} (project-uid8) or a custom
+// string. Modern brokers (mosquitto >=1.6, EMQX, HiveMQ, AWS IoT,
+// Azure) accept up to 65 535 chars, so the canonical form fits.
+#define FACTORY_MQTT_CLIENT_ID "#{device_id}"
 #endif
 #ifndef FACTORY_MQTT_KEEP_ALIVE
 #define FACTORY_MQTT_KEEP_ALIVE 16
