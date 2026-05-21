@@ -19,7 +19,7 @@
 
 void MothershipSettings::readConfig(MothershipSettings& s, JsonObject& root) {
   root["enabled"]        = s.enabled;
-  root["interval_min"]   = s.interval_min;
+  root["interval_s"]     = s.interval_s;
   root["active_idx"]     = s.active_idx;
   root["profile_0_name"] = s.profile_a.name;
   root["profile_0_url"]  = s.profile_a.base_url;
@@ -31,7 +31,25 @@ StateUpdateResult MothershipSettings::update(JsonObject& root,
                                               MothershipSettings& s) {
   bool ch = false;
   ch |= FormBuilder::updateValue(root, "enabled",        s.enabled);
-  ch |= FormBuilder::updateValue(root, "interval_min",   s.interval_min);
+  ch |= FormBuilder::updateValue(root, "interval_s",     s.interval_s);
+
+  // Backward-compat migration: existing /config/mothership.json from
+  // before the seconds-rename still carries `interval_min` (minutes)
+  // and no `interval_s`. On first boot after upgrade we convert
+  // minutes → seconds once and mark CHANGED so the next save rewrites
+  // the field under its new name. After that one save the legacy key
+  // never appears again. This is the ONLY conditional in update() —
+  // it's a one-time compatibility shim, not a render-time branch.
+  if (!root.containsKey("interval_s") && root.containsKey("interval_min")) {
+    uint32_t legacy_min = root["interval_min"].as<uint32_t>();
+    uint32_t as_seconds = legacy_min * 60u;
+    if (as_seconds > 65535u) as_seconds = 65535u;
+    if (s.interval_s != (uint16_t)as_seconds) {
+      s.interval_s = (uint16_t)as_seconds;
+      ch = true;
+    }
+  }
+
   ch |= FormBuilder::updateValue(root, "active_idx",     s.active_idx);
   ch |= FormBuilder::updateValue(root, "profile_0_name", s.profile_a.name);
   ch |= FormBuilder::updateValue(root, "profile_0_url",  s.profile_a.base_url);
@@ -75,11 +93,11 @@ void MothershipSettings::buildForm(MothershipSettings& s, JsonObject& root) {
                                            "Mothership client config");
   FormBuilder::addSwitchField(set, "enabled", AF::RW, s.enabled,
                               label("Enabled"), icon("PowerSettingsNew"));
-  FormBuilder::addNumberField(set, "interval_min", AF::RW,
-                              (double)s.interval_min,
-                              minVal(1), maxVal(60), format("0"),
+  FormBuilder::addNumberField(set, "interval_s", AF::RW,
+                              (double)s.interval_s,
+                              minVal(5), maxVal(3600), format("0"),
                               label("Check-in interval"),
-                              icon("Timer"), unit("min"));
+                              icon("Timer"), unit("s"));
 
   // ── PROFILES ─────────────────────────────────────────────────────
   JsonArray pf = FormBuilder::createForm(root, "profiles",
@@ -321,8 +339,11 @@ void MothershipService::runCheckinLoop() {
     // status countdown immediately ticks toward the next moment, not
     // toward "now + handshake time".
     uint32_t now_s = (uint32_t)(millis() / 1000);
-    uint32_t base_interval_s = (uint32_t)_state.interval_min * 60u;
-    if (base_interval_s < 60) base_interval_s = 60;
+    uint32_t base_interval_s = (uint32_t)_state.interval_s;
+    // 5 s sanity floor — matches the form's minVal. If a corrupt
+    // save yields 0/1/2 the device still keeps a workable polling
+    // rate instead of spinning at full speed.
+    if (base_interval_s < 5) base_interval_s = 5;
     update([base_interval_s, now_s](MothershipSettings& s) {
       s.next_checkin_at_s = now_s + base_interval_s;
       s.runtime_state     = IMothershipProvider::State::CheckingIn;

@@ -39,8 +39,13 @@
 #ifndef FACTORY_MOTHERSHIP_BASE_URL
 #define FACTORY_MOTHERSHIP_BASE_URL "https://mothership.local:8443"
 #endif
-#ifndef FACTORY_MOTHERSHIP_INTERVAL_MIN
-#define FACTORY_MOTHERSHIP_INTERVAL_MIN 5
+// Default check-in cadence in SECONDS. 60 keeps the cold-start
+// experience close to the previous "5 minute" default but the
+// operator can now drop to single-second granularity if they want
+// near-instant responsiveness, or push out to an hour for sleepy
+// fleets. The form's minVal/maxVal clamp to [5, 3600].
+#ifndef FACTORY_MOTHERSHIP_INTERVAL_S
+#define FACTORY_MOTHERSHIP_INTERVAL_S 60
 #endif
 
 // Server-contract paths — same on every mothership instance.
@@ -65,7 +70,11 @@ struct MothershipProfile {
 struct MothershipSettings {
   // ── Persisted config ──
   bool     enabled{false};
-  uint16_t interval_min{FACTORY_MOTHERSHIP_INTERVAL_MIN};
+  // Check-in cadence in SECONDS. The readback / update path in
+  // MothershipService.cpp migrates the legacy `interval_min` field
+  // (minutes) on first boot after upgrade so devices with an older
+  // /config/mothership.json don't need a factory reset.
+  uint16_t interval_s{FACTORY_MOTHERSHIP_INTERVAL_S};
 
   // Two NAMED endpoint slots — flat in-struct initialisers so the
   // empty-config first boot already has sane defaults without a
