@@ -193,7 +193,7 @@ void WireguardService::registerManifest(WebManager* web) {
   spec.title      = "Tunnel";
   spec.component  = "DynamicSettings";
   spec.menu.label = "Tunnel";
-  spec.menu.icon  = "VpnLock";
+  spec.menu.icon  = "Cast";
   spec.menu.order = 380;
   spec.menu.auth  = WebAuthLevel::Admin;
   spec.auth       = WebAuthLevel::Admin;
