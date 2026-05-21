@@ -139,37 +139,45 @@ void SecuritySettingsService::registerManifest(WebManager* web) {
 
   // Full-state feature — /rest/securitySettings carries the entire
   // {jwt_secret, users[]} shape consumed by the standalone /security
-  // React page (Users CRUD). No menu entry: the React app owns its
-  // own route mounted via AuthenticatedRouting, not a System sub-tab.
+  // React page (Users CRUD). No menu entry, no manifest route: the
+  // React app owns the /security route directly via AuthenticatedRouting,
+  // and DynamicFeature on an auto-derived /security/* would shadow it.
+  // `routeTemplate = ""` explicitly suppresses route emission in
+  // WebFeatureEntry::toJson — React's manifestRoutes filter drops the
+  // entry because `!entry.route` is true for the empty string.
   // Auth is Authenticated rather than Admin because the React page
   // does an admin-level check itself before showing edit affordances;
   // legacy /security clients (older devices on the same network) rely
   // on this lower bar.
   {
     WebFeatureSpec spec;
-    spec.id         = "security";
-    spec.title      = "Security";
-    spec.component  = "";  // no menu — /security route is hard-coded
-    spec.auth       = WebAuthLevel::Authenticated;
-    spec.restRead   = SECURITY_SETTINGS_PATH;
-    spec.restUpdate = SECURITY_SETTINGS_PATH;
+    spec.id            = "security";
+    spec.title         = "Security";
+    spec.component     = "";  // bespoke React page, not DynamicFeature
+    spec.routeTemplate = "";  // suppress /security/* manifest route
+    spec.auth          = WebAuthLevel::Authenticated;
+    spec.restRead      = SECURITY_SETTINGS_PATH;
+    spec.restUpdate    = SECURITY_SETTINGS_PATH;
     _fullFeature = web->registerFeature<SecuritySettings>(
         std::move(spec), this,
         SecuritySettings::read, SecuritySettings::update,
         2048);
   }
 
-  // JWT-only feature — single-field DynamicFeature form under the
-  // System tab. Admin-only since changing the JWT secret invalidates
-  // every issued token (forces all clients to re-auth).
+  // JWT-only feature — single-field form rendered as a sub-tab of the
+  // compound `system` feature via the addTabToFeature call below.
+  // routeTemplate = "" so it doesn't ALSO emit a top-level /securityJwt
+  // route (system feature already owns the tab pane). Admin-only since
+  // rotating the JWT secret invalidates every issued token.
   {
     WebFeatureSpec spec;
-    spec.id         = "securityJwt";
-    spec.title      = "JWT Secret";
-    spec.component  = "";  // sub-tab of `system`
-    spec.auth       = WebAuthLevel::Admin;
-    spec.restRead   = SECURITY_JWT_FORM_PATH;
-    spec.restUpdate = SECURITY_JWT_FORM_PATH;
+    spec.id            = "securityJwt";
+    spec.title         = "JWT Secret";
+    spec.component     = "";  // sub-tab of `system`
+    spec.routeTemplate = "";  // no top-level route, system owns the page
+    spec.auth          = WebAuthLevel::Admin;
+    spec.restRead      = SECURITY_JWT_FORM_PATH;
+    spec.restUpdate    = SECURITY_JWT_FORM_PATH;
     _jwtFeature = web->registerFeature<SecuritySettings>(
         std::move(spec), this,
         SecuritySettings::buildJwtForm, SecuritySettings::update,
