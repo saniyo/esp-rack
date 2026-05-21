@@ -19,6 +19,7 @@
 
 // HTTPS client + JSON for the enrollment POST.
 #include <HTTPClient.h>
+#include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <ArduinoJson.h>
 #include <time.h>
@@ -42,6 +43,7 @@ void CertManagerSettings::readConfig(CertManagerSettings& s, JsonObject& root) {
 
   root["recovery_token"]  = s.recovery_token;
   root["pki_base_url"]    = s.pki_base_url;
+  root["auto_enroll"]     = s.auto_enroll;
   // bootstrap_token intentionally omitted — never persists.
 }
 
@@ -87,6 +89,7 @@ StateUpdateResult CertManagerSettings::update(JsonObject& root,
   ch |= FormBuilder::updateValue(root, "subject_cn",      s.subject_cn);
   ch |= FormBuilder::updateValue(root, "not_after_ts",    s.not_after_ts);
   ch |= FormBuilder::updateValue(root, "pki_base_url",    s.pki_base_url);
+  ch |= FormBuilder::updateValue(root, "auto_enroll",     s.auto_enroll);
 
   // Bootstrap token IS the only secret field that the form is
   // EXPECTED to mutate (operator types it during enrollment). Plain
@@ -193,13 +196,9 @@ void CertManagerSettings::buildForm(CertManagerSettings& s, JsonObject& root) {
                             placeholder("https://ca.example.com:8443"),
                             icon("Cloud"));
 
-  FormBuilder::addMessageField(set, "m_settings_help",
-      "Leave empty to follow the active Mothership profile — the "
-      "device hits enroll/recover on the same Base URL as check-in. "
-      "Set it when the CA lives on a separate host (e.g. air-gapped "
-      "internal CA). Endpoint paths /api/v1/enroll + /api/v1/recover "
-      "are appended automatically; do NOT include them here.",
-      level("info"), icon("Info"));
+  FormBuilder::addSwitchField(set, "auto_enroll", AF::RW, s.auto_enroll,
+                              label("Auto-enroll on boot"),
+                              icon("AutoMode"));
 
   // ── RECOVERY ────────────────────────────────────────────────────────
   // Phase 1.2 skeleton — Phase 4b fills in the polling status +
@@ -429,8 +428,49 @@ void CertManagerService::begin() {
 }
 
 void CertManagerService::loop() {
-  // Phase 1.0: nothing to do. Phases 1.5+ add enrollment retry
-  // backoff and Phase 4b adds gray-zone /recover polling here.
+  // Auto-enroll loop. Fires kickEnrollment("") (no Bearer token →
+  // server's path 6 parks the device in PENDING_ENROLLMENTS for
+  // operator approval) when:
+  //   * auto_enroll toggle is on (Settings tab)
+  //   * runtime_state is NeedsEnrollment OR
+  //     (Enrolling AND last attempt was >RETRY_S ago — the previous
+  //     attempt got "pending" back, we want to re-poll for approval)
+  //   * WiFi is up
+  //   * No enrollment task currently running
+  //   * Enough time elapsed since last attempt (rate-limit so we
+  //     don't spam the mothership on a tight loop).
+  //
+  // Once the operator approves on the mothership admin page, the
+  // next retry returns approved=true and the success path lands a
+  // cert → state goes Ready → this branch falls through.
+  using S = ICertProvider::State;
+  if (!_state.auto_enroll) return;
+  if (_enrollTask != nullptr) return;
+  if (!WiFi.isConnected()) return;
+
+  bool needs_attempt =
+      (_state.runtime_state == S::NeedsEnrollment) ||
+      (_state.runtime_state == S::Enrolling);
+  if (!needs_attempt) return;
+
+  // Rate-limit: 30 s between auto-attempts. Operator-initiated
+  // kickEnrollment (typed bootstrap token) bypasses this — they go
+  // through kickEnrollment directly, not through this loop.
+  static constexpr uint32_t RETRY_S = 30;
+  uint32_t now_s = (uint32_t)(millis() / 1000);
+  if (now_s < _lastAutoEnrollAttempt_s + RETRY_S
+      && _lastAutoEnrollAttempt_s != 0) {
+    return;
+  }
+  _lastAutoEnrollAttempt_s = now_s;
+
+  Serial.printf("[cert.auto-enroll] firing (state=%u)\n",
+                (unsigned)_state.runtime_state);
+  // Empty token → server's _handle_enroll path 6 (PENDING_ENROLLMENTS)
+  // unless the deviceId is in EXPECTED_DEVICES (path 3, auto-trust).
+  // kickEnrollment returns false if a task is already running, which
+  // is fine — we'll retry on the next loop iteration.
+  (void)kickEnrollment(String());
 }
 
 int32_t CertManagerService::daysUntilExpiry() const {
@@ -755,8 +795,26 @@ void CertManagerService::runEnrollment(const String& bootstrapToken) {
   }
 
   String certPem, caBundlePem, recoveryToken;
-  if (!postCsrToMothership(csrPem, bootstrapToken,
-                            certPem, caBundlePem, recoveryToken)) {
+  EnrollResult res = postCsrToMothership(csrPem, bootstrapToken,
+                                           certPem, caBundlePem,
+                                           recoveryToken);
+  if (res == EnrollResult::Pending) {
+    // Server parked us in its grey list — operator needs to approve
+    // on /mothership admin. Stay in Enrolling state with a clear
+    // status label; the auto-enroll loop in CertManagerService::loop
+    // will retry on its own schedule. Don't wipe bootstrap_token —
+    // operator's manual entry (if any) might still be the path that
+    // matches a later regenerate.
+    Serial.println("[cert.enroll] pending — operator approval needed");
+    update([](CertManagerSettings& s) {
+      s.runtime_state = ICertProvider::State::Enrolling;
+      s.status_label  = "Awaiting operator approval on /mothership";
+      return StateUpdateResult::CHANGED;
+    }, "cert.enroll-pending");
+    _enrollTask = nullptr;
+    return;
+  }
+  if (res != EnrollResult::Ok) {
     update([](CertManagerSettings& s) {
       s.runtime_state = ICertProvider::State::EnrollmentFailed;
       s.status_label  = "Enrollment failed: server unreachable / rejected";
@@ -835,11 +893,12 @@ String CertManagerService::effectiveRecoverUrl() const {
   return String();
 }
 
-bool CertManagerService::postCsrToMothership(const String& csrPem,
-                                              const String& bootstrapToken,
-                                              String& outCertPem,
-                                              String& outCaBundlePem,
-                                              String& outRecoveryToken) {
+CertManagerService::EnrollResult CertManagerService::postCsrToMothership(
+    const String& csrPem,
+    const String& bootstrapToken,
+    String& outCertPem,
+    String& outCaBundlePem,
+    String& outRecoveryToken) {
   outCertPem = String();
   outCaBundlePem = String();
   outRecoveryToken = String();
@@ -848,7 +907,7 @@ bool CertManagerService::postCsrToMothership(const String& csrPem,
   if (enroll_url.length() == 0) {
     Serial.println("[cert.enroll] no enroll URL — pick a Mothership "
                     "profile (or set PKI Base URL on the Settings tab)");
-    return false;
+    return EnrollResult::Failed;
   }
 
   WiFiClientSecure secureClient;
@@ -866,11 +925,18 @@ bool CertManagerService::postCsrToMothership(const String& csrPem,
   HTTPClient http;
   if (!http.begin(secureClient, enroll_url)) {
     Serial.println("[cert.enroll] HTTPClient.begin failed");
-    return false;
+    return EnrollResult::Failed;
   }
   http.setTimeout(20000);
   http.addHeader("Content-Type", "application/json");
-  http.addHeader("Authorization", String("Bearer ") + bootstrapToken);
+  // Bearer header ONLY when the caller actually has a token. Empty
+  // token = auto-enroll flow, server's path 6 parks the device in
+  // its grey list for operator approval — sending "Bearer " would
+  // trip the server's path-2 "Bearer present but invalid" 401 short-
+  // circuit and never reach the pending-park branch.
+  if (bootstrapToken.length() > 0) {
+    http.addHeader("Authorization", String("Bearer ") + bootstrapToken);
+  }
 
   // Body: {"deviceId": "...", "csr_pem": "...", "wg_pubkey": "..."}
   // Allocate enough for csr_pem (~480 B base64) + WG pubkey (44 B)
@@ -902,7 +968,7 @@ bool CertManagerService::postCsrToMothership(const String& csrPem,
     String err = http.getString();
     Serial.printf("[cert.enroll] server error: %s\n", err.c_str());
     http.end();
-    return false;
+    return EnrollResult::Failed;
   }
 
   String respBody = http.getString();
@@ -910,14 +976,29 @@ bool CertManagerService::postCsrToMothership(const String& csrPem,
 
   Serial.printf("[cert.enroll] response %u B\n", (unsigned)respBody.length());
 
-  // Response: {"cert_pem":"...","ca_bundle_pem":"...","recovery_token":"hex..."}
+  // Response is one of:
+  //   approved=true  + cert_pem + ca_bundle_pem + recovery_token
+  //       → EnrollResult::Ok, populate outputs
+  //   approved=false + status=pending
+  //       → EnrollResult::Pending, outputs stay empty; caller retries
+  //   anything else
+  //       → EnrollResult::Failed
   // 8 KB doc — cert PEM ~400 B, ca_bundle ~1.5 KB worst case, +
   // recovery_token + framing.
   DynamicJsonDocument resp(8192);
   DeserializationError jerr = deserializeJson(resp, respBody);
   if (jerr) {
     Serial.printf("[cert.enroll] JSON parse: %s\n", jerr.c_str());
-    return false;
+    return EnrollResult::Failed;
+  }
+
+  bool approved = resp["approved"].as<bool>();
+  if (!approved) {
+    String status_str = resp["status"].as<String>();
+    Serial.printf("[cert.enroll] server returned approved=false "
+                  "status=%s — operator must approve on /mothership\n",
+                  status_str.c_str());
+    return EnrollResult::Pending;
   }
 
   outCertPem        = resp["cert_pem"].as<String>();
@@ -926,13 +1007,13 @@ bool CertManagerService::postCsrToMothership(const String& csrPem,
 
   if (outCertPem.length() == 0 || outCaBundlePem.length() == 0) {
     Serial.println("[cert.enroll] response missing cert_pem / ca_bundle_pem");
-    return false;
+    return EnrollResult::Failed;
   }
   Serial.printf("[cert.enroll] parsed cert=%u ca=%u recovery=%u B\n",
                 (unsigned)outCertPem.length(),
                 (unsigned)outCaBundlePem.length(),
                 (unsigned)outRecoveryToken.length());
-  return true;
+  return EnrollResult::Ok;
 }
 
 bool CertManagerService::parseCertMetadata(const String& certPem,

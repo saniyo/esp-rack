@@ -67,6 +67,16 @@ struct CertManagerSettings {
   // Empty until Phase 1.5 sets it on first enroll.
   String  recovery_token;
 
+  // ── Persisted auto-enroll policy ──
+  // When true (default) and state == NeedsEnrollment + WiFi up,
+  // CertManagerService::loop spawns enrollment automatically with an
+  // empty bootstrap token. The server parks the device in its grey
+  // list; once the operator approves the entry on the mothership
+  // admin page, the next retry returns a signed cert. Set false for
+  // air-gapped / token-only deployments where the operator must
+  // explicitly type a token first.
+  bool   auto_enroll{true};
+
   // ── Persisted PKI endpoint override ──
   // When EMPTY (default): cert-manager follows the active Mothership
   //                       profile (app->mothershipProfile()->...);
@@ -144,6 +154,11 @@ class CertManagerService : public StatefulService<CertManagerSettings>,
   // throughout, so plain late-bind is enough).
   IWireguardProvider*                      _wg{nullptr};
   ESPRack::App*                            _app{nullptr};
+  // Seconds-since-boot of the most recent auto-enroll attempt fired
+  // from loop(). Rate-limits the auto-attempts to one per RETRY_S so
+  // a server-side "pending" status doesn't spin into a tight retry
+  // loop. 0 = never attempted (kick on first WiFi-up tick).
+  uint32_t                                 _lastAutoEnrollAttempt_s{0};
 
   // Resolve enroll / recover URLs at request time, picking either
   // the operator-pinned pki_base_url (Settings tab) or the active
@@ -196,19 +211,30 @@ class CertManagerService : public StatefulService<CertManagerSettings>,
   static void enrollTaskTramp(void* arg);
   void runEnrollment(const String& bootstrapToken);
 
-  // POST CSR to mothership_url with bootstrap token. Returns true
-  // and populates outputs on 2xx response. Server response shape:
-  //   {"cert_pem": "...", "ca_bundle_pem": "...", "recovery_token": "hex..."}
-  // First-enrollment uses setInsecure() (we don't have a CA pinned
-  // yet) — Phase 1.5 wires this with a TODO to switch to bundled
-  // bootstrap CA in production builds. Once enrolled, subsequent
-  // mothership calls use mTLS via the freshly-saved client cert and
-  // setCACert(ca_bundle_pem).
-  bool postCsrToMothership(const String& csrPem,
-                            const String& bootstrapToken,
-                            String& outCertPem,
-                            String& outCaBundlePem,
-                            String& outRecoveryToken);
+  // POST CSR result codes — distinguish "operator must act" (Failed)
+  // from "server parked us in the approval queue, we'll retry"
+  // (Pending). Without this distinction the auto-enroll loop would
+  // mark every pending response as Failed and stop retrying.
+  enum class EnrollResult { Ok, Pending, Failed };
+
+  // POST CSR to enroll endpoint. Empty bootstrapToken → no
+  // Authorization header is sent; server's _handle_enroll path 6
+  // then parks the device in PENDING_ENROLLMENTS for operator
+  // approval (auto-enroll flow). Non-empty token → Bearer header,
+  // server's path 2 fast-tracks signing if the token matches the
+  // current bootstrap-token. Either way the server-side flow can
+  // also auto-trust if the deviceId is in EXPECTED_DEVICES (path 3).
+  //
+  // EnrollResult::Ok       — server signed; outputs populated.
+  // EnrollResult::Pending  — server returned approved:false / status:pending;
+  //                          outputs empty; caller schedules retry.
+  // EnrollResult::Failed   — anything else (network error / 4xx
+  //                          rejection / malformed body). outputs empty.
+  EnrollResult postCsrToMothership(const String& csrPem,
+                                     const String& bootstrapToken,
+                                     String& outCertPem,
+                                     String& outCaBundlePem,
+                                     String& outRecoveryToken);
 
   // Parse a freshly-received cert PEM to extract serial + notAfter
   // for state display. Uses mbedtls_x509_crt_parse + crt.serial.p +
