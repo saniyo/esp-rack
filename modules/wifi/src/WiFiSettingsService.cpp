@@ -1,5 +1,6 @@
 #include <WiFiSettingsService.h>
 #include <WebManager.h>
+#include <DeviceIdentity.h>
 
 // File-scope snapshot of the service's dual-AP selection. buildForm / wsRead
 // live on WiFiSettings (no service pointer), so the service writes here and
@@ -108,7 +109,10 @@ void WiFiSettings::buildForm(WiFiSettings& s, JsonObject& root) {
   FormBuilder::addTextField(status, "local_ip", AF::R, localIp.c_str(),
                             label("Local IP"), icon("Router"));
 
-  const String mac = WiFi.macAddress();
+  // Same source as the cert CN / mothership deviceId / AutoUpdate
+  // did= — colon-separated upper-case (matches the legacy
+  // WiFi.macAddress() string format so this is a visual drop-in).
+  const String mac = DeviceIdentity::macColon();
   FormBuilder::addTextField(status, "mac_address", AF::R, mac.c_str(),
                             label("MAC address"), icon("DeviceHub"));
 

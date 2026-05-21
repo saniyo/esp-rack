@@ -10,13 +10,29 @@
 #include <ESP8266HTTPClient.h>
 #endif
 
-static String buildUpdateUrl(const String& baseUrl, const String& basePlatform, const String& hwFlavor, const String& curVer) {
+static String buildUpdateUrl(const String& baseUrl,
+                              const String& basePlatform,
+                              const String& hwFlavor,
+                              const String& curVer,
+                              const String& deviceId,
+                              const String& hwRev) {
   String url = baseUrl;
   if (url.indexOf('?') == -1) url += "?";
   else url += "&";
   url += "dev=" + basePlatform;
   url += "&flv=" + hwFlavor;
   url += "&ver=" + curVer;
+  // Canonical device ID — "<project>-<mac>-<uid8>" — same string as
+  // X.509 Subject CN and mothership deviceId. Server can use it for
+  // per-device update channels (canary / staging / pinned firmware)
+  // without parsing the cert.
+  url += "&did=" + deviceId;
+  // Hardware board revision (FACTORY_HW_REVISION). Lets the update
+  // server return different firmware artefacts for rev-A vs rev-B
+  // boards built off the same project. Omitted when empty.
+  if (hwRev.length() > 0) {
+    url += "&hw=" + hwRev;
+  }
   return url;
 }
 
@@ -221,12 +237,22 @@ int AutoUpdateService::preflightCheck(const String& url, uint32_t timeoutMs, Str
     return -1;
   }
 
-  // Add MAC header — server uses it for whitelist check
+  // Add MAC header — server uses it for whitelist check.
+  // DeviceIdentity::macColon() returns the same upper-case colon
+  // format as WiFi.macAddress() so existing server-side whitelists
+  // keep matching, but the value is now anchored to the same source
+  // of truth as the cert / mothership / SettingValue placeholders.
+  const String macHeader = DeviceIdentity::macColon();
 #ifdef ESP32
-  http.addHeader("x-ESP32-STA-MAC", WiFi.macAddress());
+  http.addHeader("x-ESP32-STA-MAC", macHeader);
 #elif defined(ESP8266)
-  http.addHeader("x-ESP8266-STA-MAC", WiFi.macAddress());
+  http.addHeader("x-ESP8266-STA-MAC", macHeader);
 #endif
+
+  // Send canonical device ID alongside the MAC. Server can use this
+  // for richer routing (project + per-device fingerprint) once the
+  // backend learns about it; older servers ignore unknown headers.
+  http.addHeader("x-ESPRack-Device-Id", DeviceIdentity::canonical());
 
   int code = http.GET();
 
@@ -293,8 +319,10 @@ void AutoUpdateService::checkForUpdate() {
 
   String basePlatform = String(_deviceName);
   basePlatform.toLowerCase();
-  const String primaryUrl = buildUpdateUrl(String(HARD_UPDATE_SERVER_URL), basePlatform, _state.hwSuffix, _state.currentVersion);
-  const String fallbackUrl = buildUpdateUrl(_state.serverUrl, basePlatform, _state.hwSuffix, _state.currentVersion);
+  const String deviceId = DeviceIdentity::canonical();
+  const String hwRev    = DeviceIdentity::hwRevision();
+  const String primaryUrl  = buildUpdateUrl(String(HARD_UPDATE_SERVER_URL), basePlatform, _state.hwSuffix, _state.currentVersion, deviceId, hwRev);
+  const String fallbackUrl = buildUpdateUrl(_state.serverUrl,                basePlatform, _state.hwSuffix, _state.currentVersion, deviceId, hwRev);
 
   // --- 1) Primary server preflight ---
   String body;
