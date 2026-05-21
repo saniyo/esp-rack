@@ -8,6 +8,11 @@
 #include <mbedtls/ecp.h>
 #include <mbedtls/entropy.h>
 #include <mbedtls/ctr_drbg.h>
+// netif_list + per-netif MIB2 counters live in lwIP — the WG lib
+// doesn't expose per-peer byte counters, but the underlying netif
+// it created tracks ifInOctets / ifOutOctets which give the right
+// numbers for a single-peer tunnel.
+#include <lwip/netif.h>
 
 // The ciniml/WireGuard-ESP32-Arduino library is consumed via PIO
 // lib_deps (added in the demo's platformio.ini). The header lives
@@ -248,6 +253,34 @@ void WireguardService::loop() {
       return actually_up ? StateUpdateResult::CHANGED
                           : StateUpdateResult::CHANGED;
     }, "wg.statusFlip");
+  }
+  // Counters — the lib doesn't expose per-peer tx/rx getters, but
+  // lwIP's MIB2 maintains octets on every netif. The wg lib names
+  // the netif "wg" (two-letter convention) — see wireguardif.c
+  // ~line 1027. Walk netif_list once per loop iteration, lift the
+  // counters into state. Throttled to once a second so the live
+  // Tunnel-tab status push isn't doing this on every busy tick.
+  static uint32_t s_lastCountersMs = 0;
+  uint32_t nowMs = millis();
+  if (actually_up && (nowMs - s_lastCountersMs >= 1000)) {
+    s_lastCountersMs = nowMs;
+    uint32_t tx = 0, rx = 0;
+    for (struct netif* nif = netif_list; nif != nullptr; nif = nif->next) {
+      if (nif->name[0] == 'w' && nif->name[1] == 'g') {
+#if MIB2_STATS
+        tx = nif->mib2_counters.ifoutoctets;
+        rx = nif->mib2_counters.ifinoctets;
+#endif
+        break;
+      }
+    }
+    if (tx != _state.tx_bytes || rx != _state.rx_bytes) {
+      update([tx, rx](WireguardSettings& s) {
+        s.tx_bytes = tx;
+        s.rx_bytes = rx;
+        return StateUpdateResult::CHANGED;
+      }, "wg.counters");
+    }
   }
 #endif
 }
