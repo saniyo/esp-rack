@@ -42,6 +42,7 @@ class ICertProvider;                // forward — populated by CertManagerModul
 class IMothershipProvider;          // forward — populated by MothershipModule
 class IMothershipProfileProvider;   // forward — populated by MothershipModule
 class IWireguardProvider;           // forward — populated by WireGuardModule
+class IMdnsResolver;                // forward — populated by MdnsModule
 
 namespace ESPRack {
 
@@ -133,6 +134,15 @@ class App {
   IWireguardProvider* wireguard()                    { return wireguard_; }
   void                setWireguard(IWireguardProvider* p) { wireguard_ = p; }
 
+  // IMdnsResolver late-binding — populated by MdnsModule (optional).
+  // Consumers that want to call "mothership.local" instead of a
+  // hard-coded IP can ask `app->mdns()->resolveHost(...)`, or just let
+  // lwip do it implicitly in gethostbyname() once MDNS.begin() ran.
+  // Always null-check — the module is optional; not every consumer
+  // app installs it.
+  IMdnsResolver*      mdns()                              { return mdns_; }
+  void                setMdns(IMdnsResolver* p)           { mdns_ = p; }
+
   // Read-only device identity — useful for AutoUpdateModule etc. that
   // pass these to their underlying service ctor. Set once at App
   // construction.
@@ -157,6 +167,7 @@ class App {
   PresenceService*    presence_ {nullptr};   // populated by PresenceModule
   ITelegramProvider*  telegram_ {nullptr};   // populated by TelegramModule
   IMqttProvider*      mqtt_     {nullptr};   // populated by MqttModule
+  IMdnsResolver*      mdns_     {nullptr};   // populated by MdnsModule (optional)
   // TLS context is App-owned (not module-supplied) because it's a
   // framework primitive every HTTPS-using module needs. unique_ptr +
   // forward decl keeps App.h light — only App.cpp needs the heavy
