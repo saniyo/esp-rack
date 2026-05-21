@@ -324,18 +324,62 @@ bool WireguardService::up(const String& serverPublicKey,
   if (g_wg.is_initialized()) {
     g_wg.end();
   }
-  bool ok = g_wg.begin(
-      devIp,
-      _state.priv_key.c_str(),
-      host.c_str(),
-      srv.c_str(),
-      (int)port);
+  // ── Two-step bring-up (NOT the convenience 5-arg overload) ──
+  //
+  // The convenience `begin(localIP, priv, host, peerPub, port)` overload
+  // in francescolavra's fork sets subnet=/32 and calls the internal
+  // addPeer with allowedCount=0. Result on the wire: cryptokey routing
+  // drops every inbound transport packet because no peer matches the
+  // source IP, and outbound has no route for the /24 anyway. The lib
+  // accepts the handshake (no AllowedIPs gate during handshake) so
+  // /mothership/wg shows "latest handshake: Now" — but ping / HTTP
+  // never works because the data plane is broken.
+  //
+  // Two-step API does it correctly:
+  //   1. peerless `begin(localIP, subnet, gateway, priv, mtu)` —
+  //      registers the netif with the WHOLE /24 mask so the device
+  //      route table has "10.99.0.0/24 dev wg" and lwIP accepts
+  //      packets destined for any address in that subnet as local.
+  //   2. explicit `addPeer(host, port, pub, NULL, &allow, &mask, 1,
+  //      keepalive)` with allowed=10.99.0.0/24 — peer can both send
+  //      and receive packets for the whole tunnel subnet. keepalive=25
+  //      sends a 32-byte packet every 25 s, which keeps NAT mappings
+  //      alive on whatever box sits between the device and the
+  //      mothership (typical corporate/dual-LAN setups need this).
+  //
+  // Subnet assumed /24 — matches the mothership wg_admin default and
+  // the operator's choice from the SUBNET_CHOICES dropdown is always
+  // /16..24, all of which work fine with the same allowed_mask layout
+  // (server still routes whole /N, device only cares about the local
+  // segment to reach the gateway).
+  IPAddress subnet (255, 255, 255, 0);
+  IPAddress gateway(devIp[0], devIp[1], devIp[2], 1);
+  // 1420 = standard WG MTU on IPv4 (1500 - 80 overhead). Matches
+  // wg-quick's `MTU = 1420` default; the lib's WIREGUARDIF_MTU
+  // constant is the same value, kept here as a literal to avoid the
+  // extra `#include <wireguardif.h>`.
+  const uint16_t WG_MTU = 1420;
+  bool ok = g_wg.begin(devIp, subnet, gateway,
+                        _state.priv_key.c_str(), WG_MTU);
   if (!ok) {
     Serial.println("[wg] up: WireGuard.begin() failed");
     return false;
   }
-  Serial.printf("[wg] up: tunnel started, devIp=%s peer=%s:%u\n",
-                ip.c_str(), host.c_str(), (unsigned)port);
+  IPAddress allowAddr(devIp[0], devIp[1], devIp[2], 0);
+  IPAddress allowMask(255, 255, 255, 0);
+  ok = g_wg.addPeer(host.c_str(), port, srv.c_str(),
+                     /*preshared=*/nullptr,
+                     &allowAddr, &allowMask, /*allowedCount=*/1,
+                     /*keep_alive=*/25);
+  if (!ok) {
+    Serial.println("[wg] up: WireGuard.addPeer() failed");
+    g_wg.end();
+    return false;
+  }
+  Serial.printf("[wg] up: tunnel started, devIp=%s/24 peer=%s:%u "
+                "allowed=%s/24 keepalive=25s\n",
+                ip.c_str(), host.c_str(), (unsigned)port,
+                allowAddr.toString().c_str());
   update([](WireguardSettings& s) {
     s.is_up = true;
     s.up_since_ms = millis();
