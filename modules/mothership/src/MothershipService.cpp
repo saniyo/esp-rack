@@ -33,8 +33,32 @@ void MothershipSettings::readConfig(MothershipSettings& s, JsonObject& root) {
 StateUpdateResult MothershipSettings::update(JsonObject& root,
                                               MothershipSettings& s) {
   bool ch = false;
-  ch |= FormBuilder::updateValue(root, "enabled",      s.enabled);
-  ch |= FormBuilder::updateValue(root, "interval_min", s.interval_min);
+
+  // update() is called in three shapes:
+  //
+  //   (a) Boot — ConfigDelegate applies /config/mothership.json:
+  //       flat root with every persisted key at top level.
+  //   (b) Settings tab Save (React): wrapped { "settings": {...} }
+  //       with only enabled + interval_min inside.
+  //   (c) Profiles tab Save (React): wrapped { "profiles": {...} }
+  //       with active_idx + profile_X_name + profile_X_url inside.
+  //
+  // We merge inputs from root + any nested "settings" / "profiles"
+  // sub-objects so the same code path handles all three. NTP / MQTT /
+  // WiFi do the equivalent (root + nested "settings"). Without the
+  // unwrap, form Saves silently no-op because the React payload's
+  // keys never appear at root level.
+  JsonObject settings_src = root;
+  if (root.containsKey("settings") && root["settings"].is<JsonObject>()) {
+    settings_src = root["settings"].as<JsonObject>();
+  }
+  JsonObject profiles_src = root;
+  if (root.containsKey("profiles") && root["profiles"].is<JsonObject>()) {
+    profiles_src = root["profiles"].as<JsonObject>();
+  }
+
+  ch |= FormBuilder::updateValue(settings_src, "enabled",      s.enabled);
+  ch |= FormBuilder::updateValue(settings_src, "interval_min", s.interval_min);
 
   // Per-slot profile fields first — operator may have renamed a slot
   // in the same Save action that switched the active dropdown, so we
@@ -46,16 +70,18 @@ StateUpdateResult MothershipSettings::update(JsonObject& root,
   for (int i = 0; i < MOTHERSHIP_PROFILE_SLOTS; ++i) {
     char key[32];
     snprintf(key, sizeof(key), "profile_%d_name", i);
-    ch |= FormBuilder::updateValue(root, key, s.profiles[(size_t)i].name);
+    ch |= FormBuilder::updateValue(profiles_src, key,
+                                     s.profiles[(size_t)i].name);
     snprintf(key, sizeof(key), "profile_%d_url", i);
-    ch |= FormBuilder::updateValue(root, key, s.profiles[(size_t)i].base_url);
+    ch |= FormBuilder::updateValue(profiles_src, key,
+                                     s.profiles[(size_t)i].base_url);
   }
 
   // Active selector — dropdown sends an int slot index (0..N-1).
   // Translate to the slot's NAME for persistence so reordering
   // doesn't silently switch what's active. -1 = "(none)".
-  if (root.containsKey("active_idx")) {
-    int idx = root["active_idx"].as<int>();
+  if (profiles_src.containsKey("active_idx")) {
+    int idx = profiles_src["active_idx"].as<int>();
     String new_active;
     if (idx >= 0 && idx < (int)s.profiles.size()
         && s.profiles[(size_t)idx].name.length() > 0) {
@@ -66,7 +92,7 @@ StateUpdateResult MothershipSettings::update(JsonObject& root,
       ch = true;
     }
   } else {
-    // Legacy / direct API write: accept active_name string too.
+    // Boot path / direct API write: accept active_name string at root.
     ch |= FormBuilder::updateValue(root, "active_name", s.active_name);
   }
   return ch ? StateUpdateResult::CHANGED : StateUpdateResult::UNCHANGED;
@@ -312,6 +338,21 @@ void MothershipService::registerManifest(WebManager* web) {
   settingsTab.auth     = WebAuthLevel::Admin;
   settingsTab.order    = 20;
   spec.tabs.push_back(settingsTab);
+
+  // Profiles tab — must be declared here so the React UI knows to
+  // render it. Without this, buildForm still emits the "profiles"
+  // section in the JSON response but no tab references it, leaving
+  // the dropdown + slot fields completely hidden (and confusing the
+  // UI's section/tab pairing — a likely cause of the intermittent
+  // spinner stalls reported in early testing).
+  WebTabSpec profilesTab;
+  profilesTab.key      = "profiles";
+  profilesTab.title    = "Profiles";
+  profilesTab.restPath = MOTHERSHIP_FORM_PATH;
+  profilesTab.postable = true;
+  profilesTab.auth     = WebAuthLevel::Admin;
+  profilesTab.order    = 30;
+  spec.tabs.push_back(profilesTab);
 
   // 16 KB REST buffer — Status (6 fields + message), Settings (2 +
   // message), Profiles (dropdown + 4 textfields + message) and the
