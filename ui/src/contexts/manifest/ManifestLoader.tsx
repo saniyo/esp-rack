@@ -38,6 +38,16 @@ const ManifestLoader: FC<RequiredChildrenProps> = (props) => {
   const [revealComplete, setRevealComplete] = useState<boolean>(false);
 
   const loadManifest = useCallback(async () => {
+    // Reset both flags at start. `loaded=false` parks Authenticated
+    // routing on the spinner; `revealComplete=false` un-hides the
+    // ManifestProgress carousel so the operator sees the per-module
+    // probe walk-through on EVERY reload, not just the first mount.
+    // Without this, signIn() → reloadManifest() did its work in the
+    // background but the sidebar stayed stale (old empty stub) until
+    // a route change forced a re-render and even then the user saw
+    // no transition cue.
+    setLoaded(false);
+    setRevealComplete(false);
     try {
       const response = await ManifestApi.readManifest();
       const data = response.data;
@@ -65,6 +75,18 @@ const ManifestLoader: FC<RequiredChildrenProps> = (props) => {
   useEffect(() => {
     loadManifest();
   }, [loadManifest]);
+
+  // Push the device-name (set in ESPRack::Builder("ProjectName", ...))
+  // into the browser tab title every time the manifest reloads. The
+  // static <title>…</title> in public/index.html is the bootstrap
+  // fallback shown for the ~100 ms before React hydrates and the very
+  // first manifest fetch resolves.
+  useEffect(() => {
+    const name = manifest.device?.name;
+    if (name) {
+      document.title = name;
+    }
+  }, [manifest]);
 
   const findFeature = useCallback(
     (id: string): FeatureEntry | undefined => manifest.features.find((f) => f.id === id),
