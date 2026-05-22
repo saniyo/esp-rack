@@ -48,27 +48,52 @@ const ManifestLoader: FC<RequiredChildrenProps> = (props) => {
     // no transition cue.
     setLoaded(false);
     setRevealComplete(false);
-    try {
-      const response = await ManifestApi.readManifest();
-      const data = response.data;
-      // Backend always emits valid JSON. Anonymous (stub) response
-      // omits `features` — coerce to empty list so the UI renders the
-      // brand without crashing on undefined; the stub still carries
-      // schemaVersion + device + buildFeatures + authenticated:false.
-      const next: UiManifest = data
-        ? {
-            ...data,
-            features: Array.isArray(data.features) ? data.features : [],
-          }
-        : EMPTY_MANIFEST;
-      setManifest(next);
-      applyManifest(next);
-      setLoaded(true);
-      setError(undefined);
-    } catch (err: any) {
-      setError(extractErrorMessage(err, 'Failed to fetch UI manifest.'));
-      setManifest(EMPTY_MANIFEST);
-      setLoaded(true);
+
+    // Retry loop. The single biggest source of "title=ESPRack +
+    // empty sidebar" bugs was: user opens the page right as the
+    // device boots, AsyncWebServer isn't quite up yet, axios throws
+    // a network error, EMPTY_MANIFEST gets committed, and the UI
+    // stays broken until the operator manually signs out + in
+    // (signIn dispatches reloadManifest, by which time the server
+    // is ready). Backoff: 1s, 2s, 4s, 8s, 16s — five attempts cover
+    // a 31-second reboot window which is plenty for the slowest
+    // C3 cold-boot. Any HTTP success (including the anonymous stub)
+    // counts as resolved; only true network / 5xx errors retry.
+    const delays = [1000, 2000, 4000, 8000, 16000];
+    for (let attempt = 0; attempt <= delays.length; attempt += 1) {
+      try {
+        const response = await ManifestApi.readManifest();
+        const data = response.data;
+        // Backend always emits valid JSON. Anonymous (stub) response
+        // omits `features` — coerce to empty list so the UI renders
+        // the brand without crashing on undefined; the stub still
+        // carries schemaVersion + device + buildFeatures +
+        // authenticated:false.
+        const next: UiManifest = data
+          ? {
+              ...data,
+              features: Array.isArray(data.features) ? data.features : [],
+            }
+          : EMPTY_MANIFEST;
+        setManifest(next);
+        applyManifest(next);
+        setLoaded(true);
+        setError(undefined);
+        return;
+      } catch (err: any) {
+        const isLastAttempt = attempt === delays.length;
+        const msg = extractErrorMessage(err, 'Failed to fetch UI manifest.');
+        if (isLastAttempt) {
+          setError(msg);
+          setManifest(EMPTY_MANIFEST);
+          setLoaded(true);
+          return;
+        }
+        // Surface progress in the ManifestProgress overlay so the
+        // operator sees "retrying…" rather than a frozen carousel.
+        setError(`${msg} — retry ${attempt + 1}/${delays.length}`);
+        await new Promise((resolve) => setTimeout(resolve, delays[attempt]));
+      }
     }
   }, []);
 

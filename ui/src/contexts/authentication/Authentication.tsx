@@ -65,14 +65,26 @@ const Authentication: FC<RequiredChildrenProps> = ({ children }) => {
         setMe(AuthenticationApi.decodeMeJWT(accessToken));
         setInitialized(true);
       } catch (error: any) {
+        // Token failed to verify — typically because the device's
+        // JWT secret regenerated on a fresh boot, so a token cached
+        // from a previous session can no longer be validated. Wipe
+        // it so AXIOS stops sending a dead `Bearer …` on every
+        // subsequent request (which was making the server treat the
+        // browser as anonymous without the user realising) AND
+        // re-fetch the manifest so the route/feature tables match
+        // the now-effectively-signed-out state.
+        AuthenticationApi.clearAccessToken();
         setMe(undefined);
         setInitialized(true);
+        void reloadManifest();
+        enqueueSnackbar('Session expired, please sign in again.',
+                        { variant: 'info' });
       }
     } else {
       setMe(undefined);
       setInitialized(true);
     }
-  }, [features]);
+  }, [features, reloadManifest, enqueueSnackbar]);
 
   useEffect(() => {
     refresh();
