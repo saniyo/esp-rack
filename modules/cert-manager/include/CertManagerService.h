@@ -33,6 +33,27 @@
 #define CERT_MANAGER_FORM_PATH "/rest/certManager"
 #define CERT_MANAGER_WS_PATH   "/ws/certManager"
 
+// Factory bootstrap token — one-time shared secret baked into the
+// firmware at build time. Empty by default; set via a build_flag
+// in platformio.ini for production fleets that want all devices
+// to ship with the same out-of-the-box token:
+//
+//   -D FACTORY_CERT_BOOTSTRAP_TOKEN=\"f3d29b1a…\"
+//
+// On first boot (no cert.json yet) the token is loaded into the
+// persisted CertManagerSettings.bootstrap_token field. The auto-
+// enroll loop sends it as `Authorization: Bearer …` on every
+// /enroll attempt — server's path 2 fast-path signs + auto-trusts
+// when it matches. On successful enrollment the token is wiped
+// (in RAM AND on disk) so it cannot be reused; if a re-enroll is
+// ever needed it falls back to the operator-approval path 6.
+//
+// Devices flashed without the build flag start with an empty
+// token and rely purely on operator approval (path 6 / grey list).
+#ifndef FACTORY_CERT_BOOTSTRAP_TOKEN
+#define FACTORY_CERT_BOOTSTRAP_TOKEN ""
+#endif
+
 // Legacy FACTORY_MOTHERSHIP_ENROLL_URL / FACTORY_MOTHERSHIP_RECOVER_URL
 // have been removed — cert-manager no longer carries its own URL
 // fields. Both enroll and recover URLs are derived at request time
@@ -68,15 +89,17 @@ struct CertManagerSettings {
   // Empty until Phase 1.5 sets it on first enroll.
   String  recovery_token;
 
-  // ── Persisted auto-enroll policy ──
-  // When true (default) and state == NeedsEnrollment + WiFi up,
-  // CertManagerService::loop spawns enrollment automatically with an
-  // empty bootstrap token. The server parks the device in its grey
-  // list; once the operator approves the entry on the mothership
-  // admin page, the next retry returns a signed cert. Set false for
-  // air-gapped / token-only deployments where the operator must
-  // explicitly type a token first.
-  bool   auto_enroll{true};
+  // ── Persisted one-time bootstrap token (shared-secret fast-path) ──
+  // Survives reboot so a fleet can be flashed once and auto-enroll
+  // without operator interaction even across power cycles. WIPED
+  // on first successful enrollment (single-use): the next time the
+  // device needs to re-enroll (factory-reset, operator unbind, …)
+  // it falls back to the deviceId / grey-zone path. Encrypted on
+  // disk by SecretsVault — marked as a secret field in buildForm
+  // so plaintext never lands in /config/cert.json.
+  // Default value comes from the FACTORY_CERT_BOOTSTRAP_TOKEN
+  // build-flag; empty when the flag is not set at compile time.
+  String  bootstrap_token{FACTORY_CERT_BOOTSTRAP_TOKEN};
 
   // ── Persisted PKI endpoint override ──
   // When EMPTY (default): cert-manager follows the active Mothership
@@ -95,11 +118,14 @@ struct CertManagerSettings {
   // NOT a separate field — Phase 4b uses effectiveRecoverUrl().
   String  pki_base_url;
 
-  // ── Runtime (not persisted) ──
-  // Bootstrap token for first enrollment. Operator types it in the
-  // UI; cleared after successful enroll. NEVER persisted to disk
-  // (lives only in RAM during the enrollment window).
-  String  bootstrap_token;
+  // ── Auto-poll telemetry (runtime, not persisted) ──
+  // Updated by the enrollment task on every /enroll round-trip;
+  // exposed read-only on the Enrollment tab so the operator can
+  // see at a glance that the device is alive and waiting. Reset
+  // on every reboot — first poll lands within seconds of WiFi up.
+  uint32_t enroll_poll_count{0};   // attempts since boot
+  uint32_t enroll_last_poll_s{0};  // seconds-since-boot of last attempt
+  String   enroll_last_reason;     // human-readable last server reply
 
   // Derived display state — recomputed in begin()/onCertChanged().
   ICertProvider::State runtime_state{ICertProvider::State::Uninitialised};
@@ -173,11 +199,6 @@ class CertManagerService : public StatefulService<CertManagerSettings>,
   // throughout, so plain late-bind is enough).
   IWireguardProvider*                      _wg{nullptr};
   ESPRack::App*                            _app{nullptr};
-  // Seconds-since-boot of the most recent auto-enroll attempt fired
-  // from loop(). Rate-limits the auto-attempts to one per RETRY_S so
-  // a server-side "pending" status doesn't spin into a tight retry
-  // loop. 0 = never attempted (kick on first WiFi-up tick).
-  uint32_t                                 _lastAutoEnrollAttempt_s{0};
 
   // Resolve enroll / recover URLs at request time, picking either
   // the operator-pinned pki_base_url (Settings tab) or the active
@@ -220,46 +241,54 @@ class CertManagerService : public StatefulService<CertManagerSettings>,
   // Used by buildCsr; exposed for the enroll-status display.
   String deviceSubjectCN() const;
 
-  // ── Phase 1.5 — Enrollment HTTPS POST ──
+  // ── Approval-driven enrollment ──
   //
-  // Spawn a FreeRTOS task that runs the full enrollment flow off the
-  // AsyncWebServer thread (the action handler returns 200 immediately
-  // so UI doesn't block). Single-task in-flight only; if a task is
-  // already running, returns false. Caller's `bootstrapToken` is
-  // captured into a heap-allocated argument struct that the task
-  // owns and frees.
-  bool kickEnrollment(const String& bootstrapToken);
+  // Auto-spawned from begin() when state != Ready. The task waits
+  // for WiFi + a resolvable enroll URL, generates the keypair + CSR
+  // once, then loops postEnrollOnce until either:
+  //   * Approved   → save cert, update TLS context, state → Ready,
+  //                   task exits
+  //   * Blacklisted → state → EnrollmentFailed, task exits (manual
+  //                   wipe or operator-side unblock required)
+  //   * Externally bumped to Ready by another path (rotate, etc.)
+  // Pending / network / server errors just delay and retry.
+  //
+  // Returns false if a task is already running (begin() can call
+  // safely without an explicit guard; task self-clears the handle
+  // before vTaskDelete).
+  bool kickEnrollment();
 
   // The task body — runs on its own stack, calls back into the
   // service for state mutation. Trampoline / static so it can be
   // passed to xTaskCreate.
   static void enrollTaskTramp(void* arg);
-  void runEnrollment(const String& bootstrapToken);
+  void runEnrollmentLoop();
 
-  // POST CSR result codes — distinguish "operator must act" (Failed)
-  // from "server parked us in the approval queue, we'll retry"
-  // (Pending). Without this distinction the auto-enroll loop would
-  // mark every pending response as Failed and stop retrying.
-  enum class EnrollResult { Ok, Pending, Failed };
+  // Outcome of one /enroll round-trip. Drives loop scheduling:
+  //   * Approved   — stop (success)
+  //   * Pending    — re-poll after PENDING_INTERVAL_S
+  //   * Blacklisted— stop (failure, operator must act)
+  //   * NetworkFail/ServerError — re-poll after ERROR_INTERVAL_S
+  enum class EnrollResult {
+    Approved,
+    Pending,
+    Blacklisted,
+    NetworkFail,
+    ServerError,
+  };
 
-  // POST CSR to enroll endpoint. Empty bootstrapToken → no
-  // Authorization header is sent; server's _handle_enroll path 6
-  // then parks the device in PENDING_ENROLLMENTS for operator
-  // approval (auto-enroll flow). Non-empty token → Bearer header,
-  // server's path 2 fast-tracks signing if the token matches the
-  // current bootstrap-token. Either way the server-side flow can
-  // also auto-trust if the deviceId is in EXPECTED_DEVICES (path 3).
-  //
-  // EnrollResult::Ok       — server signed; outputs populated.
-  // EnrollResult::Pending  — server returned approved:false / status:pending;
-  //                          outputs empty; caller schedules retry.
-  // EnrollResult::Failed   — anything else (network error / 4xx
-  //                          rejection / malformed body). outputs empty.
-  EnrollResult postCsrToMothership(const String& csrPem,
-                                     const String& bootstrapToken,
-                                     String& outCertPem,
-                                     String& outCaBundlePem,
-                                     String& outRecoveryToken);
+  // One /enroll attempt. Sends {deviceId, csr_pem [, wg_pubkey]} —
+  // when state.bootstrap_token is non-empty also adds the matching
+  // Authorization: Bearer header (server's path 2 fast-path; auto-
+  // trust on token match). Empty token → no header, server path 6
+  // parks the device in PENDING_ENROLLMENTS for operator approval.
+  // Populates the three PEM outputs ONLY on Approved; populates
+  // outReason on every result for the UI telemetry field.
+  EnrollResult postEnrollOnce(const String& csrPem,
+                              String& outCertPem,
+                              String& outCaBundlePem,
+                              String& outRecoveryToken,
+                              String& outReason);
 
   // Parse a freshly-received cert PEM to extract serial + notAfter
   // for state display. Uses mbedtls_x509_crt_parse + crt.serial.p +

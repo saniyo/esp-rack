@@ -96,10 +96,10 @@ void ConfigManager::begin() {
           String snap = full.substring(0, full.length() - 4) + ".snapshot";
           if (!_fs->exists(snap)) {
             if (_fs->rename(full.c_str(), snap.c_str())) {
-              Serial.printf("[ConfigManager] migrated %s -> %s\n",
+              log_d("[ConfigManager] migrated %s -> %s",
                             full.c_str(), snap.c_str());
             } else {
-              Serial.printf("[ConfigManager] migrate %s failed\n", full.c_str());
+              log_e("[ConfigManager] migrate %s failed", full.c_str());
             }
           } else {
             (void)removeIfExists(full.c_str());
@@ -181,7 +181,7 @@ bool ConfigManager::snapshotEntry(const char* primaryPath) {
   (void)removeIfExists(snap.c_str());
   bool ok = copyFile(primaryPath, snap.c_str());
   if (!ok) {
-    Serial.printf("[CFG] snapshotEntry %s FAILED\r\n", primaryPath);
+    log_e("[CFG] snapshotEntry %s FAILED", primaryPath);
   }
   return ok;
 }
@@ -195,7 +195,7 @@ bool ConfigManager::restoreEntryFromSnapshot(const char* primaryPath) {
   (void)removeIfExists(primaryPath);
   bool ok = copyFile(snap.c_str(), primaryPath);
   if (!ok) {
-    Serial.printf("[CFG] restoreEntryFromSnapshot %s FAILED\r\n", primaryPath);
+    log_e("[CFG] restoreEntryFromSnapshot %s FAILED", primaryPath);
   }
   return ok;
 }
@@ -391,7 +391,7 @@ bool ConfigManager::readJsonFile(const char* path, DynamicJsonDocument& doc) {
   if (!_fs || !path) return false;
   File f = _fs->open(path, "r");
   if (!f) {
-    Serial.printf("[CFG] readJsonFile: open(%s) FAILED\r\n", path);
+    log_e("[CFG] readJsonFile: open(%s) FAILED", path);
     return false;
   }
 
@@ -400,7 +400,7 @@ bool ConfigManager::readJsonFile(const char* path, DynamicJsonDocument& doc) {
   // survive in scrollback. Only failures stay verbose.
   DeserializationError err = deserializeJson(doc, f);
   if (err) {
-    Serial.printf("[CFG] readJsonFile %s deserialize err=%s\r\n", path, err.c_str());
+    log_d("[CFG] readJsonFile %s deserialize err=%s", path, err.c_str());
   }
   f.close();
 
@@ -592,14 +592,14 @@ bool ConfigManager::verifyDoc(const DynamicJsonDocument& doc, VerifyInfo& info) 
   // false → every save was reported as "verify FAILED".
   JsonObjectConst root = doc.as<JsonObjectConst>();
   if (root.isNull()) {
-    Serial.println(F("[CFG] verifyDoc: root is null"));
+    log_d("[CFG] verifyDoc: root is null");
     return false;
   }
   JsonObjectConst data;
   bool legacy = false;
 
   if (!extractData(root, data, legacy)) {
-    Serial.println(F("[CFG] verifyDoc: extractData failed"));
+    log_e("[CFG] verifyDoc: extractData failed");
     return false;
   }
   info.legacy = legacy;
@@ -626,13 +626,13 @@ bool ConfigManager::verifyDoc(const DynamicJsonDocument& doc, VerifyInfo& info) 
   const char* hash = meta["hash"] | "";
 
   if (strcasecmp(algo, "crc32") != 0) {
-    Serial.printf("[CFG] verifyDoc: unknown algo '%s'\r\n", algo);
+    log_d("[CFG] verifyDoc: unknown algo '%s'", algo);
     return false;
   }
 
   uint32_t expected = 0;
   if (!hexToCrc32(hash, expected)) {
-    Serial.printf("[CFG] verifyDoc: bad hash '%s'\r\n", hash);
+    log_d("[CFG] verifyDoc: bad hash '%s'", hash);
     return false;
   }
 
@@ -643,9 +643,9 @@ bool ConfigManager::verifyDoc(const DynamicJsonDocument& doc, VerifyInfo& info) 
   if (!info.ok) {
     String dataStr;
     serializeJson(data, dataStr);
-    Serial.printf("[CFG] verifyDoc CRC mismatch: expected %08x got %08x len=%u\r\n",
+    log_w("[CFG] verifyDoc CRC mismatch: expected %08x got %08x len=%u",
                   (unsigned)expected, (unsigned)got, (unsigned)dataStr.length());
-    Serial.printf("[CFG]   data: %s\r\n", dataStr.c_str());
+    log_d("[CFG]   data: %s", dataStr.c_str());
   }
   return info.ok;
 }
@@ -671,7 +671,7 @@ bool ConfigManager::writeRootWithMeta(File& f, JsonObjectConst data, uint32_t cr
   n = serializeJson(data, f);                                      total += n;
   n = f.print("}");                                                total += n;
 
-  Serial.printf("[CFG] writeRootWithMeta wrote %u bytes (data=%u dataMemUsage=%u)\r\n",
+  log_d("[CFG] writeRootWithMeta wrote %u bytes (data=%u dataMemUsage=%u)",
                 (unsigned)total, (unsigned)n,
                 (unsigned)data.memoryUsage());
   return total > 0;
@@ -762,7 +762,7 @@ bool ConfigManager::atomicWrite(const char* primary,
                                 size_t bufferSize,
                                 uint32_t* outCrc) {
   if (!_fs || !primary) {
-    Serial.println(F("[CFG] write: null args"));
+    log_d("[CFG] write: null args");
     return false;
   }
 
@@ -787,7 +787,7 @@ bool ConfigManager::atomicWrite(const char* primary,
     mkdirsForFile(backup);
     (void)removeIfExists(backup);
     if (!copyFile(primary, backup)) {
-      Serial.printf("[CFG] backup copy %s -> %s failed (continuing)\r\n", primary, backup);
+      log_e("[CFG] backup copy %s -> %s failed (continuing)", primary, backup);
     }
   }
 
@@ -796,7 +796,7 @@ bool ConfigManager::atomicWrite(const char* primary,
 
   File f = _fs->open(primary, "w");
   if (!f) {
-    Serial.printf("[CFG] write open %s FAILED\r\n", primary);
+    log_e("[CFG] write open %s FAILED", primary);
     return false;
   }
 
@@ -804,7 +804,7 @@ bool ConfigManager::atomicWrite(const char* primary,
   f.close();
 
   if (!ok) {
-    Serial.printf("[CFG] write %s FAILED\r\n", primary);
+    log_e("[CFG] write %s FAILED", primary);
     return false;
   }
 
@@ -815,11 +815,11 @@ bool ConfigManager::atomicWrite(const char* primary,
     DynamicJsonDocument vdoc(bufferSize);
     VerifyInfo vi;
     if (!readAndVerify(primary, vdoc, vi) || !vi.ok) {
-      Serial.printf("[CFG] post-write verify FAILED for %s\r\n", primary);
+      log_e("[CFG] post-write verify FAILED for %s", primary);
     }
   }
 
-  Serial.printf("[CFG] write OK %s crc=%08x\r\n", primary, (unsigned)crc);
+  log_i("[CFG] write OK %s crc=%08x", primary, (unsigned)crc);
   if (outCrc) *outCrc = crc;
   return true;
 }

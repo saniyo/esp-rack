@@ -53,6 +53,21 @@ class HttpGetEndpoint {
   void fetchSettings(AsyncWebServerRequest* request) {
     AsyncJsonResponse* response = new AsyncJsonResponse(false, _bufferSize);
     JsonObject jsonObject = response->getRoot().to<JsonObject>();
+    // Heap fragmentation guard. When the underlying DynamicJsonDocument
+    // can't carve out `_bufferSize` contiguous bytes (typical on ESP32-C3
+    // with WiFi+TLS sessions active, where max-alloc routinely hovers
+    // ~20 KB even with 60 KB total free), ArduinoJson leaves the doc in
+    // an uninitialised state. `.to<JsonObject>()` then yields a null
+    // variant, `_stateReader` no-ops against it, and `setLength()`
+    // serialises null as the literal string "null" — caller gets a 200
+    // with a 4-byte body that breaks every form-driven UI. Surface this
+    // as a proper 503 so the client sees something actionable instead.
+    if (jsonObject.isNull()) {
+      delete response;
+      request->send(503, "application/json",
+                    "{\"error\":\"oom\",\"detail\":\"response buffer alloc failed\"}");
+      return;
+    }
     _statefulService->read(jsonObject, _stateReader);
 
     response->setLength();
@@ -122,6 +137,21 @@ class HttpPostEndpoint {
     }
     AsyncJsonResponse* response = new AsyncJsonResponse(false, _bufferSize);
     jsonObject = response->getRoot().to<JsonObject>();
+    // Heap-fragmentation guard — see fetchSettings() comment above for
+    // the full root-cause story. tl;dr: alloc fail → null variant →
+    // "null" body → broken UI; trap here and surface a real 503.
+    if (jsonObject.isNull()) {
+      delete response;
+      request->send(503, "application/json",
+                    "{\"error\":\"oom\",\"detail\":\"response buffer alloc failed\"}");
+      // Skip update-handler chain too — saveIfChanged + broadcastWs
+      // shouldn't run when we just told the caller their save failed
+      // (well, the WRITE succeeded — _stateUpdater already ran — but
+      // returning 503 means the client should refetch + retry). The
+      // state-mutation side effects propagate on the next successful
+      // GET anyway.
+      return;
+    }
     _statefulService->read(jsonObject, _stateReader);
     response->setLength();
     request->send(response);

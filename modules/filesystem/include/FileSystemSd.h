@@ -40,7 +40,7 @@ class FileSystemSd : public FileSystemBackend {
     _mounted = SD_MMC.begin();                  // 4-bit default
 #endif
     if (_mounted) {
-      Serial.printf("[SD_MMC] mounted, type=%d, size=%llu MB\n",
+      log_i("[SD_MMC] mounted, type=%d, size=%llu MB",
                     SD_MMC.cardType(), SD_MMC.cardSize() / (1024ULL * 1024));
     } else {
       SD_MMC.end();
@@ -60,7 +60,7 @@ class FileSystemSd : public FileSystemBackend {
     _mounted = SD.begin(SD_CS_PIN);
 #endif
     if (_mounted) {
-      Serial.printf("[SD] mounted, type=%d, size=%llu MB\n",
+      log_i("[SD] mounted, type=%d, size=%llu MB",
                     SD.cardType(), SD.cardSize() / (1024ULL * 1024));
     } else {
       SD.end();
@@ -116,7 +116,7 @@ class FileSystemSd : public FileSystemBackend {
 
   bool format() override {
     if (!_mounted) {
-      Serial.println("[SD] format failed — not mounted");
+      log_e("[SD] format failed — not mounted");
       _formatState = 4;
       return false;
     }
@@ -144,7 +144,7 @@ class FileSystemSd : public FileSystemBackend {
       root.close();
     }
     _formatTotal = total;
-    Serial.printf("[SD] format: %lu entries to delete\n", (unsigned long)total);
+    log_d("[SD] format: %lu entries to delete", (unsigned long)total);
     _formatState = 2;   // running
 
     // pass 2: delete with progress
@@ -163,7 +163,7 @@ class FileSystemSd : public FileSystemBackend {
       }
     }
     _formatState = 3;   // done
-    Serial.println("[SD] format complete (all files removed)");
+    log_d("[SD] format complete (all files removed)");
     return true;
   }
 
@@ -180,13 +180,13 @@ class FileSystemSd : public FileSystemBackend {
     // 5 attempts spread over ~1.5 s — covers card power-up; yields between tries.
     for (int i = 1; i <= 5 && !self->_mounted; i++) {
       if (self->mount()) break;
-      Serial.printf("[SD] async mount attempt %d failed; retrying…\n", i);
+      log_e("[SD] async mount attempt %d failed; retrying…", i);
       vTaskDelay(pdMS_TO_TICKS(150 * i));  // 150, 300, 450, 600, 750
     }
     if (self->_mounted) {
       if (auto* f = self->fs()) FileSystemManager::purgeUploadDebris(*f);
     } else {
-      Serial.println("[SD] async mount gave up after 5 attempts");
+      log_d("[SD] async mount gave up after 5 attempts");
     }
     self->_watcherActive = false;
     vTaskDelete(nullptr);

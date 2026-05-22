@@ -157,7 +157,7 @@ void AutoUpdateService::loop() {
 
     uint32_t timeoutMs = (uint32_t)_state.updateTimeoutSec * 1000UL;
     if (elapsed >= timeoutMs) {
-      Serial.println(F("[AutoUpdate] TIMEOUT — killing OTA task, rebooting..."));
+      log_d("[AutoUpdate] TIMEOUT — killing OTA task, rebooting...");
       setOtaState(AU_TIMEOUT);
       setLastResult("timeout — rebooting");
 
@@ -186,14 +186,14 @@ void AutoUpdateService::loop() {
   unsigned long now = millis();
   unsigned long intervalMs = (unsigned long)_state.checkInterval * 60000UL;
   if (now - _lastCheckMs >= intervalMs) {
-    Serial.printf("[AutoUpdate] Check fired (interval %d min)\n", _state.checkInterval);
+    log_d("[AutoUpdate] Check fired (interval %d min)", _state.checkInterval);
 
     _otaStartMs = millis();
     setOtaState(AU_CHECKING);
 
     if (xTaskCreatePinnedToCore(
             otaTaskEntry, "ota_update", 6144, this, 1, &_otaTaskHandle, 1) != pdPASS) {
-      Serial.printf("[AutoUpdate] ERROR: task create failed (free heap: %u)\n", ESP.getFreeHeap());
+      log_e("[AutoUpdate] ERROR: task create failed (free heap: %u)", ESP.getFreeHeap());
       setOtaState(AU_FAILED);
       setLastResult("task_create_failed");
       _lastCheckMs = millis();
@@ -291,7 +291,7 @@ int AutoUpdateService::preflightCheck(const String& url, uint32_t timeoutMs, Str
 // PERFORM UPDATE — actual OTA download
 // ====================================================
 t_httpUpdate_return AutoUpdateService::performUpdate(const String& url) {
-  Serial.printf("[AutoUpdate] OTA download: %s\n", url.c_str());
+  log_d("[AutoUpdate] OTA download: %s", url.c_str());
   setOtaState(AU_DOWNLOADING);
 
 #ifdef ESP8266
@@ -338,11 +338,11 @@ void AutoUpdateService::checkForUpdate() {
 
   // --- 1) Primary server preflight ---
   String body;
-  Serial.printf("[AutoUpdate] Preflight primary: %s\n", primaryUrl.c_str());
+  log_d("[AutoUpdate] Preflight primary: %s", primaryUrl.c_str());
   int code = preflightCheck(primaryUrl, HARD_UPDATE_CHECK_BUDGET_MS, body);
 
   if (code == 200) {
-    Serial.println(F("[AutoUpdate] Primary: update available, starting OTA..."));
+    log_d("[AutoUpdate] Primary: update available, starting OTA...");
     setLastResult("200: Downloading...");
     t_httpUpdate_return ret = performUpdate(primaryUrl);
     handleOtaResult(ret, "primary");
@@ -358,7 +358,7 @@ void AutoUpdateService::checkForUpdate() {
     } else {
       snprintf(lr, sizeof(lr), "%d: %s", code, body.c_str());
     }
-    Serial.printf("[AutoUpdate] Primary: %s\n", lr);
+    log_d("[AutoUpdate] Primary: %s", lr);
 
     if (code == 304 || code == 403 || code == 404) {
       // Terminal but NOT disabling — scheduler keeps running
@@ -370,7 +370,7 @@ void AutoUpdateService::checkForUpdate() {
     // Other errors (400, 500) — try fallback
     setLastResult(lr);
   } else {
-    Serial.printf("[AutoUpdate] Primary unreachable: %s\n", body.c_str());
+    log_e("[AutoUpdate] Primary unreachable: %s", body.c_str());
   }
 
   // --- 2) Check timeout before fallback ---
@@ -381,11 +381,11 @@ void AutoUpdateService::checkForUpdate() {
   }
 
   // --- 3) Fallback server preflight ---
-  Serial.printf("[AutoUpdate] Preflight fallback: %s\n", fallbackUrl.c_str());
+  log_d("[AutoUpdate] Preflight fallback: %s", fallbackUrl.c_str());
   code = preflightCheck(fallbackUrl, FALLBACK_UPDATE_CHECK_TIMEOUT_MS, body);
 
   if (code == 200) {
-    Serial.println(F("[AutoUpdate] Fallback: update available, starting OTA..."));
+    log_d("[AutoUpdate] Fallback: update available, starting OTA...");
     setLastResult("200: Downloading (fallback)...");
     t_httpUpdate_return ret = performUpdate(fallbackUrl);
     handleOtaResult(ret, "fallback");
@@ -399,11 +399,11 @@ void AutoUpdateService::checkForUpdate() {
     } else {
       snprintf(lr, sizeof(lr), "%d: %s", code, body.c_str());
     }
-    Serial.printf("[AutoUpdate] Fallback: %s\n", lr);
+    log_d("[AutoUpdate] Fallback: %s", lr);
     setOtaState(AU_IDLE);
     setLastResult(lr);
   } else {
-    Serial.printf("[AutoUpdate] Fallback unreachable: %s\n", body.c_str());
+    log_e("[AutoUpdate] Fallback unreachable: %s", body.c_str());
     setOtaState(AU_IDLE);
     setLastResult("servers unreachable");
   }
@@ -424,19 +424,19 @@ void AutoUpdateService::handleOtaResult(t_httpUpdate_return ret, const char* ser
 #endif
       char lr[256];
       snprintf(lr, sizeof(lr), "%s failed (%d): %s", server, err, errStr.c_str());
-      Serial.printf("[AutoUpdate] %s\n", lr);
+      log_d("[AutoUpdate] %s", lr);
       setOtaState(AU_FAILED);
       setLastResult(lr);
       break;
     }
     case HTTP_UPDATE_NO_UPDATES:
-      Serial.printf("[AutoUpdate] %s: no update\n", server);
+      log_d("[AutoUpdate] %s: no update", server);
       setOtaState(AU_IDLE);
       setLastResult("304: No update");
       break;
 
     case HTTP_UPDATE_OK:
-      Serial.printf("[AutoUpdate] %s: SUCCESS — rebooting\n", server);
+      log_d("[AutoUpdate] %s: SUCCESS — rebooting", server);
       setOtaState(AU_SUCCESS);
       setLastResult("success");
       vTaskDelay(pdMS_TO_TICKS(1000));
@@ -454,7 +454,7 @@ void AutoUpdateService::onStationModeGotIP(WiFiEvent_t event, WiFiEventInfo_t in
   if (!_checkedOnce) {
     _checkedOnce = true;
     _lastCheckMs = 0;  // force immediate check
-    Serial.println(F("[AutoUpdate] WiFi up — scheduling immediate check"));
+    log_d("[AutoUpdate] WiFi up — scheduling immediate check");
   }
 }
 

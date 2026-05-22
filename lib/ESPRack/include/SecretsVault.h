@@ -99,7 +99,7 @@ inline const uint8_t* derivedKey() {
 
   uint8_t mac[6] = {0};
   if (esp_efuse_mac_get_default(mac) != ESP_OK) {
-    Serial.println(F("[secrets] eFuse MAC read failed; encryption disabled"));
+    log_e("[secrets] eFuse MAC read failed; encryption disabled");
     return nullptr;
   }
 
@@ -135,7 +135,9 @@ inline void warnOnce(const __FlashStringHelper* msg) {
   static bool warned = false;
   if (warned) return;
   warned = true;
-  Serial.println(msg);
+  // __FlashStringHelper* points at a PROGMEM string literal — on ESP32
+  // flash is memory-mapped so reinterpret_cast to const char* is safe.
+  log_w("%s", reinterpret_cast<const char*>(msg));
 }
 
 }  // namespace detail

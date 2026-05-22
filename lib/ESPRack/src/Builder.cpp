@@ -40,24 +40,25 @@ Builder& Builder::full()       { return networking(); /* TODO add mqtt/telegram/
 // ----- Build --------------------------------------------------------------
 
 namespace {
-// Light log helper. We avoid pulling a logging dependency in Phase 1.
+// Light log helper — wraps vsnprintf into a fixed buffer + emits via
+// arduino-esp32's log_* macros (compile-stripped when CORE_DEBUG_LEVEL
+// is below the level). Stays self-contained so it works in Phase 1
+// before any other framework piece (incl. Serial) is fully wired.
 inline void rerr(const char* fmt, ...) {
   va_list ap;
   va_start(ap, fmt);
-  Serial.print(F("[ESPRack] ERROR: "));
   char buf[160];
   vsnprintf(buf, sizeof(buf), fmt, ap);
   va_end(ap);
-  Serial.println(buf);
+  log_e("[ESPRack] %s", buf);
 }
 inline void rinfo(const char* fmt, ...) {
   va_list ap;
   va_start(ap, fmt);
-  Serial.print(F("[ESPRack] "));
   char buf[160];
   vsnprintf(buf, sizeof(buf), fmt, ap);
   va_end(ap);
-  Serial.println(buf);
+  log_i("[ESPRack] %s", buf);
 }
 }  // namespace
 

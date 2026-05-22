@@ -215,7 +215,7 @@ void SecuritySettingsService::begin() {
     }
   }
   if (needsMigration) {
-    Serial.println(F("[security] migrating plaintext credentials to PBKDF2 hash"));
+    log_d("[security] migrating plaintext credentials to PBKDF2 hash");
     _cfg.saveIfChanged("hash-migration");
   }
 }

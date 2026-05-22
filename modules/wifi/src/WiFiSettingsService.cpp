@@ -426,12 +426,17 @@ void WiFiSettingsService::registerManifest(WebManager* web) {
   spec.tabs.push_back(settingsTab);
 
   // REST-only registration: single buffer shared by GET + POST handlers.
-  // 16 KB leaves comfortable headroom for the full {status,scan,settings}
-  // envelope plus up to ~20 scan rows.
+  // Measured wifiForm payload is 2531 B (scan rows stream from a
+  // separate endpoint, NOT this form's `scan` tab). 6 KB = 2.4× the
+  // observed payload — enough headroom for future fields plus a safe
+  // margin inside the ESP32-C3 max-contiguous-alloc window (typically
+  // ~19 KB once WiFi+TLS contexts populate). Was 16 KB which routinely
+  // exceeded that window and silently produced literal "null" bodies
+  // (see mothership fix + HttpEndpoint OOM guard).
   _feature = web->registerFeature<WiFiSettings>(
       std::move(spec), this,
       WiFiSettings::buildForm, WiFiSettings::update,
-      16384);
+      6144);
 }
 
 void WiFiSettingsService::begin() {
@@ -464,7 +469,7 @@ void WiFiSettingsService::loop() {
   if (_pendingSave) {
     _pendingSave = false;
     bool ok = _cfg.saveIfChanged(_pendingSaveOrigin);
-    Serial.printf_P(PSTR("[wifi] saveIfChanged(%s) -> %d\r\n"),
+    log_d("[wifi] saveIfChanged(%s) -> %d",
                     _pendingSaveOrigin.c_str(), (int)ok);
   }
 
@@ -480,7 +485,7 @@ void WiFiSettingsService::loop() {
   if (_scanInProgress) {
     int st = WiFi.scanComplete();
     if (st >= 0) {
-      Serial.printf_P(PSTR("[wifi] scan complete: %d networks, freeHeap=%u\r\n"),
+      log_d("[wifi] scan complete: %d networks, freeHeap=%u",
                       st, (unsigned)ESP.getFreeHeap());
       setScanInProgress(false);
     }
@@ -496,7 +501,7 @@ void WiFiSettingsService::reconfigureWiFiConnection() {
   // of ERR_NETWORK_CHANGED / reason-2 disconnects. The flag stays set;
   // the NEXT loop iteration after the scan settles will pick it up.
   if (isScanInProgress()) {
-    Serial.println(F("[wifi] reconfigureWiFiConnection deferred — scan in progress"));
+    log_d("[wifi] reconfigureWiFiConnection deferred — scan in progress");
     _pendingReconfigure = true;
     return;
   }
@@ -538,7 +543,7 @@ void WiFiSettingsService::pickActiveCreds(String& outSsid, String& outPass) {
 void WiFiSettingsService::manageSTA() {
   if (WiFi.isConnected()) return;
   if (isScanInProgress()) {
-    Serial.println(F("[wifi] manageSTA skipped — scan in progress"));
+    log_w("[wifi] manageSTA skipped — scan in progress");
     return;
   }
 
@@ -551,7 +556,7 @@ void WiFiSettingsService::manageSTA() {
   wl_status_t st = WiFi.status();
   if (st == WL_IDLE_STATUS) return;  // already attempting
 
-  Serial.printf_P(PSTR("[wifi] Connecting to WiFi (%s slot, ssid='%s', static=%d)\r\n"),
+  log_d("[wifi] Connecting to WiFi (%s slot, ssid='%s', static=%d)",
                   _activeAp == 1 ? "secondary" : "primary", ssid.c_str(),
                   (int)_state.staticIPConfig);
 
@@ -586,13 +591,13 @@ void WiFiSettingsService::ensureStaEnabledNoKillAp() {
 
 #ifdef ESP32
 void WiFiSettingsService::onStationModeConnected(WiFiEvent_t, WiFiEventInfo_t info) {
-  Serial.printf_P(PSTR("[wifi] event: connected, channel=%u\r\n"),
+  log_i("[wifi] event: connected, channel=%u",
                   (unsigned)info.wifi_sta_connected.channel);
   _apAttempts = 0;  // lock in the current slot as "working"
 }
 
 void WiFiSettingsService::onStationModeDisconnected(WiFiEvent_t, WiFiEventInfo_t info) {
-  Serial.printf_P(PSTR("[wifi] event: disconnected, reason=%u, attempts=%u\r\n"),
+  log_i("[wifi] event: disconnected, reason=%u, attempts=%u",
                   (unsigned)info.wifi_sta_disconnected.reason,
                   (unsigned)(_apAttempts + 1));
 
@@ -605,7 +610,7 @@ void WiFiSettingsService::onStationModeDisconnected(WiFiEvent_t, WiFiEventInfo_t
       _activeAp = (_activeAp == 0) ? 1 : 0;
       s_activeAp = _activeAp;
       _apAttempts = 0;
-      Serial.printf_P(PSTR("WiFi failover → %s slot\r\n"),
+      log_d("WiFi failover → %s slot",
                       _activeAp == 1 ? "secondary" : "primary");
     } else {
       _apAttempts = 0;  // keep the slot; reset counter so we don't overflow
@@ -618,7 +623,7 @@ void WiFiSettingsService::onStationModeDisconnected(WiFiEvent_t, WiFiEventInfo_t
 }
 
 void WiFiSettingsService::onStationModeGotIP(WiFiEvent_t, WiFiEventInfo_t) {
-  Serial.printf_P(PSTR("[wifi] event: got IP %s host=%s rssi=%d ch=%u\r\n"),
+  log_i("[wifi] event: got IP %s host=%s rssi=%d ch=%u",
                   WiFi.localIP().toString().c_str(), WiFi.getHostname(),
                   (int)WiFi.RSSI(), (unsigned)WiFi.channel());
 }
@@ -639,7 +644,7 @@ void WiFiSettingsService::kickScan(AsyncWebServerRequest* request) {
   // scanComplete() returns ≥0; REST re-fetches on next tab visit surface
   // the new network list.
   int st = WiFi.scanComplete();
-  Serial.printf_P(PSTR("[wifi] kickScan: prev scanComplete=%d freeHeap=%u\r\n"),
+  log_d("[wifi] kickScan: prev scanComplete=%d freeHeap=%u",
                   st, (unsigned)ESP.getFreeHeap());
   if (st != -1) {
     if (st > -1) WiFi.scanDelete();

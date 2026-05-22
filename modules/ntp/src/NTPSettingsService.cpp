@@ -93,11 +93,11 @@ void NTPSettingsService::loop() {
 
 #ifdef ESP32
 void NTPSettingsService::onStationModeGotIP(WiFiEvent_t event, WiFiEventInfo_t info) {
-  Serial.println(F("Got IP address, starting NTP synchronization."));
+  log_d("Got IP address, starting NTP synchronization.");
   configureNTP();
 }
 void NTPSettingsService::onStationModeDisconnected(WiFiEvent_t event, WiFiEventInfo_t info) {
-  Serial.println(F("WiFi dropped, stopping NTP."));
+  log_d("WiFi dropped, stopping NTP.");
   configureNTP();
 }
 #elif defined(ESP8266)
@@ -111,7 +111,7 @@ void NTPSettingsService::onStationModeDisconnected(const WiFiEventStationModeDis
 
 void NTPSettingsService::configureNTP() {
   if (WiFi.isConnected() && _state.enabled) {
-    Serial.println(F("Starting NTP..."));
+    log_d("Starting NTP...");
 #ifdef ESP32
     configTzTime(_state.tzFormat.c_str(), _state.server.c_str());
 #elif defined(ESP8266)

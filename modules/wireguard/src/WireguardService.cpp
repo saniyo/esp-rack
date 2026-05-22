@@ -296,7 +296,7 @@ bool WireguardService::up(const String& serverPublicKey,
                             const String& endpoint,
                             const String& assignedIp) {
   if (_state.priv_key.length() == 0) {
-    Serial.println("[wg] up: no device private key (keypair "
+    log_e("[wg] up: no device private key (keypair "
                     "generation failed?)");
     return false;
   }
@@ -310,7 +310,7 @@ bool WireguardService::up(const String& serverPublicKey,
                  ? assignedIp
                  : _state.assigned_ip;
   if (srv.length() == 0 || ep.length() == 0 || ip.length() == 0) {
-    Serial.printf("[wg] up: missing triplet srv=%u ep=%u ip=%u\n",
+    log_d("[wg] up: missing triplet srv=%u ep=%u ip=%u",
                   (unsigned)srv.length(), (unsigned)ep.length(),
                   (unsigned)ip.length());
     return false;
@@ -335,20 +335,20 @@ bool WireguardService::up(const String& serverPublicKey,
   // Parse "host:port" — ciniml WireGuard wants them separate.
   int colon = ep.lastIndexOf(':');
   if (colon <= 0 || colon >= (int)ep.length() - 1) {
-    Serial.printf("[wg] up: endpoint missing :port (%s)\n",
+    log_d("[wg] up: endpoint missing :port (%s)",
                   ep.c_str());
     return false;
   }
   String host = ep.substring(0, colon);
   uint16_t port = (uint16_t)ep.substring(colon + 1).toInt();
   if (port == 0) {
-    Serial.printf("[wg] up: endpoint port unparsable (%s)\n",
+    log_d("[wg] up: endpoint port unparsable (%s)",
                   ep.c_str());
     return false;
   }
   IPAddress devIp;
   if (!devIp.fromString(ip)) {
-    Serial.printf("[wg] up: assigned ip unparsable (%s)\n",
+    log_d("[wg] up: assigned ip unparsable (%s)",
                   ip.c_str());
     return false;
   }
@@ -395,7 +395,7 @@ bool WireguardService::up(const String& serverPublicKey,
   bool ok = g_wg.begin(devIp, subnet, gateway,
                         _state.priv_key.c_str(), WG_MTU);
   if (!ok) {
-    Serial.println("[wg] up: WireGuard.begin() failed");
+    log_e("[wg] up: WireGuard.begin() failed");
     return false;
   }
   IPAddress allowAddr(devIp[0], devIp[1], devIp[2], 0);
@@ -405,12 +405,12 @@ bool WireguardService::up(const String& serverPublicKey,
                      &allowAddr, &allowMask, /*allowedCount=*/1,
                      /*keep_alive=*/25);
   if (!ok) {
-    Serial.println("[wg] up: WireGuard.addPeer() failed");
+    log_e("[wg] up: WireGuard.addPeer() failed");
     g_wg.end();
     return false;
   }
-  Serial.printf("[wg] up: tunnel started, devIp=%s/24 peer=%s:%u "
-                "allowed=%s/24 keepalive=25s\n",
+  log_i("[wg] up: tunnel started, devIp=%s/24 peer=%s:%u "
+                "allowed=%s/24 keepalive=25s",
                 ip.c_str(), host.c_str(), (unsigned)port,
                 allowAddr.toString().c_str());
   update([](WireguardSettings& s) {
@@ -423,7 +423,7 @@ bool WireguardService::up(const String& serverPublicKey,
   }, "wg.up");
   return true;
 #else
-  Serial.println("[wg] up: lib not linked — STUB mode. Returning "
+  log_d("[wg] up: lib not linked — STUB mode. Returning "
                   "false so caller surfaces the failure clearly.");
   return false;
 #endif
@@ -433,7 +433,7 @@ void WireguardService::down() {
 #if HAVE_WIREGUARD_LIB
   if (g_wg.is_initialized()) {
     g_wg.end();
-    Serial.println("[wg] down: tunnel stopped");
+    log_d("[wg] down: tunnel stopped");
   }
 #endif
   update([](WireguardSettings& s) {
@@ -450,13 +450,13 @@ void WireguardService::down() {
 
 void WireguardService::ensureKeypair() {
   if (_state.priv_key.length() > 0 && _state.pub_key.length() > 0) {
-    Serial.printf("[wg] keypair already present, pub=%s\n",
+    log_i("[wg] keypair already present, pub=%s",
                   _state.pub_key.c_str());
     return;
   }
   String priv, pub;
   if (!generateKeypair(priv, pub)) {
-    Serial.println("[wg] keypair generation FAILED — tunnel will "
+    log_e("[wg] keypair generation FAILED — tunnel will "
                     "stay unavailable until next boot");
     return;
   }
@@ -465,7 +465,7 @@ void WireguardService::ensureKeypair() {
     s.pub_key  = pub;
     return StateUpdateResult::CHANGED;
   }, "wg.keygen");
-  Serial.printf("[wg] generated new Curve25519 keypair, pub=%s\n",
+  log_i("[wg] generated new Curve25519 keypair, pub=%s",
                 pub.c_str());
 }
 
@@ -494,12 +494,12 @@ bool WireguardService::generateKeypair(String& outPrivB64,
     if (mbedtls_ctr_drbg_seed(&drbg, mbedtls_entropy_func, &entropy,
                                 (const unsigned char*)pers,
                                 strlen(pers)) != 0) {
-      Serial.println("[wg.keygen] drbg seed failed");
+      log_e("[wg.keygen] drbg seed failed");
       break;
     }
     if (mbedtls_ecp_group_load(&kp.MBEDTLS_PRIVATE(grp),
                                  MBEDTLS_ECP_DP_CURVE25519) != 0) {
-      Serial.println("[wg.keygen] curve25519 group load failed");
+      log_e("[wg.keygen] curve25519 group load failed");
       break;
     }
     if (mbedtls_ecp_gen_keypair(&kp.MBEDTLS_PRIVATE(grp),
@@ -507,21 +507,21 @@ bool WireguardService::generateKeypair(String& outPrivB64,
                                   &kp.MBEDTLS_PRIVATE(Q),
                                   mbedtls_ctr_drbg_random,
                                   &drbg) != 0) {
-      Serial.println("[wg.keygen] gen_keypair failed");
+      log_e("[wg.keygen] gen_keypair failed");
       break;
     }
     // Export private scalar (little-endian for x25519, but mbedtls
     // stores it big-endian internally). We need the wire format.
     if (mbedtls_mpi_write_binary_le(&kp.MBEDTLS_PRIVATE(d),
                                        priv_raw, 32) != 0) {
-      Serial.println("[wg.keygen] priv export failed");
+      log_e("[wg.keygen] priv export failed");
       break;
     }
     // The X coordinate of Q is the public key, little-endian.
     if (mbedtls_mpi_write_binary_le(
             &kp.MBEDTLS_PRIVATE(Q).MBEDTLS_PRIVATE(X),
             pub_raw, 32) != 0) {
-      Serial.println("[wg.keygen] pub export failed");
+      log_e("[wg.keygen] pub export failed");
       break;
     }
     ok = true;

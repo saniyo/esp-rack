@@ -678,13 +678,10 @@ inline void ConfigManager::discoverSecretKeysFromForm(ConfigDescriptor<T>& desc)
   walkAndCollectSecrets(rootC, desc.secretKeys);
 
   if (!desc.secretKeys.empty()) {
-    Serial.print(F("[cfg] discovered "));
-    Serial.print(desc.secretKeys.size());
-    Serial.print(F(" secret keys for "));
-    Serial.print(desc.id);
-    Serial.print(F(":"));
-    for (const String& k : desc.secretKeys) { Serial.print(' '); Serial.print(k); }
-    Serial.println();
+    String joined;
+    for (const String& k : desc.secretKeys) { joined += ' '; joined += k; }
+    log_i("[cfg] discovered %u secret keys for %s:%s",
+          (unsigned)desc.secretKeys.size(), desc.id, joined.c_str());
   }
 }
 

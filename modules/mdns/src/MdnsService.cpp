@@ -136,7 +136,7 @@ void MdnsService::registerManifest(WebManager* web) {
       self->_browseCache   = std::move(all);
       self->_browseCacheMs = millis();
       self->_browseTaskRunning = false;
-      Serial.printf("[mdns] browse task done: %u cached entry(ies)\n",
+      log_i("[mdns] browse task done: %u cached entry(ies)",
                     (unsigned)self->_browseCache.size());
       vTaskDelete(NULL);
     }, "mdns-browse", 4096, this, 1, nullptr);
@@ -178,7 +178,7 @@ void MdnsService::loop() {
     // next reconnect re-init the responder; without this, a 30s WiFi
     // outage leaves us silent on the LAN forever.
     if (WiFi.status() != WL_CONNECTED) {
-      Serial.println("[mdns] WiFi dropped — marking responder inactive");
+      log_d("[mdns] WiFi dropped — marking responder inactive");
       _active = false;
       _lastInitAttemptMs = 0;
     }
@@ -199,7 +199,7 @@ void MdnsService::loop() {
     return;
   }
   _lastInitAttemptMs = now;
-  Serial.printf("[mdns] WiFi up at %s — initialising responder\n",
+  log_i("[mdns] WiFi up at %s — initialising responder",
                 ip.toString().c_str());
   initResponder();
 }
@@ -223,7 +223,7 @@ bool MdnsService::initResponder() {
   if (!MDNS.begin(_hostname.c_str())) {
     _active = false;
     if (_initBackoffMs < 30000) _initBackoffMs *= 2;
-    Serial.printf("[mdns] MDNS.begin('%s') failed; retry in %u ms\n",
+    log_e("[mdns] MDNS.begin('%s') failed; retry in %u ms",
                   _hostname.c_str(), (unsigned)_initBackoffMs);
     return false;
   }
@@ -242,14 +242,14 @@ bool MdnsService::initResponder() {
 
   _active        = true;
   _initBackoffMs = 2000;  // reset backoff for the next re-init pass
-  Serial.printf("[mdns] active as %s.local + _esprack._tcp:80\n",
+  log_d("[mdns] active as %s.local + _esprack._tcp:80",
                 _hostname.c_str());
   return true;
 }
 
 IPAddress MdnsService::resolveHost(const String& host, uint32_t timeout_ms) {
   if (!_active) {
-    Serial.printf("[mdns] resolveHost('%s'): responder inactive\n",
+    log_d("[mdns] resolveHost('%s'): responder inactive",
                   host.c_str());
     return IPAddress((uint32_t)0);
   }
@@ -261,7 +261,7 @@ IPAddress MdnsService::resolveHost(const String& host, uint32_t timeout_ms) {
   }
   uint32_t t0 = millis();
   IPAddress ip = MDNS.queryHost(name.c_str(), timeout_ms);
-  Serial.printf("[mdns] resolveHost('%s' -> '%s'): %s (took %u ms)\n",
+  log_d("[mdns] resolveHost('%s' -> '%s'): %s (took %u ms)",
                 host.c_str(), name.c_str(),
                 ip == IPAddress((uint32_t)0) ? "MISS" : ip.toString().c_str(),
                 (unsigned)(millis() - t0));
@@ -274,7 +274,7 @@ MdnsService::browseService(const String& service,
                             uint32_t timeout_ms) {
   std::vector<ServiceEntry> out;
   if (!_active) {
-    Serial.printf("[mdns] browseService('%s.%s'): responder inactive\n",
+    log_d("[mdns] browseService('%s.%s'): responder inactive",
                   service.c_str(), proto.c_str());
     return out;
   }
@@ -288,7 +288,7 @@ MdnsService::browseService(const String& service,
   // arduino-esp32 queryService blocks ~3s synchronously regardless
   // of the timeout we'd like to apply, so we just take what it gives.
   (void)timeout_ms;
-  Serial.printf("[mdns] browseService('%s.%s'): %d instance(s) in %u ms\n",
+  log_d("[mdns] browseService('%s.%s'): %d instance(s) in %u ms",
                 svc.c_str(), pr.c_str(), n,
                 (unsigned)(millis() - t0));
   for (int i = 0; i < n; ++i) {

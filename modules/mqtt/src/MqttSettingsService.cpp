@@ -107,8 +107,8 @@ MqttSettingsService::MqttSettingsService(ConfigManager* cfgMgr)
                                   std::placeholders::_6));
 
   addUpdateHandler([this](const String& origin) {
-    Serial.printf("[mqtt.upd] origin='%s' enabled=%d connected=%d snifferOn=%d "
-                  "attached.size=%u\n",
+    log_i("[mqtt.upd] origin='%s' enabled=%d connected=%d snifferOn=%d "
+                  "attached.size=%u",
                   origin.c_str(), (int)_state.enabled, (int)_mqttClient.connected(),
                   (int)_state.snifferEnabled,
                   (unsigned)_state.attachedTopics.size());
@@ -126,7 +126,7 @@ MqttSettingsService::MqttSettingsService(ConfigManager* cfgMgr)
     // this gate, every form save (including a sniffer flip or a
     // selected_topic change) would bounce the connection.
     if (transportDiffersFromSnapshot()) {
-      Serial.println("[mqtt.upd] transport changed -> reconfigure");
+      log_d("[mqtt.upd] transport changed -> reconfigure");
       onConfigUpdated();
     }
     _cfg.saveIfChanged(origin);
@@ -162,14 +162,14 @@ void MqttSettingsService::registerManifest(WebManager* web) {
     String t;
     if (r->hasArg("topic")) t = r->arg("topic");
     else                     t = _state.selectedTopic;
-    Serial.printf("[mqtt.attach] req topic-arg='%s' (hasArg=%d) state.selectedTopic='%s' params=%d\n",
+    log_d("[mqtt.attach] req topic-arg='%s' (hasArg=%d) state.selectedTopic='%s' params=%d",
                   t.c_str(), (int)r->hasArg("topic"), _state.selectedTopic.c_str(), r->params());
     // Dump every param the request carried so we can see exactly what
     // ActionField shipped (helps when query-string interpolation
     // misfires due to formState gap).
     for (size_t i = 0; i < r->params(); ++i) {
       const auto* p = r->getParam(i);
-      Serial.printf("[mqtt.attach]   param[%u] %s='%s'\n",
+      log_d("[mqtt.attach]   param[%u] %s='%s'",
                     (unsigned)i, p->name().c_str(), p->value().c_str());
     }
     t.trim();
@@ -189,7 +189,7 @@ void MqttSettingsService::registerManifest(WebManager* web) {
     String t;
     if (r->hasArg("topic")) t = r->arg("topic");
     else                     t = _state.selectedTopic;
-    Serial.printf("[mqtt.detach] req topic-arg='%s' (hasArg=%d)\n",
+    log_d("[mqtt.detach] req topic-arg='%s' (hasArg=%d)",
                   t.c_str(), (int)r->hasArg("topic"));
     t.trim();
     detachTopic(t);
@@ -312,7 +312,7 @@ void MqttSettingsService::registerManifest(WebManager* web) {
         row["value"] = val;  // empty if no message yet (broker has nothing retained)
       }
     }
-    Serial.printf("[mqtt.formBuild] attached_topics_view emitted %u rows (state=%u)\n",
+    log_d("[mqtt.formBuild] attached_topics_view emitted %u rows (state=%u)",
                   attRows.size(), (unsigned)s.attachedTopics.size());
   };
 
@@ -335,7 +335,7 @@ void MqttSettingsService::begin() {
   _state.clientId = DeviceIdentity::canonical();
 
   if (_state.enabled) {
-    Serial.println(F("MQTT is enabled, configuring..."));
+    log_d("MQTT is enabled, configuring...");
     configureMqtt();
   }
 
@@ -376,8 +376,8 @@ AsyncMqttClient* MqttSettingsService::getMqttClient() {
 
 /* ---------- mqtt callbacks ---------- */
 void MqttSettingsService::onMqttConnect(bool sessionPresent) {
-  Serial.print(F("Connected to MQTT, "));
-  Serial.println(sessionPresent ? F("with persistent session") : F("without persistent session"));
+  log_d("Connected to MQTT, ");
+  log_d("%s", sessionPresent ? "with persistent session" : "without persistent session");
 
   refreshRuntime();
 
@@ -417,8 +417,7 @@ void MqttSettingsService::onMqttConnect(bool sessionPresent) {
 }
 
 void MqttSettingsService::onMqttDisconnect(AsyncMqttClientDisconnectReason reason) {
-  Serial.print(F("Disconnected from MQTT reason: "));
-  Serial.println((uint8_t)reason);
+  log_w("[mqtt] disconnected reason=%u", (uint8_t)reason);
 
   _state.disconnectReason = (uint8_t)reason;
   _disconnectedAt = millis();
@@ -695,13 +694,13 @@ void MqttSettingsService::onConfigUpdated() {
 #ifdef ESP32
 void MqttSettingsService::onStationModeGotIP(WiFiEvent_t event, WiFiEventInfo_t info) {
   if (_state.enabled) {
-    Serial.println(F("WiFi connected, starting MQTT client."));
+    log_i("WiFi connected, starting MQTT client.");
     onConfigUpdated();
   }
 }
 void MqttSettingsService::onStationModeDisconnected(WiFiEvent_t event, WiFiEventInfo_t info) {
   if (_state.enabled) {
-    Serial.println(F("WiFi dropped, stopping MQTT client."));
+    log_d("WiFi dropped, stopping MQTT client.");
     onConfigUpdated();
   }
 }
@@ -719,7 +718,7 @@ void MqttSettingsService::configureMqtt() {
   _mqttClient.disconnect();
 
   if (_state.enabled && WiFi.isConnected()) {
-    Serial.println(F("Connecting to MQTT..."));
+    log_d("Connecting to MQTT...");
     _mqttClient.setServer(retainCstr(_state.host.c_str(), &_retainedHost), _state.port);
 
     if (_state.username.length() > 0) {
@@ -827,7 +826,7 @@ void MqttSettingsService::applySnifferDiff() {
 
 void MqttSettingsService::applyAttachedTopicsDiff() {
   if (!_mqttClient.connected()) {
-    Serial.printf("[mqtt.attDiff] not connected, skip (want=%u applied=%u)\n",
+    log_w("[mqtt.attDiff] not connected, skip (want=%u applied=%u)",
                   (unsigned)_state.attachedTopics.size(),
                   (unsigned)_attachedApplied.size());
     return;
@@ -839,7 +838,7 @@ void MqttSettingsService::applyAttachedTopicsDiff() {
     for (const auto& a : _attachedApplied) { if (a == t) { already = true; break; } }
     if (!already && t.length() > 0) {
       uint16_t pid = _mqttClient.subscribe(t.c_str(), 0);
-      Serial.printf("[mqtt.attDiff] subscribe '%s' pid=%u\n", t.c_str(), pid);
+      log_d("[mqtt.attDiff] subscribe '%s' pid=%u", t.c_str(), pid);
       _attachedApplied.push_back(t);
     }
   }
@@ -854,11 +853,11 @@ void MqttSettingsService::applyAttachedTopicsDiff() {
       next.push_back(a);
     } else if (a.length() > 0) {
       uint16_t pid = _mqttClient.unsubscribe(a.c_str());
-      Serial.printf("[mqtt.attDiff] unsubscribe '%s' pid=%u\n", a.c_str(), pid);
+      log_d("[mqtt.attDiff] unsubscribe '%s' pid=%u", a.c_str(), pid);
     }
   }
   _attachedApplied = std::move(next);
-  Serial.printf("[mqtt.attDiff] done, want=%u applied=%u\n",
+  log_i("[mqtt.attDiff] done, want=%u applied=%u",
                 (unsigned)_state.attachedTopics.size(),
                 (unsigned)_attachedApplied.size());
 }
@@ -915,26 +914,26 @@ void MqttSettingsService::markPendingSeen(const String& topic) {
 /* ---------- attach / detach actions ---------- */
 void MqttSettingsService::attachTopic(const String& topic) {
   if (topic.isEmpty()) {
-    Serial.println("[mqtt.attach] EARLY-RETURN: topic empty");
+    log_d("[mqtt.attach] EARLY-RETURN: topic empty");
     return;
   }
   if (topic.length() > 256) {
-    Serial.printf("[mqtt.attach] EARLY-RETURN: topic too long (%u chars)\n", topic.length());
+    log_d("[mqtt.attach] EARLY-RETURN: topic too long (%u chars)", topic.length());
     return;
   }
   if (_state.attachedTopics.size() >= MQTT_ATTACHED_TOPICS_MAX) {
-    Serial.printf("[mqtt.attach] EARLY-RETURN: at cap (%u/%u)\n",
+    log_d("[mqtt.attach] EARLY-RETURN: at cap (%u/%u)",
                   (unsigned)_state.attachedTopics.size(), (unsigned)MQTT_ATTACHED_TOPICS_MAX);
     return;
   }
   for (const auto& t : _state.attachedTopics) {
     if (t == topic) {
-      Serial.printf("[mqtt.attach] EARLY-RETURN: already attached '%s'\n", topic.c_str());
+      log_i("[mqtt.attach] EARLY-RETURN: already attached '%s'", topic.c_str());
       return;
     }
   }
 
-  Serial.printf("[mqtt.attach] mutating state with '%s' (current size=%u)\n",
+  log_d("[mqtt.attach] mutating state with '%s' (current size=%u)",
                 topic.c_str(), (unsigned)_state.attachedTopics.size());
 
   // Mutate via the StatefulService update API so persistence + WS
@@ -947,7 +946,7 @@ void MqttSettingsService::attachTopic(const String& topic) {
     return StateUpdateResult::CHANGED;
   }, "attach");
 
-  Serial.printf("[mqtt.attach] post-update size=%u, last='%s'\n",
+  log_d("[mqtt.attach] post-update size=%u, last='%s'",
                 (unsigned)_state.attachedTopics.size(),
                 _state.attachedTopics.empty() ? "" : _state.attachedTopics.back().c_str());
 }

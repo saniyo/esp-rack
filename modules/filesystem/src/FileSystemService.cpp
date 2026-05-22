@@ -454,7 +454,7 @@ void FileSystemService::handleUpload(AsyncWebServerRequest* request,
       return;
     }
     _uploadTarget = target;
-    Serial.printf("[upload] start: %s\n", target.c_str());
+    log_d("[upload] start: %s", target.c_str());
 
     // Optional integrity validation (opt-in via headers).
     _expectedSha256 = toLowerHex(headerValue(request, "X-File-SHA256"));
@@ -479,7 +479,7 @@ void FileSystemService::handleUpload(AsyncWebServerRequest* request,
       if (_uploadTarget != capturedTarget) {
         return;  // happy-path post-success disconnect; stay silent
       }
-      Serial.printf("[upload] disconnect (interrupted): %s\n", capturedTarget.c_str());
+      log_d("[upload] disconnect (interrupted): %s", capturedTarget.c_str());
 
       if (_uploadFile) _uploadFile.close();
       if (_sha256CtxInit) {
@@ -492,7 +492,7 @@ void FileSystemService::handleUpload(AsyncWebServerRequest* request,
       String partial = capturedTarget + ".partial";
       _manager->remove(partial, false);
       FsResult rr = _manager->rename(capturedTarget, partial);
-      Serial.printf("[upload] salvage rename %s -> .partial : %s\n",
+      log_d("[upload] salvage rename %s -> .partial : %s",
                     capturedTarget.c_str(), FileSystemManager::resultString(rr));
     });
   }
@@ -567,7 +567,7 @@ void FileSystemService::handleUploadDone(AsyncWebServerRequest* request) {
   // Safety net: if the multipart parser handed us back without ever calling
   // handleUpload with final=true, _uploadTarget will still be set. Salvage.
   if (_uploadTarget.length() > 0) {
-    Serial.printf("[upload] done-without-final, salvaging: %s\n", _uploadTarget.c_str());
+    log_i("[upload] done-without-final, salvaging: %s", _uploadTarget.c_str());
     if (_uploadFile) _uploadFile.close();
     if (_sha256CtxInit) {
       mbedtls_sha256_free(&_sha256Ctx);
@@ -577,7 +577,7 @@ void FileSystemService::handleUploadDone(AsyncWebServerRequest* request) {
     String partial = _uploadTarget + ".partial";
     _manager->remove(partial, false);
     FsResult rr = _manager->rename(_uploadTarget, partial);
-    Serial.printf("[upload] safety-net rename: %s\n", FileSystemManager::resultString(rr));
+    log_d("[upload] safety-net rename: %s", FileSystemManager::resultString(rr));
     _uploadTarget = "";
     sendError(request, 500, "incomplete_upload");
     return;
@@ -690,9 +690,9 @@ void FileSystemService::handleFormat(AsyncWebServerRequest* request, JsonVariant
   BaseType_t r = xTaskCreatePinnedToCore(
       [](void* arg) {
         auto* be = static_cast<FileSystemBackend*>(arg);
-        Serial.printf("[fs] format task started for volume='%s'\n", be->name());
+        log_i("[fs] format task started for volume='%s'", be->name());
         bool ok = be->format();
-        Serial.printf("[fs] format task done, ok=%d\n", (int)ok);
+        log_i("[fs] format task done, ok=%d", (int)ok);
         vTaskDelete(nullptr);
       },
       "fs_format",
@@ -738,7 +738,7 @@ void FileSystemService::handleUnmount(AsyncWebServerRequest* request, JsonVarian
   if (!target->isMounted()) { sendError(request, 200, "already_unmounted"); return; }
 
   target->unmount();
-  Serial.printf("[FS] volume '%s' unmounted — safe to remove\n", volume);
+  log_i("[FS] volume '%s' unmounted — safe to remove", volume);
 
   DynamicJsonDocument doc(32);
   doc["ok"] = true;
@@ -798,7 +798,7 @@ static void archiveWalkerTask(void* arg) {
   using S = FileSystemService::ArchiveJob::State;
   auto* job = static_cast<FileSystemService::ArchiveJob*>(arg);
 
-  Serial.printf("[fs] archive walker started for '%s'\n", job->path.c_str());
+  log_i("[fs] archive walker started for '%s'", job->path.c_str());
 
   // Strip "/<volume>/" prefix to get path inside the backend's fs.
   String full = job->path;
@@ -877,7 +877,7 @@ static void archiveWalkerTask(void* arg) {
 
   job->totalBytes = totalBytes;
   job->state = S::Ready;
-  Serial.printf("[fs] archive walker done: %u entries, %u bytes\n",
+  log_i("[fs] archive walker done: %u entries, %u bytes",
                 (unsigned)job->entries.size(), (unsigned)totalBytes);
 
 cleanup:
@@ -1032,7 +1032,7 @@ static void hashTask(void* arg) {
   using S = FileSystemService::HashJob::State;
   auto* job = static_cast<FileSystemService::HashJob*>(arg);
 
-  Serial.printf("[fs] hash task started for '%s'\n", job->path.c_str());
+  log_i("[fs] hash task started for '%s'", job->path.c_str());
 
   if (!job->fs) {
     job->error = "no_fs";
@@ -1092,7 +1092,7 @@ static void hashTask(void* arg) {
   job->sha256Hex = sha256ToHex(out);
   job->crc32Hex = crc32ToHex(crc);
   job->state = S::Done;
-  Serial.printf("[fs] hash done: sha=%s crc=%s\n", job->sha256Hex.c_str(), job->crc32Hex.c_str());
+  log_i("[fs] hash done: sha=%s crc=%s", job->sha256Hex.c_str(), job->crc32Hex.c_str());
   vTaskDelete(nullptr);
 }
 

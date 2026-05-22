@@ -148,18 +148,22 @@ void TelegramService::registerManifest(WebManager* web) {
     }
   };
 
-  // 24k REST buffer — earlier 12KB was on the edge once the chat log
-  // saturated, leading to silent JSON truncation that made the
-  // Status tab hang in "Loading…" forever after a few service
-  // sends filled the log. 24KB leaves comfortable headroom for log
-  // (capped at 30 rows) + subs table + settings form. WS stays at
-  // 8k since it pushes only status+log (no subs), and is throttled
-  // by the action cadence anyway.
+  // 8k REST buffer — measured form payload with empty log + no subs
+  // is 1.8 KB; a fully-saturated 30-row log + handful of subs lands
+  // around 5-6 KB worst case. Was 24576, which on ESP32-C3 with
+  // active WiFi+TLS exceeds the max-contiguous-alloc window (typical
+  // ~19 KB after Wi-Fi/lwIP/AsyncWebServer/mTLS populate). Old
+  // failure mode: ArduinoJson silently left the doc uninitialised,
+  // setLength() serialised the null variant as literal "null", UI
+  // showed "Loading…" forever after Save. New behaviour: if 8K still
+  // can't allocate under extreme pressure, HttpEndpoint's OOM guard
+  // returns 503 → useRest surfaces a snackbar error rather than
+  // permanently spinning. WS stays 8K (status+log only, no subs).
   _feature = web->registerFeature<TelegramSettings>(
       std::move(spec), this,
       fullReader,                 TelegramSettings::upd,
       TelegramSettings::staRead,  TelegramSettings::staUpd,
-      24576, 8192);
+      8192, 8192);
 }
 
 void TelegramService::begin() {

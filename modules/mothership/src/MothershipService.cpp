@@ -32,7 +32,10 @@ void MothershipSettings::readConfig(MothershipSettings& s, JsonObject& root) {
 StateUpdateResult MothershipSettings::update(JsonObject& root,
                                               MothershipSettings& s) {
   bool ch = false;
-  ch |= FormBuilder::updateValue(root, "enabled",        s.enabled);
+  // `enabled` retired — see header comment. Force-pin to true on
+  // every save so legacy `{"enabled":false}` POSTs from saved-state
+  // JSON or external callers can't accidentally disable the module.
+  if (!s.enabled) { s.enabled = true; ch = true; }
   ch |= FormBuilder::updateValue(root, "interval_s",     s.interval_s);
 
   // Backward-compat migration: existing /config/mothership.json from
@@ -113,23 +116,24 @@ void MothershipSettings::buildForm(MothershipSettings& s, JsonObject& root) {
                               icon("ErrorOutline"));
 
   // ── SETTINGS ─────────────────────────────────────────────────────
+  // One unified tab — was split into "settings" + "profiles" before
+  // May 2026, but the split forced operators to flip tabs while
+  // wiring up a fresh device (set the URL on one tab, switch active
+  // profile on the other). Everything an operator might want to
+  // edit lives here now; status read-outs stay on the Status tab.
   JsonArray set = FormBuilder::createForm(root, "settings",
                                            "Mothership client config");
-  FormBuilder::addSwitchField(set, "enabled", AF::RW, s.enabled,
-                              label("Enabled"), icon("PowerSettingsNew"));
+  // No on/off toggle — including the module IS the on-switch.
+  // See MothershipSettings::enabled doc for the rationale.
   FormBuilder::addNumberField(set, "interval_s", AF::RW,
                               (double)s.interval_s,
                               minVal(5), maxVal(3600), format("0"),
                               label("Check-in interval"),
                               icon("Timer"), unit("s"));
-
-  // ── PROFILES ─────────────────────────────────────────────────────
-  JsonArray pf = FormBuilder::createForm(root, "profiles",
-                                          "Mothership profiles");
   // Dropdown — literal labels, integer values. Frontend can fancy up
   // the display (slot + URL) if needed; the form-build path stays
   // loop-free.
-  FormBuilder::addDropdownField(pf, "active_idx", AF::RW,
+  FormBuilder::addDropdownField(set, "active_idx", AF::RW,
                                 (int)s.active_idx,
                                 opt("Profile 1", 0),
                                 opt("Profile 2", 1),
@@ -143,18 +147,18 @@ void MothershipSettings::buildForm(MothershipSettings& s, JsonObject& root) {
   // which is exactly why typing into Profile 1's name field made
   // Profile 2's name field appear to change too. Unrolled, slot
   // count = 2 baked into the form shape.
-  FormBuilder::addTextField(pf, "profile_0_name", AF::RW,
+  FormBuilder::addTextField(set, "profile_0_name", AF::RW,
                             s.profile_a.name.c_str(),
                             label("Profile 1 name"), icon("Label"));
-  FormBuilder::addTextField(pf, "profile_0_url", AF::RW,
+  FormBuilder::addTextField(set, "profile_0_url", AF::RW,
                             s.profile_a.base_url.c_str(),
                             label("Profile 1 base URL"),
                             placeholder("https://host:8443"),
                             icon("Cloud"));
-  FormBuilder::addTextField(pf, "profile_1_name", AF::RW,
+  FormBuilder::addTextField(set, "profile_1_name", AF::RW,
                             s.profile_b.name.c_str(),
                             label("Profile 2 name"), icon("Label"));
-  FormBuilder::addTextField(pf, "profile_1_url", AF::RW,
+  FormBuilder::addTextField(set, "profile_1_url", AF::RW,
                             s.profile_b.base_url.c_str(),
                             label("Profile 2 base URL"),
                             placeholder("https://host:8443"),
@@ -243,23 +247,30 @@ void MothershipService::registerManifest(WebManager* web) {
   settingsTab.order    = 20;
   spec.tabs.push_back(settingsTab);
 
-  WebTabSpec profilesTab;
-  profilesTab.key      = "profiles";
-  profilesTab.title    = "Profiles";
-  profilesTab.restPath = MOTHERSHIP_FORM_PATH;
-  profilesTab.postable = true;
-  profilesTab.auth     = WebAuthLevel::Admin;
-  profilesTab.order    = 30;
-  spec.tabs.push_back(profilesTab);
+  // Profiles tab folded into Settings (May 2026) — operator no longer
+  // bounces between tabs while configuring a fresh device.
 
   // Two-arg overload uses the same reader/updater for REST only —
   // no separate WS variant because there's no WS subscription
   // (status tab is live=false). 16 KB REST buffer covers all three
   // sections comfortably.
+  // bufferSize chosen against the actual GET payload (~1.3 KB) with
+  // 3× headroom. Was 16384, which on ESP32-C3 with WiFi+TLS sessions
+  // active routinely exceeds the largest contiguous heap block (max
+  // free alloc hovers around 19 KB after AsyncWebServer + lwIP + TLS
+  // contexts populate). AsyncJsonResponse's underlying ArduinoJson
+  // DynamicJsonDocument silently leaves the document uninitialised
+  // when its internal malloc fails, and the subsequent setLength()
+  // serialises the null variant as the literal string "null". The
+  // POST handler then returned 200 with body "null" — useRest's
+  // setData(null) on the client wiped formData and parked every tab
+  // on FormLoader's "Loading…" spinner. 4 KB sits comfortably inside
+  // any plausible max-alloc window and matches what cert-manager
+  // (8 KB) and similar feature endpoints use.
   _feature = web->registerFeature<MothershipSettings>(
       std::move(spec), this,
       MothershipSettings::buildForm,  MothershipSettings::update,
-      16384);
+      4096);
 }
 
 void MothershipService::begin() {
@@ -287,7 +298,7 @@ void MothershipService::begin() {
         &_task,
         tskNO_AFFINITY);
     if (rc != pdPASS) {
-      Serial.printf("[mship.begin] xTaskCreate failed: %d\n", (int)rc);
+      log_e("[mship.begin] xTaskCreate failed: %d", (int)rc);
       _task = nullptr;
     }
   }
@@ -319,7 +330,7 @@ void MothershipService::checkinTaskTramp(void* arg) {
 }
 
 void MothershipService::runCheckinLoop() {
-  Serial.println("[mship] check-in task started");
+  log_i("[mship] check-in task started");
   uint32_t loopIter = 0;
 
   while (true) {
@@ -333,8 +344,8 @@ void MothershipService::runCheckinLoop() {
     // Diagnostic every 6 iterations (=30s) so we can see the task
     // is alive and what's gating it. Also fires immediately at iter 1.
     if (loopIter == 1 || (loopIter % 6) == 0) {
-      Serial.printf("[mship.loop iter=%u] enabled=%d hasCert=%d wifi=%d "
-                    "wantTick=%d nextAt=%u nowAt=%u active='%s'\n",
+      log_d("[mship.loop iter=%u] enabled=%d hasCert=%d wifi=%d "
+                    "wantTick=%d nextAt=%u nowAt=%u active='%s'",
                     (unsigned)loopIter, (int)en, (int)hasC, (int)wlan,
                     (int)wantTick,
                     (unsigned)_state.next_checkin_at_s,
@@ -457,32 +468,32 @@ bool MothershipService::performOneCheckin(bool& outBurst) {
   // each heap pointer it sees. Both pointers are guaranteed non-null
   // by the early-returns below, so the diagnostic info wasn't pulling
   // weight anyway.
-  Serial.printf("[mship.do] enter — url-len=%u\n",
+  log_d("[mship.do] enter — url-len=%u",
                 (unsigned)checkin_url.length());
   if (!_tls || !_cert) {
-    Serial.println("[mship.do] EARLY: missing tls or cert provider");
+    log_d("[mship.do] EARLY: missing tls or cert provider");
     return false;
   }
   if (checkin_url.length() == 0) {
-    Serial.println("[mship.do] EARLY: no active mothership profile");
+    log_d("[mship.do] EARLY: no active mothership profile");
     return false;
   }
 
   WiFiClientSecure client;
-  Serial.println("[mship.do] step1: attachToClient");
+  log_d("[mship.do] step1: attachToClient");
   _tls->attachToClient(client);
   client.setHandshakeTimeout(15);
   client.setTimeout(15000);
-  Serial.println("[mship.do] step2: timeouts set");
+  log_d("[mship.do] step2: timeouts set");
 
   HTTPClient http;
-  Serial.printf("[mship.do] step3: http.begin(%s)\n",
+  log_d("[mship.do] step3: http.begin(%s)",
                 checkin_url.c_str());
   if (!http.begin(client, checkin_url)) {
-    Serial.println("[mship.do] EARLY: http.begin failed");
+    log_e("[mship.do] EARLY: http.begin failed");
     return false;
   }
-  Serial.println("[mship.do] step4: http.begin OK");
+  log_i("[mship.do] step4: http.begin OK");
   http.setTimeout(15000);
   http.addHeader("Content-Type", "application/json");
 
@@ -555,7 +566,7 @@ bool MothershipService::performOneCheckin(bool& outBurst) {
         0xffffffff,
         reinterpret_cast<const uint8_t*>(serialised.c_str()),
         serialised.length());
-    Serial.printf("[mship.do] manifest_rev computed = 0x%08x (%u B)\n",
+    log_d("[mship.do] manifest_rev computed = 0x%08x (%u B)",
                   (unsigned)cached_manifest_rev,
                   (unsigned)serialised.length());
   }
@@ -592,37 +603,37 @@ bool MothershipService::performOneCheckin(bool& outBurst) {
       _resultRing.pop_front();
       emitted++;
     }
-    Serial.printf("[mship.do] emitting %u action_results (%u left in ring)\n",
+    log_d("[mship.do] emitting %u action_results (%u left in ring)",
                   (unsigned)emitted, (unsigned)_resultRing.size());
   }
 
   String body;
   serializeJson(req, body);
 
-  Serial.printf("[mship] POST %s, body=%u B\n",
+  log_d("[mship] POST %s, body=%u B",
                 checkin_url.c_str(),
                 (unsigned)body.length());
 
   int code = http.POST(body);
-  Serial.printf("[mship] HTTP code=%d\n", code);
+  log_d("[mship] HTTP code=%d", code);
 
   if (code < 200 || code >= 300) {
     String err = http.getString();
-    Serial.printf("[mship] server error: %s\n", err.c_str());
+    log_w("[mship] server error: %s", err.c_str());
     http.end();
     return false;
   }
 
   String respBody = http.getString();
   http.end();
-  Serial.printf("[mship] response %u B\n", (unsigned)respBody.length());
+  log_d("[mship] response %u B", (unsigned)respBody.length());
 
   // Response: {"actions": [...], "nextCheckInSec": N}
   // 16 KB doc — actions can carry firmware URLs / WireGuard configs.
   DynamicJsonDocument resp(16384);
   DeserializationError jerr = deserializeJson(resp, respBody);
   if (jerr) {
-    Serial.printf("[mship] JSON parse: %s\n", jerr.c_str());
+    log_e("[mship] JSON parse: %s", jerr.c_str());
     return false;
   }
 
@@ -675,7 +686,7 @@ bool MothershipService::dispatchActions(JsonArrayConst actions) {
       // the ring with setCadence acks and starve the actually-useful
       // chunks (manifest fragments, config.dump body) of ring space.
       result = actionSetCadence(params);
-      Serial.printf("[mship.action] setCadence → %s (silent, no ring push)\n",
+      log_d("[mship.action] setCadence → %s (silent, no ring push)",
                     result.c_str());
       any = true;
       continue;
@@ -684,7 +695,7 @@ bool MothershipService::dispatchActions(JsonArrayConst actions) {
       // config.dump pushes its own (large) result; skip the generic
       // pushActionResult below — same pattern as rest.proxy.
       result = actionConfigDump(params, reqId);
-      Serial.printf("[mship.action] config.dump → %s\n", result.c_str());
+      log_d("[mship.action] config.dump → %s", result.c_str());
       any = true;
       continue;
     }
@@ -697,7 +708,7 @@ bool MothershipService::dispatchActions(JsonArrayConst actions) {
       result = actionRestProxy(params, reqId);
       // Skip the generic pushActionResult below — rest.proxy
       // pushed a richer entry (with full response body) on its own.
-      Serial.printf("[mship.action] rest.proxy → %s\n", result.c_str());
+      log_d("[mship.action] rest.proxy → %s", result.c_str());
       any = true;
       continue;
     }
@@ -711,7 +722,7 @@ bool MothershipService::dispatchActions(JsonArrayConst actions) {
     if (status == 200 && result.startsWith("no "))      status = 503;
     if (status == 200 && result.indexOf("failed") >= 0) status = 500;
 
-    Serial.printf("[mship.action] %s → %s (status=%d)\n",
+    log_d("[mship.action] %s → %s (status=%d)",
                   type.c_str(), result.c_str(), status);
 
     // Only push if the action carried a reqId — the operator paths
@@ -732,7 +743,7 @@ void MothershipService::pushActionResult(const String& reqId,
   // Fits single chunk → push one entry with chunk_total=1.
   if (summary.length() <= MAX_CHUNK_BYTES) {
     if (_resultRing.size() >= RESULT_RING_CAP) {
-      Serial.printf("[mship.result] ring full, dropping head reqId=%s\n",
+      log_d("[mship.result] ring full, dropping head reqId=%s",
                     _resultRing.front().reqId.c_str());
       _resultRing.pop_front();
     }
@@ -754,18 +765,18 @@ void MothershipService::pushActionResult(const String& reqId,
     // chunk_total is uint8_t in the wire shape; refuse payloads
     // bigger than 255 × 1 KB = ~256 KB. Manifests are well under
     // this; if a future use case needs more, bump to uint16_t.
-    Serial.printf("[mship.result] payload too big (%u B), dropping reqId=%s\n",
+    log_d("[mship.result] payload too big (%u B), dropping reqId=%s",
                   (unsigned)summary.length(), reqId.c_str());
     pushActionResult(reqId, 500,
                       String("{\"error\":\"payload_too_big\",\"bytes\":") +
                           summary.length() + "}");
     return;
   }
-  Serial.printf("[mship.result] chunking reqId=%s into %u chunks (%u B total)\n",
+  log_d("[mship.result] chunking reqId=%s into %u chunks (%u B total)",
                 reqId.c_str(), (unsigned)total, (unsigned)summary.length());
   for (size_t i = 0; i < total; ++i) {
     if (_resultRing.size() >= RESULT_RING_CAP) {
-      Serial.printf("[mship.result] ring full mid-split, dropping head reqId=%s\n",
+      log_d("[mship.result] ring full mid-split, dropping head reqId=%s",
                     _resultRing.front().reqId.c_str());
       _resultRing.pop_front();
     }
@@ -792,7 +803,7 @@ String MothershipService::actionUpdate(JsonObjectConst params) {
   // dispatcher path works.
   String url = params["url"].as<String>();
   if (url.length() == 0) return "missing url";
-  Serial.printf("[mship.action.update] would download %s\n", url.c_str());
+  log_d("[mship.action.update] would download %s", url.c_str());
   return "deferred to phase 2.5";
 }
 
@@ -861,7 +872,7 @@ String MothershipService::actionSetConfig(JsonObjectConst params) {
   // log the requested key/value and skip apply.
   String key = params["key"].as<String>();
   String val = params["value"].as<String>();
-  Serial.printf("[mship.action.setConfig] %s = %s (skipped)\n",
+  log_w("[mship.action.setConfig] %s = %s (skipped)",
                 key.c_str(), val.c_str());
   return "ack-only";
 }
@@ -882,7 +893,7 @@ String MothershipService::actionReboot(JsonObjectConst params) {
   // returned), nothing on this side needs to flush. The browser
   // sees TCP-RST on its open WS sockets, exactly the same as on
   // any other reset path.
-  Serial.println("[mship.action.reboot] esp_restart()");
+  log_d("[mship.action.reboot] esp_restart()");
   Serial.flush();
   esp_restart();   // does not return
   return "rebooting";
@@ -893,7 +904,7 @@ String MothershipService::actionLog(JsonObjectConst params) {
   // probes from server-side admin without needing remote shell.
   String level = params["level"].as<String>();
   String msg   = params["msg"].as<String>();
-  Serial.printf("[mship.log][%s] %s\n",
+  log_d("[mship.log][%s] %s",
                 level.length() ? level.c_str() : "info",
                 msg.c_str());
   return "logged";
@@ -976,7 +987,7 @@ String MothershipService::actionRestProxy(JsonObjectConst params,
   serializeJson(respDoc, bodyOut);
   pushActionResult(reqId, out_status, bodyOut);
 
-  Serial.printf("[mship.proxy] %s %s → %d (%u B)\n",
+  log_d("[mship.proxy] %s %s → %d (%u B)",
                 method.c_str(), path.c_str(), out_status,
                 (unsigned)bodyOut.length());
   return String("proxy ") + out_status;
@@ -1018,7 +1029,7 @@ String MothershipService::actionSetCadence(JsonObjectConst params) {
       s.cadence_override_period_s = 0;
       return StateUpdateResult::CHANGED;
     }, "mship.cadence-clear");
-    Serial.println("[mship.cadence] cleared override");
+    log_d("[mship.cadence] cleared override");
     // Wake the check-in task so it re-evaluates its sleep loop —
     // the next iteration uses the default interval. Without the
     // notify the operator would wait up to current-period seconds
@@ -1040,7 +1051,7 @@ String MothershipService::actionSetCadence(JsonObjectConst params) {
     }
     return StateUpdateResult::CHANGED;
   }, "mship.cadence-set");
-  Serial.printf("[mship.cadence] override period=%ds, ttl=%ds\n",
+  log_d("[mship.cadence] override period=%ds, ttl=%ds",
                 period, ttl);
   if (_task) xTaskNotifyGive(_task);
   return String("set period=") + period + " ttl=" + ttl;
@@ -1085,7 +1096,7 @@ String MothershipService::actionConfigDump(JsonObjectConst params,
   String body;
   serializeJson(dumpDoc, body);
   pushActionResult(reqId, 200, body);
-  Serial.printf("[mship.config.dump] packed %u B\n", (unsigned)body.length());
+  log_d("[mship.config.dump] packed %u B", (unsigned)body.length());
   return String("dumped ") + body.length() + " B";
 }
 
@@ -1097,13 +1108,13 @@ String MothershipService::actionConfigRestore(JsonObjectConst params) {
     return "missing or empty params.configs";
   }
   size_t written = mgr->restoreAll(configs);
-  Serial.printf("[mship.config.restore] wrote %u config files\n",
+  log_d("[mship.config.restore] wrote %u config files",
                 (unsigned)written);
   if (written == 0) return "no_entries_matched";
   // Schedule a reboot so each service's begin() picks up the new
   // primary files cleanly. Half-second delay lets the action result
   // land in the ring before the inline esp_restart() fires.
-  Serial.println("[mship.config.restore] rebooting in 500ms");
+  log_d("[mship.config.restore] rebooting in 500ms");
   vTaskDelay(pdMS_TO_TICKS(500));
   esp_restart();
   return "rebooting";   // unreached

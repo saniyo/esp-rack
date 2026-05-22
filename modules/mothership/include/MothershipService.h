@@ -70,7 +70,14 @@ struct MothershipProfile {
 
 struct MothershipSettings {
   // ── Persisted config ──
-  bool     enabled{false};
+  // `enabled` retired May 2026 — once an operator wired the module
+  // into Builder, they want it active. The runtime toggle was a UX
+  // trap: disabling it silently kept cert-manager polling /enroll
+  // (which logically also belongs to the mothership relationship),
+  // so "off" wasn't truly off. The field is kept default-true and
+  // hidden from the form schema for backward-compat with on-disk
+  // /config/mothership.json blobs from older firmware.
+  bool     enabled{true};
   // Check-in cadence in SECONDS. The readback / update path in
   // MothershipService.cpp migrates the legacy `interval_min` field
   // (minutes) on first boot after upgrade so devices with an older

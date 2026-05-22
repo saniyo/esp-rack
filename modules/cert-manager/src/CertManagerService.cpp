@@ -43,12 +43,17 @@ void CertManagerSettings::readConfig(CertManagerSettings& s, JsonObject& root) {
   root["not_after_ts"]  = s.not_after_ts;
 
   root["recovery_token"]  = s.recovery_token;
+  // bootstrap_token PERSISTS now — survives reboot until single-use
+  // wipe lands on first successful enrollment. Encrypted on disk via
+  // SecretsVault (buildForm marks it as a secret field).
+  root["bootstrap_token"] = s.bootstrap_token;
   root["pki_base_url"]    = s.pki_base_url;
-  root["auto_enroll"]     = s.auto_enroll;
-  // bootstrap_token intentionally omitted — never persists.
-  // recover_url is NOT a separate field on this branch — it derives
-  // from effectiveRecoverUrl() (= pki_base_url + /api/v1/recover, or
-  // falls back to the active Mothership profile's recoverUrl).
+  // auto-enroll runs unconditionally now (post d3caf86 model): when
+  // state != Ready, begin() spawns a polling task that hits /enroll
+  // with the canonical deviceId as the identity claim. No toggle.
+  // recover_url is NOT a separate field — derives from
+  // effectiveRecoverUrl() (pki_base_url + /api/v1/recover, falling
+  // back to the active Mothership profile's recoverUrl).
 }
 
 StateUpdateResult CertManagerSettings::update(JsonObject& root,
@@ -87,20 +92,18 @@ StateUpdateResult CertManagerSettings::update(JsonObject& root,
   setIfNonEmpty("device_key_pem",  s.device_key_pem);
   setIfNonEmpty("ca_bundle_pem",   s.ca_bundle_pem);
   setIfNonEmpty("recovery_token",  s.recovery_token);
+  // bootstrap_token uses the same secret-safe pattern as PEM fields:
+  // boot-path JSON has the encrypted-then-decrypted value → adopt;
+  // form-POST path either omits the key (AF::R) or echoes the same
+  // plaintext (no-op). The ONLY path that wipes the token to empty
+  // is the runEnrollmentLoop success branch (single-use semantics).
+  setIfNonEmpty("bootstrap_token", s.bootstrap_token);
 
   // ── Plain non-sensitive housekeeping ──
   ch |= FormBuilder::updateValue(root, "serial_hex",      s.serial_hex);
   ch |= FormBuilder::updateValue(root, "subject_cn",      s.subject_cn);
   ch |= FormBuilder::updateValue(root, "not_after_ts",    s.not_after_ts);
   ch |= FormBuilder::updateValue(root, "pki_base_url",    s.pki_base_url);
-  ch |= FormBuilder::updateValue(root, "auto_enroll",     s.auto_enroll);
-
-  // Bootstrap token IS the only secret field that the form is
-  // EXPECTED to mutate (operator types it during enrollment). Plain
-  // updateValue here so empty submits genuinely clear it (e.g. the
-  // success path explicitly wipes via runEnrollment, but operator
-  // could also clear by hand).
-  ch |= FormBuilder::updateValue(root, "bootstrap_token", s.bootstrap_token);
 
   return ch ? StateUpdateResult::CHANGED : StateUpdateResult::UNCHANGED;
 }
@@ -148,42 +151,53 @@ void CertManagerSettings::buildForm(CertManagerSettings& s, JsonObject& root) {
   }
 
   // ── ENROLLMENT ─────────────────────────────────────────────────────
-  // Operator-driven first-time provisioning. Bootstrap token is
-  // single-use-time-bound: server admin UI generates it (24h TTL),
-  // operator copies → pastes here → Enroll. Token never persists to
-  // disk (NOT in readConfig); cleared after successful enroll.
+  // Auto-polling status view. begin() spawns a permanent FreeRTOS
+  // task whenever state != Ready; the task hits /enroll on a 30s
+  // cadence using the canonical deviceId as the identity claim.
+  // No operator action required for the happy path — once the
+  // operator clicks Approve on the mothership admin page (or path 2
+  // matches a baked-in bootstrap_token, or path 3 finds the device
+  // in EXPECTED_DEVICES) the next poll lands a signed cert and the
+  // state transitions to Ready. The three read-only fields below
+  // show what's being sent and what the server most recently said.
   JsonArray en = FormBuilder::createForm(root, "enrollment",
-                                          "Provision device with mothership");
+                                          "Auto-enrollment status");
 
   FormBuilder::addMessageField(en, "m_enroll_help",
-      "First-time setup: generate a bootstrap token in the mothership "
-      "admin UI (valid 24 hours), paste it below, click Enroll. The "
-      "device will generate a keypair, send a CSR to the mothership, "
-      "and store the signed certificate. After successful enrollment "
-      "this tab can be ignored — the device authenticates via mTLS.",
+      "The device auto-polls the mothership's /enroll endpoint on a "
+      "30s cadence and waits for one of three approval paths:\n"
+      "  1. Bootstrap token (below) matches → instant auto-trust\n"
+      "  2. deviceId is on the mothership's EXPECTED_DEVICES list → "
+      "instant auto-trust\n"
+      "  3. Operator manually approves from the pending list (grey "
+      "zone) on the mothership admin page",
       level("info"), icon("Info"));
 
+  // Read-only telemetry — populated by runEnrollmentLoop on every
+  // poll round-trip. Operator can refresh the form to see "Polls
+  // since boot" tick up, confirming the device is alive.
+  FormBuilder::addTextField(en, "device_id", AF::R,
+                            DeviceIdentity::canonical().c_str(),
+                            label("Device ID (sent to mothership)"),
+                            icon("Fingerprint"));
+  FormBuilder::addNumberField(en, "enroll_poll_count", AF::R,
+                              (double)s.enroll_poll_count, format("0"),
+                              label("Polls since boot"), icon("Loop"));
+  FormBuilder::addTextField(en, "enroll_last_reason", AF::R,
+                            s.enroll_last_reason.c_str(),
+                            label("Last server reply"),
+                            icon("Info"));
+
+  // One-time bootstrap token — persisted secret. Operator can paste
+  // a token here to trigger server's path 2 fast-path; on successful
+  // enrollment the field is wiped both in RAM and on disk (single-
+  // use semantics). FACTORY_CERT_BOOTSTRAP_TOKEN build-flag bakes a
+  // default into firmware for fleet-wide auto-provision.
   FormBuilder::addSecretField(en, "bootstrap_token", AF::RW,
                               s.bootstrap_token.c_str(),
-                              label("Bootstrap token"),
-                              placeholder("Paste token from mothership admin UI"),
+                              label("Bootstrap token (one-time, optional)"),
+                              placeholder("blank = wait for operator approval"),
                               icon("VpnKey"));
-
-  // Enroll action — Phase 1.2 stub. POSTs the bootstrap_token via
-  // withFields query param to the action endpoint; service-side
-  // handler kicks off the enrollment flow (currently logs token and
-  // flips state to Enrolling for one tick, then back to Failed with
-  // a placeholder error — actual CSR + HTTPS POST in Phase 1.5).
-  FormBuilder::addActionField(en, "enroll", "Enroll", AF::RW,
-                              actionRef("cert.enroll"),
-                              withFields("token=bootstrap_token"),
-                              icon("Send"), color("primary"), refetchForm());
-
-  FormBuilder::addMessageField(en, "m_enroll_warn",
-      "If the device is already enrolled (state=Ready), running Enroll "
-      "again will OVERWRITE the existing cert+key. Use only for first "
-      "setup or after factory reset.",
-      level("warning"), icon("Warning"));
 
   // ── SETTINGS ────────────────────────────────────────────────────────
   // PKI endpoint override. Empty (default) → cert-manager follows the
@@ -199,10 +213,6 @@ void CertManagerSettings::buildForm(CertManagerSettings& s, JsonObject& root) {
                             label("PKI Base URL (optional override)"),
                             placeholder("https://ca.example.com:8443"),
                             icon("Cloud"));
-
-  FormBuilder::addSwitchField(set, "auto_enroll", AF::RW, s.auto_enroll,
-                              label("Auto-enroll on boot"),
-                              icon("AutoMode"));
 
   // ── RECOVERY ────────────────────────────────────────────────────────
   // Phase 4b — gray-zone recovery. Operator-triggered (UI button)
@@ -322,38 +332,12 @@ CertManagerService::CertManagerService(ConfigManager* cfgMgr,
 void CertManagerService::registerManifest(WebManager* web) {
   if (!web) return;
 
-  // Enroll action — Phase 1.2 stub. Triggered by the "Enroll"
-  // button in the Enrollment tab; reads bootstrap_token from the
-  // request query (sent via withFields), kicks off enrollment.
-  // Phase 1.5 will replace the stub body with real CSR generation
-  // + HTTPS POST to the mothership /enroll endpoint.
-  WebActionSpec enrollAct;
-  enrollAct.id              = "cert.enroll";
-  enrollAct.title           = "Enroll";
-  enrollAct.icon            = "Send";
-  enrollAct.color           = "primary";
-  enrollAct.auth            = WebAuthLevel::Admin;
-  enrollAct.successMessage  = "Enrollment kicked off";
-  enrollAct.handler = [this](AsyncWebServerRequest* r) {
-    String tok;
-    if (r->hasArg("token")) tok = r->arg("token");
-    tok.trim();
-    Serial.printf("[cert.enroll] req token-len=%u, state=%u\n",
-                  (unsigned)tok.length(),
-                  (unsigned)_state.runtime_state);
-    if (tok.length() == 0) {
-      r->send(400, "application/json",
-              "{\"ok\":false,\"err\":\"empty bootstrap token\"}");
-      return;
-    }
-    if (!kickEnrollment(tok)) {
-      r->send(409, "application/json",
-              "{\"ok\":false,\"err\":\"enrollment already in progress\"}");
-      return;
-    }
-    r->send(200, "application/json", "{\"ok\":true}");
-  };
-  web->registerAction(enrollAct);
+  // No operator-triggered enrollment action — the auto-poll task
+  // spawned in begin() handles everything. Operator can paste a
+  // bootstrap token in the Enrollment tab → Save persists it
+  // (SecretsVault-encrypted) → next poll picks it up via the
+  // setIfNonEmpty refresh in update(). On Approved the loop wipes
+  // the token from state AND from disk (single-use semantics).
 
   // Phase 4b — gray-zone recovery trigger. UI button on the
   // Recovery tab kicks off the polling task. Body-less POST; the
@@ -458,14 +442,24 @@ void CertManagerService::begin() {
   // updateClientCert (client identity); attachToClient binds both.
   if (_tls && _state.ca_bundle_pem.length() > 0) {
     _tls->loadCaChain(_state.ca_bundle_pem);
-    Serial.printf("[cert.begin] loaded CA bundle (%u B) into TLS context\n",
-                  (unsigned)_state.ca_bundle_pem.length());
+    log_i("[cert.begin] loaded CA bundle (%u B) into TLS context",
+          (unsigned)_state.ca_bundle_pem.length());
   }
   if (_tls && hasValidCert()) {
     _tls->updateClientCert(_state.device_cert_pem, _state.device_key_pem);
-    Serial.printf("[cert.begin] loaded client cert (%u B) + key (%u B) into TLS context\n",
+    log_i("[cert.begin] loaded client cert (%u B) + key (%u B) into TLS context",
                   (unsigned)_state.device_cert_pem.length(),
                   (unsigned)_state.device_key_pem.length());
+  }
+
+  // Spawn the persistent auto-enrollment task whenever we boot in
+  // a non-Ready state. The task owns its own WiFi-wait + retry
+  // cadence — no need for loop() to nudge it. Once the cert is
+  // Ready it exits and won't be respawned (the only way to re-
+  // enter NeedsEnrollment is factory-reset, which restarts).
+  if (_state.runtime_state != ICertProvider::State::Ready) {
+    log_i("[cert.begin] spawning auto-enrollment task");
+    (void)kickEnrollment();
   }
 
   if (_feature) _feature->broadcastWs("boot");
@@ -481,57 +475,15 @@ void CertManagerService::loop() {
   //   * cert genuinely past expiry → state slides into GrayZone
   //     within ~60 s of crossing the boundary (cheap, idempotent)
   //   * if recovery completes externally → status_label refreshes
-  // 60 s tick keeps the refresh cost negligible (a couple of String
-  // comparisons + an assignment per minute).
+  // 60 s tick keeps the refresh cost negligible.
   uint32_t now_ms = millis();
   if (now_ms - _lastStateRefreshMs > 60000) {
     _lastStateRefreshMs = now_ms;
     refreshRuntimeState();
   }
 
-  // Auto-enroll loop. Fires kickEnrollment("") (no Bearer token →
-  // server's path 6 parks the device in PENDING_ENROLLMENTS for
-  // operator approval) when:
-  //   * auto_enroll toggle is on (Settings tab)
-  //   * runtime_state is NeedsEnrollment OR
-  //     (Enrolling AND last attempt was >RETRY_S ago — the previous
-  //     attempt got "pending" back, we want to re-poll for approval)
-  //   * WiFi is up
-  //   * No enrollment task currently running
-  //   * Enough time elapsed since last attempt (rate-limit so we
-  //     don't spam the mothership on a tight loop).
-  //
-  // Once the operator approves on the mothership admin page, the
-  // next retry returns approved=true and the success path lands a
-  // cert → state goes Ready → this branch falls through.
-  using S = ICertProvider::State;
-  if (!_state.auto_enroll) return;
-  if (_enrollTask != nullptr) return;
-  if (!WiFi.isConnected()) return;
-
-  bool needs_attempt =
-      (_state.runtime_state == S::NeedsEnrollment) ||
-      (_state.runtime_state == S::Enrolling);
-  if (!needs_attempt) return;
-
-  // Rate-limit: 30 s between auto-attempts. Operator-initiated
-  // kickEnrollment (typed bootstrap token) bypasses this — they go
-  // through kickEnrollment directly, not through this loop.
-  static constexpr uint32_t RETRY_S = 30;
-  uint32_t now_s = (uint32_t)(millis() / 1000);
-  if (now_s < _lastAutoEnrollAttempt_s + RETRY_S
-      && _lastAutoEnrollAttempt_s != 0) {
-    return;
-  }
-  _lastAutoEnrollAttempt_s = now_s;
-
-  Serial.printf("[cert.auto-enroll] firing (state=%u)\n",
-                (unsigned)_state.runtime_state);
-  // Empty token → server's _handle_enroll path 6 (PENDING_ENROLLMENTS)
-  // unless the deviceId is in EXPECTED_DEVICES (path 3, auto-trust).
-  // kickEnrollment returns false if a task is already running, which
-  // is fine — we'll retry on the next loop iteration.
-  (void)kickEnrollment(String());
+  // Auto-enrollment lives in its own FreeRTOS task spawned by
+  // begin() — no work to do from this thread.
 }
 
 int32_t CertManagerService::daysUntilExpiry() const {
@@ -620,14 +572,14 @@ bool CertManagerService::generateEcdsaKeyPair(String& outKeyPem) {
         &drbg, mbedtls_entropy_func, &entropy,
         (const unsigned char*)pers.c_str(), pers.length());
     if (rc != 0) {
-      Serial.printf("[cert.gen] ctr_drbg_seed failed: -0x%04x\n", -rc);
+      log_e("[cert.gen] ctr_drbg_seed failed: -0x%04x", -rc);
       break;
     }
 
     rc = mbedtls_pk_setup(&pk,
         mbedtls_pk_info_from_type(MBEDTLS_PK_ECKEY));
     if (rc != 0) {
-      Serial.printf("[cert.gen] pk_setup failed: -0x%04x\n", -rc);
+      log_e("[cert.gen] pk_setup failed: -0x%04x", -rc);
       break;
     }
 
@@ -635,7 +587,7 @@ bool CertManagerService::generateEcdsaKeyPair(String& outKeyPem) {
                              mbedtls_pk_ec(pk),
                              mbedtls_ctr_drbg_random, &drbg);
     if (rc != 0) {
-      Serial.printf("[cert.gen] ecp_gen_key failed: -0x%04x\n", -rc);
+      log_e("[cert.gen] ecp_gen_key failed: -0x%04x", -rc);
       break;
     }
 
@@ -644,12 +596,12 @@ bool CertManagerService::generateEcdsaKeyPair(String& outKeyPem) {
     unsigned char pem_buf[1024];
     rc = mbedtls_pk_write_key_pem(&pk, pem_buf, sizeof(pem_buf));
     if (rc != 0) {
-      Serial.printf("[cert.gen] pk_write_key_pem failed: -0x%04x\n", -rc);
+      log_e("[cert.gen] pk_write_key_pem failed: -0x%04x", -rc);
       break;
     }
 
     outKeyPem = String((const char*)pem_buf);
-    Serial.printf("[cert.gen] keypair generated, PEM=%u B\n",
+    log_i("[cert.gen] keypair generated, PEM=%u B",
                   (unsigned)outKeyPem.length());
     ok = true;
   } while (false);
@@ -679,7 +631,7 @@ bool CertManagerService::buildCsr(const String& keyPem,
                                   String& outCsrPem) {
   outCsrPem = String();
   if (keyPem.length() == 0) {
-    Serial.println("[cert.csr] empty keyPem");
+    log_d("[cert.csr] empty keyPem");
     return false;
   }
 
@@ -702,7 +654,7 @@ bool CertManagerService::buildCsr(const String& keyPem,
         &drbg, mbedtls_entropy_func, &entropy,
         (const unsigned char*)"esprack-csr", 11);
     if (rc != 0) {
-      Serial.printf("[cert.csr] drbg seed failed: -0x%04x\n", -rc);
+      log_e("[cert.csr] drbg seed failed: -0x%04x", -rc);
       break;
     }
 
@@ -713,14 +665,14 @@ bool CertManagerService::buildCsr(const String& keyPem,
         nullptr, 0,
         mbedtls_ctr_drbg_random, &drbg);
     if (rc != 0) {
-      Serial.printf("[cert.csr] pk_parse_key failed: -0x%04x\n", -rc);
+      log_e("[cert.csr] pk_parse_key failed: -0x%04x", -rc);
       break;
     }
 
     String subject = String("CN=") + deviceSubjectCN();
     rc = mbedtls_x509write_csr_set_subject_name(&csr, subject.c_str());
     if (rc != 0) {
-      Serial.printf("[cert.csr] set_subject failed: -0x%04x\n", -rc);
+      log_e("[cert.csr] set_subject failed: -0x%04x", -rc);
       break;
     }
 
@@ -732,12 +684,12 @@ bool CertManagerService::buildCsr(const String& keyPem,
         &csr, pem_buf, sizeof(pem_buf),
         mbedtls_ctr_drbg_random, &drbg);
     if (rc != 0) {
-      Serial.printf("[cert.csr] write_csr_pem failed: -0x%04x\n", -rc);
+      log_e("[cert.csr] write_csr_pem failed: -0x%04x", -rc);
       break;
     }
 
     outCsrPem = String((const char*)pem_buf);
-    Serial.printf("[cert.csr] CSR built, PEM=%u B, subject=%s\n",
+    log_i("[cert.csr] CSR built, PEM=%u B, subject=%s",
                   (unsigned)outCsrPem.length(), subject.c_str());
     ok = true;
   } while (false);
@@ -760,33 +712,26 @@ String CertManagerService::deviceSubjectCN() const {
   return DeviceIdentity::canonical();
 }
 
-// ===== Phase 1.5 — Enrollment HTTPS POST =====
+// ===== Approval-driven enrollment loop =====
 //
-// kickEnrollment is called from the AsyncWebServer action thread —
-// we just spawn a FreeRTOS task and return. Action handler responds
-// 200 immediately so UI doesn't block on a 5-30 second handshake +
-// CSR build.
+// kickEnrollment is called from begin() (and only from begin() —
+// no operator-triggered path on this branch). The task owns the
+// whole flow: waits for WiFi + resolvable URL, generates keypair
+// + CSR once, then polls /enroll until Approved or Blacklisted.
 //
-// runEnrollment does the work in task context: keypair → CSR → POST
-// → save → state transition. Updates state via update() so each
-// transition fires WS broadcast and the operator sees live progress
-// in the UI.
+// State transitions visible to the operator via WS broadcast:
+//   NeedsEnrollment → Enrolling (first poll) → Ready (Approved)
+//                                            → EnrollmentFailed
+//                                              (Blacklisted)
+// Pending / network / server errors don't change state — they
+// just bump enroll_poll_count + enroll_last_reason so the UI
+// telemetry shows the device is alive and waiting.
 
-namespace {
-struct EnrollArg {
-  CertManagerService* svc;
-  String              token;
-};
-}  // namespace
-
-bool CertManagerService::kickEnrollment(const String& bootstrapToken) {
+bool CertManagerService::kickEnrollment() {
   if (_enrollTask != nullptr) {
-    Serial.println("[cert.enroll] task already running");
+    log_w("[cert.enroll] task already running");
     return false;
   }
-
-  // Heap-owned arg — task is responsible for freeing it.
-  auto* arg = new EnrollArg{this, bootstrapToken};
 
   // 8 KB stack — mbedtls keypair gen + CSR + HTTPS handshake +
   // ArduinoJson parsing on the same stack. ESP32 default tasks
@@ -796,14 +741,13 @@ bool CertManagerService::kickEnrollment(const String& bootstrapToken) {
       &CertManagerService::enrollTaskTramp,
       "certEnroll",
       8192,
-      arg,
+      this,
       1,
       &_enrollTask,
       tskNO_AFFINITY);
 
   if (rc != pdPASS) {
-    Serial.printf("[cert.enroll] xTaskCreate failed: %d\n", (int)rc);
-    delete arg;
+    log_e("[cert.enroll] xTaskCreate failed: %d", (int)rc);
     _enrollTask = nullptr;
     return false;
   }
@@ -819,27 +763,47 @@ bool CertManagerService::kickEnrollment(const String& bootstrapToken) {
 }
 
 void CertManagerService::enrollTaskTramp(void* arg) {
-  auto* a = static_cast<EnrollArg*>(arg);
-  if (a && a->svc) a->svc->runEnrollment(a->token);
-  if (a) delete a;
+  auto* self = static_cast<CertManagerService*>(arg);
+  if (self) self->runEnrollmentLoop();
   // Task self-destruct: clear handle BEFORE vTaskDelete so parent
-  // thread sees nullptr if it polls. The actual mutation must happen
-  // through the service so it sees nullptr too.
+  // thread sees nullptr if it polls again.
+  if (self) self->_enrollTask = nullptr;
   vTaskDelete(nullptr);
 }
 
-void CertManagerService::runEnrollment(const String& bootstrapToken) {
-  Serial.println("[cert.enroll] task start");
+void CertManagerService::runEnrollmentLoop() {
+  log_i("[cert.enroll] task start");
 
+  // Cadence — short on Pending (operator just clicks Approve and the
+  // device transitions within one cycle), longer on transient errors
+  // so we don't spam the mothership when it's down. Both fall safely
+  // inside the 60s state-refresh window in loop().
+  static constexpr uint32_t PENDING_INTERVAL_S = 30;
+  static constexpr uint32_t ERROR_INTERVAL_S   = 60;
+
+  // 1) Wait for WiFi. Cheap to busy-wait at 1 Hz; the rest of the
+  //    framework is already up by now (begin() spawned us).
+  while (!WiFi.isConnected()) {
+    vTaskDelay(pdMS_TO_TICKS(1000));
+  }
+
+  // 2) Wait for a resolvable enroll URL (Mothership profile picked).
+  while (effectiveEnrollUrl().length() == 0) {
+    log_d("[cert.enroll] waiting for enroll URL "
+                    "(pick a Mothership profile or set PKI Base URL)");
+    vTaskDelay(pdMS_TO_TICKS(5000));
+  }
+
+  // 3) Generate keypair + CSR ONCE. Reused across every poll so the
+  //    server-side cached pending request matches our final POSTed
+  //    CSR — operator's Approve click signs the very CSR they saw.
   String keyPem;
   if (!generateEcdsaKeyPair(keyPem)) {
     update([](CertManagerSettings& s) {
       s.runtime_state = ICertProvider::State::EnrollmentFailed;
       s.status_label  = "Enrollment failed: keypair generation";
-      s.bootstrap_token = String();
       return StateUpdateResult::CHANGED;
     }, "cert.enroll-fail");
-    _enrollTask = nullptr;
     return;
   }
 
@@ -848,78 +812,93 @@ void CertManagerService::runEnrollment(const String& bootstrapToken) {
     update([](CertManagerSettings& s) {
       s.runtime_state = ICertProvider::State::EnrollmentFailed;
       s.status_label  = "Enrollment failed: CSR build";
-      s.bootstrap_token = String();
       return StateUpdateResult::CHANGED;
     }, "cert.enroll-fail");
-    _enrollTask = nullptr;
     return;
   }
 
-  String certPem, caBundlePem, recoveryToken;
-  EnrollResult res = postCsrToMothership(csrPem, bootstrapToken,
-                                           certPem, caBundlePem,
-                                           recoveryToken);
-  if (res == EnrollResult::Pending) {
-    // Server parked us in its grey list — operator needs to approve
-    // on /mothership admin. Stay in Enrolling state with a clear
-    // status label; the auto-enroll loop in CertManagerService::loop
-    // will retry on its own schedule. Don't wipe bootstrap_token —
-    // operator's manual entry (if any) might still be the path that
-    // matches a later regenerate.
-    Serial.println("[cert.enroll] pending — operator approval needed");
-    update([](CertManagerSettings& s) {
-      s.runtime_state = ICertProvider::State::Enrolling;
-      s.status_label  = "Awaiting operator approval on /mothership";
+  // 4) Poll loop. Each iteration is one /enroll round-trip. The 5
+  //    EnrollResult arms drive the next delay (or exit).
+  for (;;) {
+    // Bail out if another path bumped us to Ready externally (e.g.
+    // a successful rotate during a long blacklist wait).
+    if (_state.runtime_state == ICertProvider::State::Ready) {
+      log_i("[cert.enroll] state externally Ready — exit");
+      return;
+    }
+
+    String certPem, caBundlePem, recoveryToken, reason;
+    EnrollResult res = postEnrollOnce(csrPem, certPem, caBundlePem,
+                                       recoveryToken, reason);
+
+    // Update telemetry on every round-trip.
+    update([&](CertManagerSettings& s) {
+      s.enroll_poll_count   += 1;
+      s.enroll_last_poll_s   = (uint32_t)(millis() / 1000);
+      s.enroll_last_reason   = reason;
       return StateUpdateResult::CHANGED;
-    }, "cert.enroll-pending");
-    _enrollTask = nullptr;
-    return;
-  }
-  if (res != EnrollResult::Ok) {
-    update([](CertManagerSettings& s) {
-      s.runtime_state = ICertProvider::State::EnrollmentFailed;
-      s.status_label  = "Enrollment failed: server unreachable / rejected";
-      s.bootstrap_token = String();
-      return StateUpdateResult::CHANGED;
-    }, "cert.enroll-fail");
-    _enrollTask = nullptr;
-    return;
-  }
+    }, "cert.enroll-poll");
 
-  String serialHex;
-  uint32_t notAfterTs = 0;
-  if (!parseCertMetadata(certPem, serialHex, notAfterTs)) {
-    Serial.println("[cert.enroll] WARN: cert parse failed; proceeding "
-                    "with empty serial / not_after");
-    serialHex = "";
-    notAfterTs = 0;
+    if (res == EnrollResult::Approved) {
+      String serialHex;
+      uint32_t notAfterTs = 0;
+      if (!parseCertMetadata(certPem, serialHex, notAfterTs)) {
+        log_w("[cert.enroll] WARN: cert parse failed; "
+                        "proceeding with empty serial / not_after");
+        serialHex = "";
+        notAfterTs = 0;
+      }
+
+      // Atomic write — including the single-use wipe of
+      // bootstrap_token (in RAM AND on disk, since this field is
+      // persisted now). saveIfChanged via the update-handler in
+      // the constructor commits the wipe to /config/cert.json.
+      update([&](CertManagerSettings& s) {
+        s.device_cert_pem   = certPem;
+        s.device_key_pem    = keyPem;
+        s.ca_bundle_pem     = caBundlePem;
+        s.serial_hex        = serialHex;
+        s.subject_cn        = deviceSubjectCN();
+        s.not_after_ts      = notAfterTs;
+        s.recovery_token    = recoveryToken;
+        s.bootstrap_token   = String();   // single-use → wipe
+        s.runtime_state     = ICertProvider::State::Ready;
+        s.status_label      = "Ready";
+        s.enroll_last_reason = "Approved — cert installed";
+        return StateUpdateResult::CHANGED;
+      }, "cert.enroll-ok");
+
+      // Push fresh material into the TLS context so subsequent
+      // HTTPS calls from any framework module pick up mTLS.
+      if (_tls) {
+        _tls->updateClientCert(certPem, keyPem);
+        _tls->loadCaChain(caBundlePem);
+      }
+
+      log_i("[cert.enroll] APPROVED — serial=%s, not_after=%u",
+                    serialHex.c_str(), (unsigned)notAfterTs);
+      return;
+    }
+
+    if (res == EnrollResult::Blacklisted) {
+      update([](CertManagerSettings& s) {
+        s.runtime_state = ICertProvider::State::EnrollmentFailed;
+        s.status_label  = "Blacklisted by mothership";
+        return StateUpdateResult::CHANGED;
+      }, "cert.enroll-blacklisted");
+      log_e("[cert.enroll] BLACKLISTED — exit (manual unblock "
+                      "or factory-reset required)");
+      return;
+    }
+
+    // Pending / NetworkFail / ServerError → sleep + retry.
+    uint32_t sleep_s = (res == EnrollResult::Pending)
+                        ? PENDING_INTERVAL_S
+                        : ERROR_INTERVAL_S;
+    log_d("[cert.enroll] sleep %us before next poll",
+                  (unsigned)sleep_s);
+    vTaskDelay(pdMS_TO_TICKS(sleep_s * 1000));
   }
-
-  // Atomic write through update — all fields land together.
-  update([&](CertManagerSettings& s) {
-    s.device_cert_pem  = certPem;
-    s.device_key_pem   = keyPem;
-    s.ca_bundle_pem    = caBundlePem;
-    s.serial_hex       = serialHex;
-    s.subject_cn       = deviceSubjectCN();
-    s.not_after_ts     = notAfterTs;
-    s.recovery_token   = recoveryToken;
-    s.bootstrap_token  = String();   // single-use → wipe
-    s.runtime_state    = ICertProvider::State::Ready;
-    s.status_label     = "Ready";
-    return StateUpdateResult::CHANGED;
-  }, "cert.enroll-ok");
-
-  // Push fresh material into the TLS context so subsequent HTTPS
-  // calls from any framework module pick up mTLS automatically.
-  if (_tls) {
-    _tls->updateClientCert(certPem, keyPem);
-    _tls->loadCaChain(caBundlePem);  // for Phase 2 mothership /checkin
-  }
-
-  Serial.printf("[cert.enroll] done — serial=%s, not_after=%u\n",
-                serialHex.c_str(), (unsigned)notAfterTs);
-  _enrollTask = nullptr;
 }
 
 // ===== PKI URL resolution =====
@@ -954,22 +933,33 @@ String CertManagerService::effectiveRecoverUrl() const {
   return String();
 }
 
-CertManagerService::EnrollResult CertManagerService::postCsrToMothership(
+CertManagerService::EnrollResult CertManagerService::postEnrollOnce(
     const String& csrPem,
-    const String& bootstrapToken,
     String& outCertPem,
     String& outCaBundlePem,
-    String& outRecoveryToken) {
+    String& outRecoveryToken,
+    String& outReason) {
   outCertPem = String();
   outCaBundlePem = String();
   outRecoveryToken = String();
+  outReason = String();
 
   String enroll_url = effectiveEnrollUrl();
   if (enroll_url.length() == 0) {
-    Serial.println("[cert.enroll] no enroll URL — pick a Mothership "
-                    "profile (or set PKI Base URL on the Settings tab)");
-    return EnrollResult::Failed;
+    outReason = "no enroll URL (pick a Mothership profile)";
+    log_d("[cert.enroll] %s", outReason.c_str());
+    return EnrollResult::ServerError;
   }
+
+  // Heap diagnostics before TLS — mbedtls handshake on ESP32-C3
+  // needs ~25-30 KB contiguous. Logging both free + max-alloc tells
+  // us exactly when fragmentation is about to bite. Pattern from
+  // the 17:06 OOM repro: total free ~55 KB, max-alloc ~21 KB → SSL
+  // alloc fails. If we see max-alloc dipping under ~25 KB, we know
+  // the next handshake is on borrowed time.
+  log_i("[cert.enroll] heap pre-TLS: free=%u max_alloc=%u",
+        (unsigned)ESP.getFreeHeap(),
+        (unsigned)ESP.getMaxAllocHeap());
 
   WiFiClientSecure secureClient;
   // FIRST-ENROLLMENT TLS POSTURE: we don't have a CA pinned yet
@@ -985,18 +975,22 @@ CertManagerService::EnrollResult CertManagerService::postCsrToMothership(
 
   HTTPClient http;
   if (!http.begin(secureClient, enroll_url)) {
-    Serial.println("[cert.enroll] HTTPClient.begin failed");
-    return EnrollResult::Failed;
+    outReason = "HTTPClient.begin failed";
+    log_d("[cert.enroll] %s", outReason.c_str());
+    return EnrollResult::NetworkFail;
   }
   http.setTimeout(20000);
   http.addHeader("Content-Type", "application/json");
-  // Bearer header ONLY when the caller actually has a token. Empty
-  // token = auto-enroll flow, server's path 6 parks the device in
-  // its grey list for operator approval — sending "Bearer " would
-  // trip the server's path-2 "Bearer present but invalid" 401 short-
-  // circuit and never reach the pending-park branch.
-  if (bootstrapToken.length() > 0) {
-    http.addHeader("Authorization", String("Bearer ") + bootstrapToken);
+  // Bootstrap-token fast-path (server's _handle_enroll path 2). Read
+  // straight from persisted state on every poll so a UI edit kicks
+  // in on the very next attempt. Empty → no Bearer header → server
+  // path 6 parks the request in PENDING_ENROLLMENTS for operator
+  // approval. Sending "Bearer " with empty value would trip path-2's
+  // 401 short-circuit and never reach the pending-park branch, so
+  // strict length check matters here.
+  const String& bootTok = _state.bootstrap_token;
+  if (bootTok.length() > 0) {
+    http.addHeader("Authorization", String("Bearer ") + bootTok);
   }
 
   // Body: {"deviceId": "...", "csr_pem": "...", "wg_pubkey": "..."}
@@ -1018,47 +1012,70 @@ CertManagerService::EnrollResult CertManagerService::postCsrToMothership(
   String reqBody;
   serializeJson(req, reqBody);
 
-  Serial.printf("[cert.enroll] POST %s, body=%u B\n",
+  log_d("[cert.enroll] POST %s, body=%u B, token=%s",
                 enroll_url.c_str(),
-                (unsigned)reqBody.length());
+                (unsigned)reqBody.length(),
+                bootTok.length() > 0 ? "yes" : "no");
 
   int code = http.POST(reqBody);
-  Serial.printf("[cert.enroll] HTTP code=%d\n", code);
-
-  if (code < 200 || code >= 300) {
-    String err = http.getString();
-    Serial.printf("[cert.enroll] server error: %s\n", err.c_str());
-    http.end();
-    return EnrollResult::Failed;
-  }
-
   String respBody = http.getString();
   http.end();
+  // Aggressive mbedtls teardown — `http.end()` calls client.stop()
+  // implicitly, but on arduino-esp32 there are paths (keep-alive,
+  // partial reads) where the inner WiFiClientSecure keeps its TLS
+  // context alive for the next call. Explicit .stop() forces the
+  // mbedtls scratch (16 KB tx + 16 KB rx record buffers) back into
+  // heap immediately so the next handshake doesn't compete with
+  // them for max-contiguous space.
+  secureClient.stop();
+  log_d("[cert.enroll] HTTP code=%d, body=%u B",
+                code, (unsigned)respBody.length());
+  log_d("[cert.enroll] heap post-TLS: free=%u max_alloc=%u",
+        (unsigned)ESP.getFreeHeap(),
+        (unsigned)ESP.getMaxAllocHeap());
 
-  Serial.printf("[cert.enroll] response %u B\n", (unsigned)respBody.length());
+  if (code <= 0) {
+    outReason = String("network: ") + http.errorToString(code);
+    return EnrollResult::NetworkFail;
+  }
+  if (code == 403) {
+    // Server's path 1: blacklisted. Hard stop.
+    outReason = "Blacklisted by mothership";
+    log_e("[cert.enroll] BLACKLISTED: %s", respBody.c_str());
+    return EnrollResult::Blacklisted;
+  }
+  if (code < 200 || code >= 300) {
+    outReason = String("HTTP ") + code;
+    if (respBody.length() > 0 && respBody.length() < 200) {
+      outReason += ": " + respBody;
+    }
+    log_w("[cert.enroll] server error: %s", outReason.c_str());
+    return EnrollResult::ServerError;
+  }
 
   // Response is one of:
   //   approved=true  + cert_pem + ca_bundle_pem + recovery_token
-  //       → EnrollResult::Ok, populate outputs
+  //       → EnrollResult::Approved, populate outputs
   //   approved=false + status=pending
   //       → EnrollResult::Pending, outputs stay empty; caller retries
   //   anything else
-  //       → EnrollResult::Failed
+  //       → EnrollResult::ServerError
   // 8 KB doc — cert PEM ~400 B, ca_bundle ~1.5 KB worst case, +
   // recovery_token + framing.
   DynamicJsonDocument resp(8192);
   DeserializationError jerr = deserializeJson(resp, respBody);
   if (jerr) {
-    Serial.printf("[cert.enroll] JSON parse: %s\n", jerr.c_str());
-    return EnrollResult::Failed;
+    outReason = String("JSON parse: ") + jerr.c_str();
+    log_d("[cert.enroll] %s", outReason.c_str());
+    return EnrollResult::ServerError;
   }
 
   bool approved = resp["approved"].as<bool>();
   if (!approved) {
     String status_str = resp["status"].as<String>();
-    Serial.printf("[cert.enroll] server returned approved=false "
-                  "status=%s — operator must approve on /mothership\n",
-                  status_str.c_str());
+    String msg = resp["message"].as<String>();
+    outReason = "Pending: " + (msg.length() ? msg : status_str);
+    log_d("[cert.enroll] PENDING — %s", outReason.c_str());
     return EnrollResult::Pending;
   }
 
@@ -1067,14 +1084,16 @@ CertManagerService::EnrollResult CertManagerService::postCsrToMothership(
   outRecoveryToken  = resp["recovery_token"].as<String>();
 
   if (outCertPem.length() == 0 || outCaBundlePem.length() == 0) {
-    Serial.println("[cert.enroll] response missing cert_pem / ca_bundle_pem");
-    return EnrollResult::Failed;
+    outReason = "missing cert_pem / ca_bundle_pem in response";
+    log_d("[cert.enroll] %s", outReason.c_str());
+    return EnrollResult::ServerError;
   }
-  Serial.printf("[cert.enroll] parsed cert=%u ca=%u recovery=%u B\n",
+  outReason = "Approved";
+  log_i("[cert.enroll] APPROVED — cert=%u ca=%u recovery=%u B",
                 (unsigned)outCertPem.length(),
                 (unsigned)outCaBundlePem.length(),
                 (unsigned)outRecoveryToken.length());
-  return EnrollResult::Ok;
+  return EnrollResult::Approved;
 }
 
 // ===== Phase 4a — Proactive cert rotation =====
@@ -1105,16 +1124,16 @@ struct RotateArg {
 
 bool CertManagerService::rotate(const String& renewUrl) {
   if (_rotateTask != nullptr) {
-    Serial.println("[cert.rotate] already running");
+    log_w("[cert.rotate] already running");
     return false;
   }
   if (!hasValidCert()) {
-    Serial.println("[cert.rotate] no current cert — cannot rotate "
+    log_e("[cert.rotate] no current cert — cannot rotate "
                     "via mTLS; full re-enroll required");
     return false;
   }
   if (renewUrl.length() == 0) {
-    Serial.println("[cert.rotate] empty renewUrl");
+    log_d("[cert.rotate] empty renewUrl");
     return false;
   }
 
@@ -1129,7 +1148,7 @@ bool CertManagerService::rotate(const String& renewUrl) {
       tskNO_AFFINITY);
 
   if (rc != pdPASS) {
-    Serial.printf("[cert.rotate] xTaskCreate failed: %d\n", (int)rc);
+    log_e("[cert.rotate] xTaskCreate failed: %d", (int)rc);
     delete arg;
     _rotateTask = nullptr;
     return false;
@@ -1155,11 +1174,11 @@ void CertManagerService::rotateTaskTramp(void* arg) {
 }
 
 void CertManagerService::runRotation(const String& renewUrl) {
-  Serial.printf("[cert.rotate] task start, url=%s\n", renewUrl.c_str());
+  log_i("[cert.rotate] task start, url=%s", renewUrl.c_str());
 
   String newKeyPem;
   if (!generateEcdsaKeyPair(newKeyPem)) {
-    Serial.println("[cert.rotate] FAIL: keypair gen");
+    log_e("[cert.rotate] FAIL: keypair gen");
     update([](CertManagerSettings& s) {
       s.runtime_state = ICertProvider::State::Ready;  // back to Ready, old cert intact
       s.status_label  = "Ready";
@@ -1171,7 +1190,7 @@ void CertManagerService::runRotation(const String& renewUrl) {
 
   String newCsrPem;
   if (!buildCsr(newKeyPem, newCsrPem)) {
-    Serial.println("[cert.rotate] FAIL: CSR build");
+    log_e("[cert.rotate] FAIL: CSR build");
     update([](CertManagerSettings& s) {
       s.runtime_state = ICertProvider::State::Ready;
       s.status_label  = "Ready";
@@ -1183,7 +1202,7 @@ void CertManagerService::runRotation(const String& renewUrl) {
 
   String newCertPem, newCaBundlePem;
   if (!postCsrToRenew(newCsrPem, renewUrl, newCertPem, newCaBundlePem)) {
-    Serial.println("[cert.rotate] FAIL: server unreachable / rejected");
+    log_e("[cert.rotate] FAIL: server unreachable / rejected");
     update([](CertManagerSettings& s) {
       s.runtime_state = ICertProvider::State::Ready;
       s.status_label  = "Ready (last rotate failed)";
@@ -1196,7 +1215,7 @@ void CertManagerService::runRotation(const String& renewUrl) {
   String newSerialHex;
   uint32_t newNotAfterTs = 0;
   if (!parseCertMetadata(newCertPem, newSerialHex, newNotAfterTs)) {
-    Serial.println("[cert.rotate] WARN: cert parse failed; "
+    log_w("[cert.rotate] WARN: cert parse failed; "
                     "proceeding with empty serial / notAfter");
     newSerialHex = "";
     newNotAfterTs = 0;
@@ -1224,7 +1243,7 @@ void CertManagerService::runRotation(const String& renewUrl) {
     _tls->loadCaChain(newCaBundlePem);
   }
 
-  Serial.printf("[cert.rotate] done — new serial=%s, not_after=%u\n",
+  log_i("[cert.rotate] done — new serial=%s, not_after=%u",
                 newSerialHex.c_str(), (unsigned)newNotAfterTs);
   _rotateTask = nullptr;
 }
@@ -1261,11 +1280,11 @@ struct RecoveryArg {
 
 bool CertManagerService::beginRecovery() {
   if (_state.recovery_token.length() == 0) {
-    Serial.println("[cert.recover] no recovery_token — full re-enroll required");
+    log_e("[cert.recover] no recovery_token — full re-enroll required");
     return false;
   }
   if (effectiveRecoverUrl().length() == 0) {
-    Serial.println("[cert.recover] no recover URL — pick a Mothership "
+    log_e("[cert.recover] no recover URL — pick a Mothership "
                     "profile (or set PKI Base URL on the Settings tab)");
     return false;
   }
@@ -1276,7 +1295,7 @@ bool CertManagerService::beginRecovery() {
   // task's notification value; the poll loop's
   // ulTaskNotifyTake-with-timeout returns early on the bump.
   if (_recoveryTask != nullptr) {
-    Serial.println("[cert.recover] task already running — waking up for early poll");
+    log_w("[cert.recover] task already running — waking up for early poll");
     xTaskNotifyGive(_recoveryTask);
     return true;
   }
@@ -1292,7 +1311,7 @@ bool CertManagerService::beginRecovery() {
       tskNO_AFFINITY);
 
   if (rc != pdPASS) {
-    Serial.printf("[cert.recover] xTaskCreate failed: %d\n", (int)rc);
+    log_e("[cert.recover] xTaskCreate failed: %d", (int)rc);
     delete arg;
     _recoveryTask = nullptr;
     return false;
@@ -1315,7 +1334,7 @@ void CertManagerService::recoveryTaskTramp(void* arg) {
 }
 
 void CertManagerService::runRecoveryLoop() {
-  Serial.println("[cert.recover] task start");
+  log_i("[cert.recover] task start");
 
   // Poll until approved. Each poll iteration generates a NEW keypair
   // + CSR — the device commits to a private key only when an
@@ -1332,14 +1351,14 @@ void CertManagerService::runRecoveryLoop() {
       // Sleep is interruptible via xTaskNotifyGive — operator
       // clicking Trigger Recovery again wakes us up immediately
       // so a URL fix can be tested without waiting full 60s.
-      Serial.println("[cert.recover] poll failed, will retry");
+      log_e("[cert.recover] poll failed, will retry");
       ulTaskNotifyTake(pdTRUE,
           pdMS_TO_TICKS(RECOVERY_POLL_INTERVAL_S * 1000));
       continue;
     }
 
     if (!approved) {
-      Serial.println("[cert.recover] still pending operator approval");
+      log_w("[cert.recover] still pending operator approval");
       ulTaskNotifyTake(pdTRUE,
           pdMS_TO_TICKS(RECOVERY_POLL_INTERVAL_S * 1000));
       continue;
@@ -1362,8 +1381,8 @@ void CertManagerService::runRecoveryLoop() {
     // the CSR alongside the pending request. Next iteration the
     // server-side memory model can persist that CSR but for now
     // we persist the keypair ON DEVICE in a member.
-    Serial.printf("[cert.recover] approved — applying new cert "
-                  "(%u B), ca (%u B)\n",
+    log_i("[cert.recover] approved — applying new cert "
+                  "(%u B), ca (%u B)",
                   (unsigned)certPem.length(),
                   (unsigned)caBundlePem.length());
 
@@ -1393,7 +1412,7 @@ void CertManagerService::runRecoveryLoop() {
     // Wipe candidate from memory — applied to disk now.
     _candidateKeyPem = String();
 
-    Serial.printf("[cert.recover] done — serial=%s\n", serialHex.c_str());
+    log_i("[cert.recover] done — serial=%s", serialHex.c_str());
     _recoveryTask = nullptr;
     return;
   }
@@ -1412,7 +1431,7 @@ bool CertManagerService::postRecoveryRequest(String& outCertPem,
   // can swap in. Cleared after successful apply.
   if (_candidateKeyPem.length() == 0) {
     if (!generateEcdsaKeyPair(_candidateKeyPem)) {
-      Serial.println("[cert.recover] keypair gen failed");
+      log_e("[cert.recover] keypair gen failed");
       _candidateKeyPem = String();
       return false;
     }
@@ -1420,7 +1439,7 @@ bool CertManagerService::postRecoveryRequest(String& outCertPem,
 
   String csrPem;
   if (!buildCsr(_candidateKeyPem, csrPem)) {
-    Serial.println("[cert.recover] CSR build failed");
+    log_e("[cert.recover] CSR build failed");
     return false;
   }
 
@@ -1434,12 +1453,12 @@ bool CertManagerService::postRecoveryRequest(String& outCertPem,
 
   String recover_url = effectiveRecoverUrl();
   if (recover_url.length() == 0) {
-    Serial.println("[cert.recover] no recover URL at request time");
+    log_e("[cert.recover] no recover URL at request time");
     return false;
   }
   HTTPClient http;
   if (!http.begin(client, recover_url)) {
-    Serial.println("[cert.recover] http.begin failed");
+    log_e("[cert.recover] http.begin failed");
     return false;
   }
   http.setTimeout(20000);
@@ -1453,16 +1472,16 @@ bool CertManagerService::postRecoveryRequest(String& outCertPem,
   String reqBody;
   serializeJson(req, reqBody);
 
-  Serial.printf("[cert.recover] POST %s, body=%u B\n",
+  log_d("[cert.recover] POST %s, body=%u B",
                 recover_url.c_str(),
                 (unsigned)reqBody.length());
 
   int code = http.POST(reqBody);
-  Serial.printf("[cert.recover] HTTP code=%d\n", code);
+  log_d("[cert.recover] HTTP code=%d", code);
 
   if (code < 200 || code >= 300) {
     String err = http.getString();
-    Serial.printf("[cert.recover] server error: %s\n", err.c_str());
+    log_w("[cert.recover] server error: %s", err.c_str());
     http.end();
     return false;
   }
@@ -1473,7 +1492,7 @@ bool CertManagerService::postRecoveryRequest(String& outCertPem,
   DynamicJsonDocument resp(8192);
   DeserializationError jerr = deserializeJson(resp, respBody);
   if (jerr) {
-    Serial.printf("[cert.recover] JSON parse: %s\n", jerr.c_str());
+    log_e("[cert.recover] JSON parse: %s", jerr.c_str());
     return false;
   }
 
@@ -1482,7 +1501,7 @@ bool CertManagerService::postRecoveryRequest(String& outCertPem,
     outCertPem     = resp["cert_pem"].as<String>();
     outCaBundlePem = resp["ca_bundle_pem"].as<String>();
     if (outCertPem.length() == 0 || outCaBundlePem.length() == 0) {
-      Serial.println("[cert.recover] approved=true but cert/ca missing");
+      log_e("[cert.recover] approved=true but cert/ca missing");
       outApproved = false;
       return false;
     }
@@ -1498,7 +1517,7 @@ bool CertManagerService::postCsrToRenew(const String& csrPem,
   outCaBundlePem = String();
 
   if (!_tls) {
-    Serial.println("[cert.rotate] no TLS provider");
+    log_e("[cert.rotate] no TLS provider");
     return false;
   }
 
@@ -1512,7 +1531,7 @@ bool CertManagerService::postCsrToRenew(const String& csrPem,
 
   HTTPClient http;
   if (!http.begin(client, renewUrl)) {
-    Serial.println("[cert.rotate] http.begin failed");
+    log_e("[cert.rotate] http.begin failed");
     return false;
   }
   http.setTimeout(20000);
@@ -1525,15 +1544,15 @@ bool CertManagerService::postCsrToRenew(const String& csrPem,
   String reqBody;
   serializeJson(req, reqBody);
 
-  Serial.printf("[cert.rotate] POST %s, body=%u B\n",
+  log_d("[cert.rotate] POST %s, body=%u B",
                 renewUrl.c_str(), (unsigned)reqBody.length());
 
   int code = http.POST(reqBody);
-  Serial.printf("[cert.rotate] HTTP code=%d\n", code);
+  log_d("[cert.rotate] HTTP code=%d", code);
 
   if (code < 200 || code >= 300) {
     String err = http.getString();
-    Serial.printf("[cert.rotate] server error: %s\n", err.c_str());
+    log_w("[cert.rotate] server error: %s", err.c_str());
     http.end();
     return false;
   }
@@ -1544,7 +1563,7 @@ bool CertManagerService::postCsrToRenew(const String& csrPem,
   DynamicJsonDocument resp(8192);
   DeserializationError jerr = deserializeJson(resp, respBody);
   if (jerr) {
-    Serial.printf("[cert.rotate] JSON parse: %s\n", jerr.c_str());
+    log_e("[cert.rotate] JSON parse: %s", jerr.c_str());
     return false;
   }
 
@@ -1552,10 +1571,10 @@ bool CertManagerService::postCsrToRenew(const String& csrPem,
   outCaBundlePem = resp["ca_bundle_pem"].as<String>();
 
   if (outCertPem.length() == 0 || outCaBundlePem.length() == 0) {
-    Serial.println("[cert.rotate] response missing cert / ca");
+    log_e("[cert.rotate] response missing cert / ca");
     return false;
   }
-  Serial.printf("[cert.rotate] parsed cert=%u ca=%u B\n",
+  log_d("[cert.rotate] parsed cert=%u ca=%u B",
                 (unsigned)outCertPem.length(),
                 (unsigned)outCaBundlePem.length());
   return true;
@@ -1574,7 +1593,7 @@ bool CertManagerService::parseCertMetadata(const String& certPem,
   int rc = mbedtls_x509_crt_parse(&crt,
       (const unsigned char*)certPem.c_str(), certPem.length() + 1);
   if (rc != 0) {
-    Serial.printf("[cert.parse] x509_crt_parse failed: -0x%04x\n", -rc);
+    log_e("[cert.parse] x509_crt_parse failed: -0x%04x", -rc);
     mbedtls_x509_crt_free(&crt);
     return false;
   }

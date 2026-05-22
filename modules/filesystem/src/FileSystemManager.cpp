@@ -206,7 +206,7 @@ void FileSystemManager::purgeUploadDebris(fs::FS& fs, const char* root) {
 
     for (auto& v : victims) {
       if (fs.remove(v)) {
-        Serial.printf("[fs] purged debris: %s\n", v.c_str());
+        log_d("[fs] purged debris: %s", v.c_str());
       }
     }
   }
