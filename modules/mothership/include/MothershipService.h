@@ -22,6 +22,7 @@
 
 #include "IMothershipProvider.h"
 #include "IMothershipProfileProvider.h"
+#include "PersistentTlsClient.h"
 
 #include <Arduino.h>
 #include <freertos/FreeRTOS.h>
@@ -179,6 +180,14 @@ class MothershipService : public StatefulService<MothershipSettings>,
   WebFeatureEntry<MothershipSettings>*    _feature{nullptr};
   ITLSProvider*                            _tls{nullptr};
   ICertProvider*                           _cert{nullptr};
+  // Phase 1 of memory-fragmentation-master-plan — persistent
+  // WiFiClientSecure paired with HTTPClient::setReuse(true). mbedtls
+  // SSL context for the mothership host is created on first
+  // /checkin handshake and held across all subsequent requests for
+  // the device's lifetime. Without this, every checkin would do a
+  // fresh ~32 KB mbedtls alloc + free cycle, and the heap would
+  // fragment fatally over hours.
+  ESPRack::PersistentTlsClient            _tlsClient;
   // Optional — populated by MothershipModule from app->wireguard()
   // when WireGuardModule is installed in the consumer. Null when
   // the consumer doesn't want tunneling.
@@ -267,7 +276,15 @@ class MothershipService : public StatefulService<MothershipSettings>,
     uint8_t  chunk_total{1};
   };
   std::deque<ActionResult> _resultRing;
-  static constexpr size_t  RESULT_RING_CAP = 64;   // hold ~16 KB of chunks
+  // 16 × 1 KB = ~16 KB worst-case (matches the comment block above).
+  // Previous value was 64, which left a 65 KB headroom that the deque
+  // would happily fill under sustained backpressure (server slow,
+  // device fast). The deque allocates each node separately, so a full
+  // ring scatters 64 ~1 KB allocations across the heap — exactly the
+  // pattern that drops max-contiguous from 114 K (boot) to <10 K
+  // mid-soak. 16 is enough to absorb one stalled checkin worth of
+  // work without bleeding into the mbedtls 32 KB window.
+  static constexpr size_t  RESULT_RING_CAP = 16;
   static constexpr size_t  MAX_CHUNK_BYTES = 1024; // payload per ring entry
   // Cap on how many chunks one check-in can emit so the req doc never
   // overflows; 3 × 1 KB chunks + framing fits comfortably in 6 KB.

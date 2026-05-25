@@ -951,12 +951,13 @@ CertManagerService::EnrollResult CertManagerService::postEnrollOnce(
     return EnrollResult::ServerError;
   }
 
-  // Heap diagnostics before TLS — mbedtls handshake on ESP32-C3
-  // needs ~25-30 KB contiguous. Logging both free + max-alloc tells
-  // us exactly when fragmentation is about to bite. Pattern from
-  // the 17:06 OOM repro: total free ~55 KB, max-alloc ~21 KB → SSL
-  // alloc fails. If we see max-alloc dipping under ~25 KB, we know
-  // the next handshake is on borrowed time.
+  // Heap diagnostics before TLS — surfaces the
+  // MBEDTLS_ERR_SSL_ALLOC_FAILED (-32512) failure mode where the
+  // device's heap fragments enough that the next handshake can't
+  // get its ~25 KB contiguous scratch. When this fires it's a
+  // device-wide stuck state: mothership soft-watchdog (see
+  // MothershipService) catches the pattern and forces esp_restart()
+  // after N consecutive failures.
   log_i("[cert.enroll] heap pre-TLS: free=%u max_alloc=%u",
         (unsigned)ESP.getFreeHeap(),
         (unsigned)ESP.getMaxAllocHeap());

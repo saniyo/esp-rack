@@ -6,6 +6,7 @@
 #include "WebFeatureSpec.h"
 #include "TLSContextService.h"
 #include "DeviceIdentity.h"
+#include "HeapMonitor.h"
 
 // Firmware-tag anchors — keep the strings emitted in FwTags.cpp
 // alive through --gc-sections. A function-local volatile load isn't
@@ -44,18 +45,17 @@ App::App(AsyncWebServer* server, const char* deviceName, const char* deviceVersi
     deviceName_   {deviceName ? deviceName : ""},
     deviceVersion_{deviceVersion ? deviceVersion : ""},
     configManager_{&ESPFS},
-    // 32 slot ceiling for AsyncWebSocket clients across all WS paths.
-    // Originally 10, which got exhausted in two real-world scenarios:
-    //   * operator opens 2-3 browser tabs against different live tabs
-    //     (Light + Telegram + NTP) → 6+ active clients steady state;
-    //   * useWs's stale-watchdog reconnect cycle leaks half-closed
-    //     clients faster than beginPingPong can evict them (~80s).
-    // Once the pool is full, ALL new WS handshakes fail until the
-    // server drops zombies — which presented to the operator as
-    // "WS lost Live and refresh doesn't help". 32 gives ~4× headroom
-    // for the typical 4-5 concurrent live-tab use case; bumping
-    // further is cheap (each slot is small, mostly a few pointers).
-    wsManager_    {server, 32},
+    // 16 slot ceiling for AsyncWebSocket clients across all WS paths.
+    // Originally 10 → bumped to 32 to absorb the useWs stale-watchdog
+    // reconnect leak. Then the heap audit (see docs/plans/memory-
+    // fragmentation-master-plan.md, "AsyncWebSocket pool" section)
+    // showed those 32 slots cost ~8 KB of scattered allocations that
+    // were drawing the post-setup max-contiguous below the mbedtls
+    // 32 KB ask. 16 keeps ~3× headroom over the realistic 4-5 tab
+    // concurrent-live use case while halving the heap residency of
+    // the WS pool. If you raise this back, also raise the
+    // beginPingPong eviction cadence so zombies evict faster.
+    wsManager_    {server, 16},
     // CRITICAL: pass our OWN deviceName_/deviceVersion_ buffers to
     // WebManager, not the ctor parameters. The caller's pointers
     // (typically Builder::deviceName_.c_str()) become dangling the
@@ -135,6 +135,34 @@ void App::adoptModules(std::vector<std::unique_ptr<Module>>&& modules) {
 void App::begin() {
   if (begun_) return;
   begun_ = true;
+
+  // Anchor the fragmentation-watchdog reference. tick() in loop()
+  // will append per-minute samples from here forward; this first
+  // call captures "what does FRESH heap look like" so the slope
+  // calculation has a baseline to grow from.
+  ESPRack::HeapMonitor::tick();
+  ESPRack::HeapMonitor::logSnapshot("boot anchor");
+
+  // TLS heap-OOM (MBEDTLS_ERR_SSL_ALLOC_FAILED -32512) — fixed for
+  // good at the framework-rebuild level in
+  // esp-rack-light-demo/platformio.ini via `custom_sdkconfig` that
+  // shrinks `CONFIG_MBEDTLS_SSL_IN/OUT_CONTENT_LEN` from 16 KB each
+  // to 4 KB each. mbedtls record buffers now fit a per-handshake
+  // budget of ~10 KB instead of ~32 KB, comfortably inside any
+  // plausible ESP32-C3 max-contiguous-alloc window even after hours
+  // of heap-fragmenting traffic.
+  //
+  // Earlier attempts that DIDN'T work — kept in the audit log:
+  //   * MbedtlsArena (custom allocator + mbedtls hooks) corrupted
+  //     parsed CA chain mid-verify (-9984 X509_CERT_VERIFY_FAILED).
+  //   * TlsHeapReserve (heap_caps_malloc 40 KB + Lease release-
+  //     reacquire pattern) shrank system free-heap by 40 KB at boot
+  //     and the released block didn't flow back to where mbedtls
+  //     allocates from — handshake hit MBEDTLS_ERR_SSL_ALLOC_FAILED
+  //     on EVERY attempt at uptime 82 s, worse than no fix at all.
+  //   * Soft-watchdog (esp_restart after N consecutive fails) was
+  //     a workaround unsuitable for a certified-system uptime
+  //     target measured in years; rejected on review.
 
   // 0. Publish framework + module identity into the manifest so the
   // frontend (and audit tooling) can read the running rev set without
@@ -256,6 +284,25 @@ void App::loop() {
     if (m) m->onLoop();
   }
   wsManager_.processAllQueues();
+
+  // Heap drift sampler — 60 s cadence, zero-alloc. Captures the slow
+  // fragmentation slope that predicts TLS-handshake failure long
+  // before the failure actually happens. See HeapMonitor.h for the
+  // certified-uptime rationale.
+  static uint32_t s_lastHeapTick_ms = 0;
+  static uint8_t  s_ticksSinceLog  = 0;
+  uint32_t now_ms = millis();
+  if (now_ms - s_lastHeapTick_ms >= 60000) {
+    s_lastHeapTick_ms = now_ms;
+    HeapMonitor::tick();
+    // Periodic visibility: print every 5 ticks (≈5 min). Cheap on
+    // serial bandwidth, but enough resolution to spot a drift over
+    // the hours-to-days timescale that matters for certified uptime.
+    if (++s_ticksSinceLog >= 5) {
+      s_ticksSinceLog = 0;
+      HeapMonitor::logSnapshot("soak");
+    }
+  }
 }
 
 void App::shutdown() {

@@ -194,6 +194,17 @@ class CertManagerService : public StatefulService<CertManagerSettings>,
   ConfigDelegate<CertManagerSettings>      _cfg;
   WebFeatureEntry<CertManagerSettings>*    _feature{nullptr};
   ITLSProvider*                            _tls{nullptr};
+  // TODO (Phase 1 of memory-fragmentation-master-plan, next iter):
+  // wrap cert-enroll / cert-renew / cert-recover TLS calls in a
+  // PersistentTlsClient too. Complication: enroll uses setInsecure
+  // (no CA pinned yet), renew/recover use full mTLS — so the
+  // persistent client needs a mode switch on first successful
+  // enrollment. For now, this module still does per-call
+  // WiFiClientSecure construction. cert-enroll fires once per
+  // enrollment window (until a cert lands), then never again per
+  // boot, so the per-attempt fragmentation cost here is bounded.
+  // The repeating-forever fragmentation source — mothership /checkin
+  // — has its persistent client in this same release.
   // Optional — set via setWireguardProvider after WireGuardModule
   // installs (priorities 12 vs 14, but the App pointer is stable
   // throughout, so plain late-bind is enough).

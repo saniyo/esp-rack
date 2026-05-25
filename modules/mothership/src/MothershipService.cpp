@@ -10,6 +10,8 @@
 #include <ArduinoJson.h>
 #include <esp_rom_crc.h>
 #include <esp_system.h>
+#include <esp_heap_caps.h>
+#include <HeapMonitor.h>
 
 // ===== Persistence =====
 //
@@ -280,6 +282,12 @@ void MothershipService::begin() {
   // a sane defaults state. ensureLoaded overlays any persisted
   // values; missing keys preserve the in-struct defaults.
 
+  // Phase 1 of memory-fragmentation-master-plan: hand the persistent
+  // TLS client the framework's TLS provider so it can attach CA +
+  // device cert/key when it lazily allocates its WiFiClientSecure.
+  // From this point on, every check-in goes through _tlsClient.
+  _tlsClient.configure(_tls);
+
   refreshRuntimeState();
 
   // Spawn the check-in task once at boot. Inside the loop the task
@@ -479,22 +487,18 @@ bool MothershipService::performOneCheckin(bool& outBurst) {
     return false;
   }
 
-  WiFiClientSecure client;
-  log_d("[mship.do] step1: attachToClient");
-  _tls->attachToClient(client);
-  client.setHandshakeTimeout(15);
-  client.setTimeout(15000);
-  log_d("[mship.do] step2: timeouts set");
-
-  HTTPClient http;
-  log_d("[mship.do] step3: http.begin(%s)",
-                checkin_url.c_str());
-  if (!http.begin(client, checkin_url)) {
-    log_e("[mship.do] EARLY: http.begin failed");
+  // Phase 1: persistent TLS client. The handshake fires once per
+  // host (logged "new TLS handshake — host=..."), subsequent
+  // requests reuse the existing socket + mbedtls SSL session via
+  // HTTPClient::setReuse(true). Lifetime stats on _tlsClient.stats()
+  // expose lifetime_handshakes vs lifetime_reuse_hits — a healthy
+  // device should accrue thousands of reuse hits for every handshake.
+  if (!_tlsClient.beginRequest(checkin_url)) {
+    log_e("[mship.do] EARLY: beginRequest failed for %s",
+          checkin_url.c_str());
     return false;
   }
-  log_i("[mship.do] step4: http.begin OK");
-  http.setTimeout(15000);
+  HTTPClient& http = _tlsClient.http();
   http.addHeader("Content-Type", "application/json");
 
   // Body: {deviceId, fwVer, hwVer, hwRev, uptimeSec, freeHeap, action_results[]}
@@ -617,20 +621,80 @@ bool MothershipService::performOneCheckin(bool& outBurst) {
   int code = http.POST(body);
   log_d("[mship] HTTP code=%d", code);
 
+  // Phase 1.5: consecutive-failure recovery. Phase 1's PersistentTlsClient
+  // keeps the TLS session alive across check-ins, but the moment the
+  // underlying TCP socket actually dies (Wi-Fi blip, server-side
+  // keep-alive timeout, NAT eviction) the reuse path collapses and
+  // every subsequent reconnect hits MBEDTLS_ERR_SSL_ALLOC_FAILED
+  // (-32512) because the 32 KB contiguous block is now blocked by
+  // small AsyncTCP/WS/JSON allocations that arrived during the soak.
+  //
+  // Recovery strategy:
+  //   * On every failure: log heap state via HeapMonitor.logSnapshot
+  //     so we can correlate failure with max_alloc drift.
+  //   * After 3 consecutive failures: hardReset() the PersistentTlsClient
+  //     (delete + recreate the WiFiClientSecure, which forces mbedtls
+  //     to fully free + reallocate). If the heap can satisfy the 32 KB
+  //     ask, we recover; if not, the next checkin will still fail and
+  //     trigger another hardReset cycle — far better than the silent
+  //     handshake-fail-loop we had before.
+  //
+  // The counter is a function-local static (not a member) because the
+  // semantics are purely local to performOneCheckin and we never want
+  // it to outlive the function across module re-init.
+  static uint8_t s_consec_failures = 0;
   if (code < 200 || code >= 300) {
     String err = http.getString();
     log_w("[mship] server error: %s", err.c_str());
-    http.end();
+    _tlsClient.endRequest();
+    s_consec_failures++;
+    ESPRack::HeapMonitor::logSnapshot("mship-fail");
+    log_w("[mship] consecutive failures=%u (HTTP=%d)",
+          (unsigned)s_consec_failures, code);
+    if (s_consec_failures >= 2) {
+      log_w("[mship] threshold hit (2) — triggering tlsClient.hardReset() "
+            "to escape OOM handshake loop");
+      // Snapshot internal heap detail right before the reset so we
+      // can see what's blocking the 32 KB contig block. Internal-only
+      // (we don't care about PSRAM/DMA caps for mbedtls).
+      heap_caps_print_heap_info(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+      _tlsClient.hardReset();
+      ESPRack::HeapMonitor::logSnapshot("after-hardReset");
+      s_consec_failures = 0;
+    }
     return false;
+  }
+  // Success — clear the failure streak so we don't carry stale counts
+  // across transient blips.
+  s_consec_failures = 0;
+
+  // Phase 1.5b: anchor the "post-warmup" heap baseline. The very first
+  // successful checkin is when mbedtls just allocated its 32 KB content
+  // buffers — this snapshot tells us how much contiguous heap we had to
+  // burn for the handshake. Subsequent soak snapshots should sit at
+  // roughly this max_alloc level; drift downward = fragmentation.
+  static bool s_warmup_anchor_logged = false;
+  if (!s_warmup_anchor_logged) {
+    ESPRack::HeapMonitor::logSnapshot("post-warmup");
+    s_warmup_anchor_logged = true;
   }
 
   String respBody = http.getString();
-  http.end();
+  _tlsClient.endRequest();
   log_d("[mship] response %u B", (unsigned)respBody.length());
 
   // Response: {"actions": [...], "nextCheckInSec": N}
-  // 16 KB doc — actions can carry firmware URLs / WireGuard configs.
-  DynamicJsonDocument resp(16384);
+  // Was 16 KB which on a fragmented heap (the very condition this
+  // module's persistent-TLS work targets) silently fails to allocate
+  // and the whole checkin gets logged as a fail even though the TLS
+  // handshake + HTTP exchange both succeeded. Real responses are
+  // small: empty actions = ~35 B, typical action ~200 B, hard cap
+  // is MAX_ACTIONS_PER_CHECKIN around 4. 4 KB is 5-10× the realistic
+  // worst case and fits inside the post-Phase-1 max-contiguous
+  // window. Anything bigger (config.dump payloads etc.) ships via
+  // chunked action_results in the OUTBOUND body, not in this
+  // response.
+  DynamicJsonDocument resp(4096);
   DeserializationError jerr = deserializeJson(resp, respBody);
   if (jerr) {
     log_e("[mship] JSON parse: %s", jerr.c_str());
