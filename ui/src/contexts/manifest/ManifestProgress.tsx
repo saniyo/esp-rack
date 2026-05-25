@@ -18,19 +18,19 @@ import { FeatureEntry, UiManifest } from '../../types';
 
 // Per-module probe timeout. We're not measuring server latency, just
 // confirming the endpoint actually responds (any 2xx/4xx is "loaded"
-// — only network failures / 5xx / timeout count as fail). 3 s
-// accommodates the worst-case TLS handshake on the slowest currently-
-// shipped target (ESP32-C3) without leaving the splash screen feeling
-// stuck.
-const PROBE_TIMEOUT_MS = 3000;
+// — only network failures / 5xx / timeout count as fail). 1.5 s is
+// tight for ESP32-C3 worst-case TLS but acceptable: a probe that
+// times out gets marked fail and the user notices later anyway.
+const PROBE_TIMEOUT_MS = 1500;
 // Minimum dwell on each "in-flight" row even if the probe resolves
-// instantly. Gives the operator's eye time to read what's loading
-// before the carousel scrolls — without this a cached probe response
-// makes the row flash through in 30 ms.
-const MIN_DWELL_MS = 280;
+// instantly. Zero = "as fast as React can render" — the row visibly
+// flashes through but the operator's eye isn't the audience here,
+// the device just boots fast and we hand off to the real app.
+const MIN_DWELL_MS = 0;
 // Pause after the last row before handing control to the real app
-// tree. Lets the final green check register visually.
-const FINAL_HOLD_MS = 400;
+// tree. Zero = no hold at all; final green check appears for one
+// render frame then the app mounts.
+const FINAL_HOLD_MS = 0;
 // Carousel geometry — height of one row + the vertical slot each row
 // is anchored at within the 3-row viewport.
 const ROW_HEIGHT_PX = 56;
@@ -248,7 +248,9 @@ const ManifestProgress: FC<ManifestProgressProps> = ({
   useEffect(() => {
     if (!loaded) return;
     if (error) {
-      const t = setTimeout(onRevealComplete, 1600);
+      // 200 ms — just enough for the error icon to register before
+      // we hand off to the app fallback. Was 1600.
+      const t = setTimeout(onRevealComplete, 200);
       return () => clearTimeout(t);
     }
     if (total === 0 || idx >= total) {
