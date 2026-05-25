@@ -858,6 +858,14 @@ String MothershipService::actionCloseTunnel(JsonObjectConst params) {
   // operator session idle timeout, or on explicit close. Idempotent:
   // a closeTunnel when already down just acks.
   (void)params;
+  // Defensive log — if _wg ever ends up nullptr at action-dispatch
+  // time (late-bind race during App.begin: WireguardModule installs
+  // AFTER MothershipModule and calls setWireguardProvider from its
+  // begin, so a closeTunnel arriving inside the begin-storm window
+  // could in theory miss the pointer), this catches the symptom
+  // before the operator's Close button silently no-ops.
+  log_i("[mship.action.closeTunnel] enter, _wg=%s",
+        _wg ? "set" : "NULL");
   if (!_wg) {
     return "no wireguard provider — install WireGuardModule";
   }

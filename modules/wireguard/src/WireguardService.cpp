@@ -431,9 +431,21 @@ bool WireguardService::up(const String& serverPublicKey,
 
 void WireguardService::down() {
 #if HAVE_WIREGUARD_LIB
-  if (g_wg.is_initialized()) {
+  // Snapshot lib state before tearing down so the post-end log makes
+  // the transition obvious. Helps spot library quirks where end()
+  // returns OK but is_initialized() stays sticky — the loop()'s
+  // actually_up sync would then re-flip our state to UP and the
+  // operator's Close click looks like a no-op. If we ever see
+  // "post-end is_initialized=true" it's the lib that's wrong, not
+  // our state machine, and we'll need to either retry end() or stop
+  // trusting the lib's view.
+  bool was_initialised = g_wg.is_initialized();
+  log_i("[wg.down] enter: lib.is_initialized=%d state.is_up=%d",
+        (int)was_initialised, (int)_state.is_up);
+  if (was_initialised) {
     g_wg.end();
-    log_d("[wg] down: tunnel stopped");
+    log_i("[wg.down] post-end: lib.is_initialized=%d",
+          (int)g_wg.is_initialized());
   }
 #endif
   update([](WireguardSettings& s) {
