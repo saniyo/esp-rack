@@ -139,9 +139,11 @@ void App::begin() {
   // Anchor the fragmentation-watchdog reference. tick() in loop()
   // will append per-minute samples from here forward; this first
   // call captures "what does FRESH heap look like" so the slope
-  // calculation has a baseline to grow from.
+  // calculation has a baseline to grow from. We DON'T logSnapshot
+  // here — the per-checkin "post-warmup" anchor and the every-5-min
+  // "soak" snapshot give enough visibility without an extra boot
+  // line.
   ESPRack::HeapMonitor::tick();
-  ESPRack::HeapMonitor::logSnapshot("boot anchor");
 
   // TLS heap-OOM (MBEDTLS_ERR_SSL_ALLOC_FAILED -32512) — fixed for
   // good at the framework-rebuild level in
@@ -191,12 +193,19 @@ void App::begin() {
     webManager_.registerBuildFeature(d.id, true);
   }
 
+  // Phase-by-phase heap instrumentation. Each `boot:<tag>` line lets
+  // us pinpoint which startup step is eating contiguous heap. Pure
+  // diagnostic — these calls only read ESP heap APIs, no allocations.
+  HeapMonitor::logSnapshot("boot:enter");
+
   // 1. Filesystem first — ConfigManager and several modules need /config
   // available before they can ensureLoaded().
   ESPFS.begin(true);
+  HeapMonitor::logSnapshot("boot:fs-mounted");
 
   // 2. ConfigManager picks up its work directories under /config.
   configManager_.begin();
+  HeapMonitor::logSnapshot("boot:cfgmgr-begun");
 
   // 3. Bring up lwIP early — modules that touch UDP/TCP in onBegin
   // (NTP, OTA, Telegram) crash on Arduino-3.x / IDF 5 if WiFi.mode
@@ -204,16 +213,30 @@ void App::begin() {
   // network interfaces" init in one shot regardless of which
   // module(s) actually use STA vs AP.
   WiFi.mode(WIFI_AP_STA);
+  HeapMonitor::logSnapshot("boot:wifi-mode-set");
 
   // 4. Modules' onInstall has already happened in Builder.build();
-  // here we run their onBegin in the same install order.
+  // here we run their onBegin in the same install order. Per-module
+  // heap snapshot — if any single module's onBegin punches a big hole
+  // (8 KB+ contiguous loss), we'll see it as a step-change in the
+  // post-<id> line.
   for (auto& m : modules_) {
-    if (m) m->onBegin();
+    if (m) {
+      ModuleDescriptor d;
+      m->describe(d);
+      m->onBegin();
+      log_i("[boot] post-%s: free=%u max_alloc=%u",
+            d.id ? d.id : "?",
+            (unsigned)ESP.getFreeHeap(),
+            (unsigned)ESP.getMaxAllocHeap());
+    }
   }
+  HeapMonitor::logSnapshot("boot:modules-begun");
 
   // 5. WebManager.begin() iterates registered features and mounts
   // /rest/uiManifest. Must come AFTER all modules have registered.
   webManager_.begin();
+  HeapMonitor::logSnapshot("boot:webmanager-begun");
 
   // 6. WS keepalive — phantom-client eviction, defaults match the
   // legacy ESPReact values.
@@ -276,6 +299,7 @@ void App::begin() {
   // it right after app->begin() anyway, and forgetting it surfaces as
   // "192.168.4.1 doesn't load anything" with no actionable error.
   server_->begin();
+  HeapMonitor::logSnapshot("boot:server-started");
 }
 
 void App::loop() {

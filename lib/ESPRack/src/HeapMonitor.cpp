@@ -78,14 +78,22 @@ HeapSnapshot HeapMonitor::snapshot() {
 }
 
 void HeapMonitor::logSnapshot(const char* tag) {
+  // Read ESP heap APIs LIVE here — ring samples land only on the
+  // 60-second tick cadence, so a snapshot() right after an event
+  // (WG up, TLS handshake, etc.) used to log the previous tick's
+  // stale boot-time numbers and disagree with whatever the web UI
+  // showed via getFreeHeap(). Mixing live event-time numbers with
+  // ring-derived boot_max + slope gives both freshness AND trend.
   HeapSnapshot s = snapshot();
-  // log_i prefix makes this visible at CORE_DEBUG_LEVEL ≥ 3.
+  uint32_t live_free      = ESP.getFreeHeap();
+  uint32_t live_max_alloc = ESP.getMaxAllocHeap();
+  uint32_t live_min_free  = ESP.getMinFreeHeap();
   log_i("[heap.mon] %s: free=%u max_alloc=%u min_free_ever=%u "
         "boot_max=%u slope=%dB/min samples=%u",
         tag ? tag : "?",
-        (unsigned)s.latest.free_bytes,
-        (unsigned)s.latest.max_alloc,
-        (unsigned)s.latest.min_free_ever,
+        (unsigned)live_free,
+        (unsigned)live_max_alloc,
+        (unsigned)live_min_free,
         (unsigned)s.boot.max_alloc,
         (int)s.max_alloc_slope_bpm,
         (unsigned)s.sample_count);

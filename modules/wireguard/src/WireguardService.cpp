@@ -1,5 +1,6 @@
 #include <WireguardService.h>
 #include <WebManager.h>
+#include <HeapMonitor.h>
 
 #include <Arduino.h>
 #include <esp_random.h>
@@ -352,6 +353,11 @@ bool WireguardService::up(const String& serverPublicKey,
                   ip.c_str());
     return false;
   }
+  // Snapshot heap before WG so we can see exactly how much memory the
+  // tunnel consumes — and whether it fragments the largest free block.
+  // Diagnoses the "web won't load while WG is up" pattern: if max_alloc
+  // post-WG drops below ~16 KB AsyncWebServer can't grab a recv buffer.
+  ESPRack::HeapMonitor::logSnapshot("wg.up-pre");
   // Idempotent — tear down first if already initialised, so the
   // triplet swap takes effect cleanly.
   if (g_wg.is_initialized()) {
@@ -413,6 +419,7 @@ bool WireguardService::up(const String& serverPublicKey,
                 "allowed=%s/24 keepalive=25s",
                 ip.c_str(), host.c_str(), (unsigned)port,
                 allowAddr.toString().c_str());
+  ESPRack::HeapMonitor::logSnapshot("wg.up-post");
   update([](WireguardSettings& s) {
     s.is_up = true;
     s.up_since_ms = millis();
@@ -443,9 +450,11 @@ void WireguardService::down() {
   log_i("[wg.down] enter: lib.is_initialized=%d state.is_up=%d",
         (int)was_initialised, (int)_state.is_up);
   if (was_initialised) {
+    ESPRack::HeapMonitor::logSnapshot("wg.down-pre");
     g_wg.end();
     log_i("[wg.down] post-end: lib.is_initialized=%d",
           (int)g_wg.is_initialized());
+    ESPRack::HeapMonitor::logSnapshot("wg.down-post");
   }
 #endif
   update([](WireguardSettings& s) {
