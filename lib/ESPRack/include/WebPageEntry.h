@@ -45,11 +45,11 @@ class WebPageEntry : public IWebFeatureEntry {
             ? sm->wrapCallback(e.jsonHandler, predicate)
             : e.jsonHandler;
         auto* h = new AsyncCallbackJsonWebHandler(e.path, wrapped);
-        if (String(method) == "POST")       h->setMethod(HTTP_POST);
-        else if (String(method) == "PUT")    h->setMethod(HTTP_PUT);
-        else if (String(method) == "PATCH")  h->setMethod(HTTP_PATCH);
-        else if (String(method) == "DELETE") h->setMethod(HTTP_DELETE);
-        else                                  h->setMethod(HTTP_POST);
+        if (strcmp(method, "POST") == 0)         h->setMethod(HTTP_POST);
+        else if (strcmp(method, "PUT") == 0)     h->setMethod(HTTP_PUT);
+        else if (strcmp(method, "PATCH") == 0)   h->setMethod(HTTP_PATCH);
+        else if (strcmp(method, "DELETE") == 0)  h->setMethod(HTTP_DELETE);
+        else                                      h->setMethod(HTTP_POST);
         server->addHandler(h);
         continue;
       }
@@ -58,11 +58,11 @@ class WebPageEntry : public IWebFeatureEntry {
         auto wrapped = sm
             ? sm->wrapRequest(e.handler, predicate)
             : e.handler;
-        if (String(method) == "GET")          server->on(e.path, HTTP_GET, wrapped);
-        else if (String(method) == "POST")     server->on(e.path, HTTP_POST, wrapped);
-        else if (String(method) == "PUT")      server->on(e.path, HTTP_PUT, wrapped);
-        else if (String(method) == "DELETE")   server->on(e.path, HTTP_DELETE, wrapped);
-        else                                    server->on(e.path, HTTP_GET, wrapped);
+        if (strcmp(method, "GET") == 0)          server->on(e.path, HTTP_GET, wrapped);
+        else if (strcmp(method, "POST") == 0)    server->on(e.path, HTTP_POST, wrapped);
+        else if (strcmp(method, "PUT") == 0)     server->on(e.path, HTTP_PUT, wrapped);
+        else if (strcmp(method, "DELETE") == 0)  server->on(e.path, HTTP_DELETE, wrapped);
+        else                                      server->on(e.path, HTTP_GET, wrapped);
         continue;
       }
 
@@ -93,7 +93,10 @@ class WebPageEntry : public IWebFeatureEntry {
     if (_spec.routeTemplate) {
       obj["route"] = _spec.routeTemplate;
     } else if (_spec.id) {
-      String route = String("/") + _spec.id + "/*";
+      // See WebInfoEntry::toJson — stack buffer instead of transient
+      // Arduino String. ArduinoJson copies into its own pool.
+      char route[96];
+      snprintf(route, sizeof(route), "/%s/*", _spec.id);
       obj["route"] = route;
     } else {
       obj["route"] = (const char*)nullptr;
@@ -146,9 +149,9 @@ class WebPageEntry : public IWebFeatureEntry {
     if (!method || !path) return false;
     for (const auto& e : _spec.endpoints) {
       if (!e.path) continue;
-      if (String(e.path) != path) continue;
+      if (strcmp(e.path, path) != 0) continue;
       const char* want_method = e.method ? e.method : "GET";
-      if (String(want_method) != method) {
+      if (strcmp(want_method, method) != 0) {
         // Path matches but method doesn't — keep walking the list
         // (a service might register the same path under two methods).
         continue;

@@ -89,7 +89,10 @@ class WebFeatureEntry : public IWebFeatureEntry {
     if (_spec.routeTemplate) {
       obj["route"] = _spec.routeTemplate;
     } else if (_spec.id) {
-      String route = String("/") + _spec.id + "/*";
+      // See WebInfoEntry::toJson — stack buffer instead of transient
+      // Arduino String. ArduinoJson copies into its own pool.
+      char route[96];
+      snprintf(route, sizeof(route), "/%s/*", _spec.id);
       obj["route"] = route;
     } else {
       obj["route"] = (const char*)nullptr;
@@ -156,13 +159,15 @@ class WebFeatureEntry : public IWebFeatureEntry {
                       JsonVariant out_body) override {
     if (!path || !_service) return false;
 
-    const bool is_get  = method && String(method) == "GET";
-    const bool is_post = method && (String(method) == "POST"
-                                      || String(method) == "PUT");
+    const bool is_get  = method && strcmp(method, "GET") == 0;
+    const bool is_post = method && (strcmp(method, "POST") == 0
+                                      || strcmp(method, "PUT") == 0);
 
     // Match against the feature's primary read/update endpoints.
-    const bool match_read   = _spec.restRead   && String(_spec.restRead)   == path;
-    const bool match_update = _spec.restUpdate && String(_spec.restUpdate) == path;
+    const bool match_read   = _spec.restRead
+                              && strcmp(_spec.restRead, path) == 0;
+    const bool match_update = _spec.restUpdate
+                              && strcmp(_spec.restUpdate, path) == 0;
 
     if (!match_read && !match_update) return false;
 

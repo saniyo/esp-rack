@@ -66,7 +66,13 @@ class WebInfoEntry : public IWebFeatureEntry {
     if (_spec.routeTemplate) {
       obj["route"] = _spec.routeTemplate;
     } else if (_spec.id) {
-      String route = String("/") + _spec.id + "/*";
+      // Stack-allocated route — avoids the transient Arduino String
+      // allocation that this used to do per manifest entry. ArduinoJson
+      // copies const char* into its own pool, so the buffer can be
+      // local. 96 B matches the longest plausible "/<id>/*" we'd ever
+      // emit; ids beyond ~90 chars would be a misconfiguration.
+      char route[96];
+      snprintf(route, sizeof(route), "/%s/*", _spec.id);
       obj["route"] = route;
     } else {
       obj["route"] = (const char*)nullptr;

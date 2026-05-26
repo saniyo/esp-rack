@@ -21,7 +21,9 @@ class WebActionEntry : public IWebFeatureEntry {
   void registerEndpoints(AsyncWebServer* server, SecurityManager* sm) override {
     if (_mounted || !server || !_spec.id) return;
 
-    const String path = resolvedPath();
+    char pathBuf[80];
+    fillResolvedPath(pathBuf, sizeof(pathBuf));
+    const char* path = pathBuf;
 
     auto predicate = webAuthLevelToPredicate(_spec.auth);
     auto handler = _spec.handler
@@ -32,15 +34,15 @@ class WebActionEntry : public IWebFeatureEntry {
         ? sm->wrapRequest(handler, predicate)
         : handler;
 
-    const String method = _spec.method ? String(_spec.method) : String("POST");
-    if (method == "GET") {
-      server->on(path.c_str(), HTTP_GET, wrapped);
-    } else if (method == "DELETE") {
-      server->on(path.c_str(), HTTP_DELETE, wrapped);
-    } else if (method == "PUT") {
-      server->on(path.c_str(), HTTP_PUT, wrapped);
+    const char* method = _spec.method ? _spec.method : "POST";
+    if (strcmp(method, "GET") == 0) {
+      server->on(path, HTTP_GET, wrapped);
+    } else if (strcmp(method, "DELETE") == 0) {
+      server->on(path, HTTP_DELETE, wrapped);
+    } else if (strcmp(method, "PUT") == 0) {
+      server->on(path, HTTP_PUT, wrapped);
     } else {
-      server->on(path.c_str(), HTTP_POST, wrapped);
+      server->on(path, HTTP_POST, wrapped);
     }
 
     _mounted = true;
@@ -50,7 +52,13 @@ class WebActionEntry : public IWebFeatureEntry {
     obj["id"] = _spec.id ? _spec.id : "";
     obj["kind"] = "action";
     if (_spec.title) obj["title"] = _spec.title;
-    obj["restPath"] = resolvedPath();
+    // Always materialise the path into pathBuf and assign as an array.
+    // ArduinoJson's `const char*` overload uses a Link storage policy
+    // (no copy, holds the pointer) which would dangle once we return
+    // — pathBuf is local. The `char[N]` overload uses Copy.
+    char pathBuf[80];
+    fillResolvedPath(pathBuf, sizeof(pathBuf));
+    obj["restPath"] = pathBuf;
     obj["method"] = _spec.method ? _spec.method : "POST";
     obj["auth"] = webAuthLevelToStr(_spec.auth);
     if (_spec.icon) obj["icon"] = _spec.icon;
@@ -70,9 +78,11 @@ class WebActionEntry : public IWebFeatureEntry {
                       int& out_status,
                       JsonVariant out_body) override {
     if (!_spec.id || !path) return false;
-    if (resolvedPath() != String(path)) return false;
+    char pathBuf[80];
+    fillResolvedPath(pathBuf, sizeof(pathBuf));
+    if (strcmp(pathBuf, path) != 0) return false;
     const char* want_method = _spec.method ? _spec.method : "POST";
-    if (method && String(want_method) != method) {
+    if (method && strcmp(want_method, method) != 0) {
       out_status = 405;
       JsonObject o = out_body.to<JsonObject>();
       o["error"] = "method_not_allowed";
@@ -94,11 +104,23 @@ class WebActionEntry : public IWebFeatureEntry {
   const WebActionSpec& spec() const { return _spec; }
 
  private:
-  String resolvedPath() const {
-    if (_spec.restPath && _spec.restPath[0] != '\0') return String(_spec.restPath);
-    String p = "/rest/action/";
-    p += _spec.id ? _spec.id : "unknown";
-    return p;
+  // Fill `buf` with the resolved REST path. Always writes into the
+  // caller-supplied buffer — when `_spec.restPath` is set we copy it
+  // in too, so the caller can rely on the buffer holding the answer
+  // (this matters for ArduinoJson assignment: the `char[N]` overload
+  // copies; the `const char*` overload would Link-store the pointer,
+  // which is dangling if it pointed at this local buffer).
+  // Replaces the previous String-returning version that allocated a
+  // transient Arduino String on every toJson / proxyDispatch call.
+  void fillResolvedPath(char* buf, size_t buf_sz) const {
+    if (buf_sz == 0) return;
+    if (_spec.restPath && _spec.restPath[0] != '\0') {
+      strncpy(buf, _spec.restPath, buf_sz - 1);
+      buf[buf_sz - 1] = '\0';
+      return;
+    }
+    snprintf(buf, buf_sz, "/rest/action/%s",
+             _spec.id ? _spec.id : "unknown");
   }
 
   WebActionSpec _spec;
