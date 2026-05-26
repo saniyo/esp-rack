@@ -26,7 +26,13 @@
 // transport memory — the only thing that has to fit a budget is a
 // SINGLE feature's serialized spec, capped to 4 KB inside serveManifest.
 
+// Forward-declared so WebManager can friend it. The full definition
+// lives in WebManager.cpp (file-local helper, never exposed elsewhere).
+class ManifestBuilder;
+
 class WebManager {
+  friend class ManifestBuilder;
+
  public:
   WebManager(AsyncWebServer* server,
              SecurityManager* sm,
