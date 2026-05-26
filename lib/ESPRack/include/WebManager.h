@@ -11,6 +11,9 @@
 #include <AsyncJson.h>
 #include <ESPAsyncWebServer.h>
 
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
+
 #include <SecurityManager.h>
 #include <WsManager.h>
 #include <IWebFeatureEntry.h>
@@ -20,15 +23,72 @@
 #include <WebInfoEntry.h>
 
 #define UI_MANIFEST_PATH "/rest/uiManifest"
-// Manifest assembly streams via AsyncResponseStream + per-entry
-// serialization (see WebManager.cpp::serveManifest), so there is no
-// aggregate buffer to size. Adding modules is free in terms of
-// transport memory — the only thing that has to fit a budget is a
-// SINGLE feature's serialized spec, capped to 4 KB inside serveManifest.
+// Manifest assembly streams JSON on the fly via ManifestBuilder (a
+// stateful section-by-section generator owned as a WebManager member
+// in BSS). One builder serves one request at a time, gated by a
+// FreeRTOS mutex — a second concurrent fetch gets 503 "retry later".
+// Zero per-request heap allocation; no allocator can throw bad_alloc.
+class WebManager;
 
-// Forward-declared so WebManager can friend it. The full definition
-// lives in WebManager.cpp (file-local helper, never exposed elsewhere).
-class ManifestBuilder;
+// Section-by-section JSON builder for /rest/uiManifest. Lives as a
+// WebManager member (BSS), not a per-request heap allocation. Reset
+// at the start of each manifest fetch via reset(mgr, authed); the
+// AwsResponseFiller in WebManager::serveManifest drives fillNext()
+// until it returns 0 (response complete). Mutex serialises requests.
+class ManifestBuilder {
+ public:
+  ManifestBuilder() : _mgr(nullptr), _authed(false) {}
+
+  // Re-initialise for a fresh response. Call before the first
+  // fillNext() call of each new request. Doesn't allocate; just
+  // resets state and pre-loads the HEADER phase buffer.
+  void reset(const WebManager& mgr, bool authed);
+
+  // Fill up to maxLen bytes into buf. Returns bytes written.
+  // Returns 0 when the response is complete (signals end to
+  // AsyncWebServer's chunked responder).
+  size_t fillNext(uint8_t* buf, size_t maxLen);
+
+ private:
+  enum class Phase : uint8_t {
+    HEADER, DEVICE_OPEN, DEVICE,
+    BUILDFEATURES_OPEN, BUILDFEATURES,
+    AUTH_FALSE_END, AUTH_TRUE,
+    MODULES_OPEN, MODULES_ITEM, MODULES_SEP, MODULES_CLOSE,
+    FEATURES_OPEN, FEATURES_ITEM, FEATURES_SEP, FEATURES_CLOSE,
+    FOOTER, DONE
+  };
+
+  void setLiteral(const char* s);
+  void renderDocIntoItem();
+  void advanceTo(Phase p);
+  void advancePhase();
+  void fillPhaseBuffer();
+
+  const WebManager* _mgr;
+  bool   _authed;
+  Phase  _phase{Phase::DONE};
+  size_t _modIdx{0};
+  size_t _featIdx{0};
+  size_t _cursor{0};
+  size_t _itemLen{0};
+
+  // 2 KB per-entry rendering buffer. Some feature entries (mothership
+  // with action_results metadata, cert-manager with actions + tabs,
+  // system shell with three contributed tabs) serialize to >1 KB.
+  // Trying 1 KB silently truncated those entries' JSON mid-key,
+  // produced malformed manifest, and the SPA fell back to legacy
+  // /rest/features (rendered only "Security"). 2 KB matches empirical
+  // worst case + headroom.
+  char _itemBuf[2048];
+
+  // ArduinoJson pool for per-entry construction. 2 KB holds the
+  // internal slot/string metadata for typical entries (~15 keys, a
+  // few nested objects); larger than the serialized output isn't
+  // necessary since the pool only stores ArduinoJson's bookkeeping,
+  // not the rendered text.
+  StaticJsonDocument<2048> _doc;
+};
 
 class WebManager {
   friend class ManifestBuilder;
@@ -329,6 +389,18 @@ class WebManager {
   const char* _frameworkVersion{""};
 
   bool _begun{false};
+
+  // Singleton manifest builder — BSS-resident, NOT allocated per
+  // request. Mutex guards concurrent /rest/uiManifest fetches; a
+  // request that arrives while another is still streaming gets 503.
+  // For our typical IoT workload (one operator at a time) the mutex
+  // is essentially never contended; if a browser parallel-fetches
+  // the manifest alongside other endpoints, the second fetch just
+  // retries. Eliminates the per-request std::make_shared<>() that
+  // used to throw bad_alloc under heap pressure and trigger a
+  // device reboot via std::terminate.
+  ManifestBuilder    _manifestBuilder;
+  SemaphoreHandle_t  _manifestMutex{nullptr};
 };
 
 #endif
