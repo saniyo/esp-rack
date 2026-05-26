@@ -117,6 +117,19 @@ class WireguardService : public StatefulService<WireguardSettings>,
   // Helper — base64 encode a fixed-size byte buffer using the
   // strict WG alphabet (the one mbedtls_base64_encode produces).
   static String base64Encode(const uint8_t* data, size_t len);
+
+  // ── Deferred heap snapshots around tunnel-up ────────────────────
+  // The actual WG handshake (Curve25519 ECDH + ChaCha20Poly1305)
+  // fires asynchronously on the first packet exchanged with the
+  // peer, well after up() returns. The synchronous wg.up-post
+  // snapshot only sees the begin()+addPeer() setup cost. These
+  // member flags drive loop() to log additional snapshots at
+  // +200 ms / +2 s / +10 s after up(), revealing the actual
+  // ECDH + lwIP-glue allocation timeline.
+  uint32_t _wgUpAt_ms{0};
+  bool _wgUpSnap200_done{true};
+  bool _wgUpSnap2s_done{true};
+  bool _wgUpSnap10s_done{true};
 };
 
 #endif  // ESPRACK_WIREGUARD_SERVICE_H

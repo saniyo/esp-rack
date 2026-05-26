@@ -247,6 +247,27 @@ void WireguardService::loop() {
   // Refresh the live state from the WG lib once per pass. We could
   // skip when down for efficiency, but the cost is negligible.
 #if HAVE_WIREGUARD_LIB
+  // Heap-trace timeline around WG up. The handshake fires async on
+  // the first packet exchanged with the peer (200-500 ms typical on
+  // a clean LAN), so the immediate wg.up-post snapshot only captures
+  // the begin()+addPeer() cost. These deferred snapshots reveal what
+  // the actual ECDH + lwIP-glue traffic adds AFTER setup. Each
+  // timestamp fires exactly once per up()-cycle; flags reset in down().
+  if (_wgUpAt_ms != 0) {
+    uint32_t since = millis() - _wgUpAt_ms;
+    if (!_wgUpSnap200_done && since >= 200) {
+      ESPRack::HeapMonitor::logSnapshot("wg.up+200ms");
+      _wgUpSnap200_done = true;
+    }
+    if (!_wgUpSnap2s_done && since >= 2000) {
+      ESPRack::HeapMonitor::logSnapshot("wg.up+2s");
+      _wgUpSnap2s_done = true;
+    }
+    if (!_wgUpSnap10s_done && since >= 10000) {
+      ESPRack::HeapMonitor::logSnapshot("wg.up+10s");
+      _wgUpSnap10s_done = true;
+    }
+  }
   bool actually_up = g_wg.is_initialized();
   if (actually_up != _state.is_up) {
     update([actually_up](WireguardSettings& s) {
@@ -420,6 +441,14 @@ bool WireguardService::up(const String& serverPublicKey,
                 ip.c_str(), host.c_str(), (unsigned)port,
                 allowAddr.toString().c_str());
   ESPRack::HeapMonitor::logSnapshot("wg.up-post");
+  // Arm the deferred snapshots — loop() fires them at +200ms / +2s
+  // / +10s. The actual ECDH handshake runs async on the first WG
+  // packet, so capturing only the begin()+addPeer() cost here misses
+  // the bulk of the heap impact.
+  _wgUpAt_ms = millis();
+  _wgUpSnap200_done = false;
+  _wgUpSnap2s_done  = false;
+  _wgUpSnap10s_done = false;
   update([](WireguardSettings& s) {
     s.is_up = true;
     s.up_since_ms = millis();
@@ -456,6 +485,12 @@ void WireguardService::down() {
           (int)g_wg.is_initialized());
     ESPRack::HeapMonitor::logSnapshot("wg.down-post");
   }
+  // Disarm the deferred-snapshot timeline so the next up() cycle
+  // starts a fresh probe window.
+  _wgUpAt_ms = 0;
+  _wgUpSnap200_done = true;
+  _wgUpSnap2s_done  = true;
+  _wgUpSnap10s_done = true;
 #endif
   update([](WireguardSettings& s) {
     bool was = s.is_up;
