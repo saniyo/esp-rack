@@ -38,6 +38,9 @@ class TLSContextService : public ITLSProvider {
     return _clientCertPem.length() > 0 && _clientKeyPem.length() > 0;
   }
   void attachToClient(WiFiClientSecure& client) override;
+  const String& caBundlePem()   const override { return _caBundlePem; }
+  const String& clientCertPem() const override { return _clientCertPem; }
+  const String& clientKeyPem()  const override { return _clientKeyPem; }
   void updateClientCert(const String& certPem, const String& keyPem) override;
   void clearClientCert() override;
 

@@ -46,7 +46,26 @@ class ITLSProvider {
   // present) to a freshly-constructed WiFiClientSecure so an HTTPS
   // request will get the right chain on handshake. Caller owns the
   // client lifetime — we just configure it.
+  //
+  // KEPT FOR BACKWARDS-COMPAT with cert-manager's enroll path which
+  // still uses WiFiClientSecure (mbedtls-based) for the bootstrap
+  // setInsecure → real-CA transition. Everything else (mothership
+  // check-ins, etc.) should pull cert material via the PEM accessors
+  // below and feed them into a BearSSL-backed ESP_SSLClient instead;
+  // see lib/ESPRack/src/PersistentTlsClient.cpp.
   virtual void attachToClient(WiFiClientSecure& client) = 0;
+
+  // PEM accessors — non-arduino-mbedtls TLS clients (ESP_SSLClient
+  // BearSSL, custom static-buffer mbedtls, etc.) call these to read
+  // the cert material without dragging in WiFiClientSecure. Returned
+  // String references are valid for the lifetime of the TLSContext
+  // singleton (App-scoped). After updateClientCert() / clearClientCert
+  // the OLD pointers are kept alive in _prevClient* slots for at
+  // least one rotation, so a client mid-handshake won't dereference
+  // freed memory; build a fresh client on the next request.
+  virtual const String& caBundlePem() const = 0;
+  virtual const String& clientCertPem() const = 0;
+  virtual const String& clientKeyPem() const = 0;
 
   // Push a new client cert+key (PEM strings) into the active TLS
   // context. Called by CertManagerService after successful enroll
