@@ -288,6 +288,14 @@ void MothershipService::begin() {
   // From this point on, every check-in goes through _tlsClient.
   _tlsClient.configure(_tls);
 
+  // One-time reserve for the per-checkin String scratch buffers.
+  // Body fits in ~360 B for a typical drain-three-results body;
+  // responses are 38-250 B on the happy path but a manifest_rev poll
+  // can be larger — 512 each is generous and keeps under 1 KB total
+  // permanent. Subsequent .remove(0) preserves capacity → no realloc.
+  _bodyBuf.reserve(512);
+  _respBuf.reserve(512);
+
   refreshRuntimeState();
 
   // Spawn the check-in task once at boot. Inside the loop the task
@@ -524,7 +532,14 @@ bool MothershipService::performOneCheckin(bool& outBurst) {
   // (rest.proxy of /rest/uiManifest = 10-15 KB) are split across
   // multiple check-ins via pushActionResult's chunking; we never
   // need to fit the full payload in one body.
-  DynamicJsonDocument req(6144);
+  //
+  // _reqDoc is a StaticJsonDocument<6144> member — its 6 KB pool
+  // lives in BSS, not heap. Reset between calls with .clear() to
+  // recycle the pool. Previously this allocated a DynamicJsonDocument
+  // on the heap every checkin and freed it on the way out, which
+  // produced a steady -6 KB/min max_alloc slope.
+  _reqDoc.clear();
+  JsonObject req = _reqDoc.to<JsonObject>();
   req["deviceId"]  = _cert->subjectCN();
   req["fwVer"]     = DeviceIdentity::version();
   req["hwVer"]     = DeviceIdentity::chipModelFull();
@@ -617,15 +632,19 @@ bool MothershipService::performOneCheckin(bool& outBurst) {
                   (unsigned)emitted, (unsigned)_resultRing.size());
   }
 
-  String body;
-  serializeJson(req, body);
+  // Reuse the member String buffers. .remove(0) preserves the reserved
+  // capacity and resets size to 0 — so serializeJson appends without
+  // any realloc/free traffic on the heap. Member buffers were
+  // .reserve(512)'d once in begin().
+  _bodyBuf.remove(0);
+  serializeJson(req, _bodyBuf);
 
   log_d("[mship] POST %s, body=%u B",
                 checkin_url.c_str(),
-                (unsigned)body.length());
+                (unsigned)_bodyBuf.length());
 
-  String respBody;
-  int code = _tlsClient.post(checkin_url, body, "application/json", respBody);
+  _respBuf.remove(0);
+  int code = _tlsClient.post(checkin_url, _bodyBuf, "application/json", _respBuf);
   log_d("[mship] HTTP code=%d", code);
 
   // Phase 1.5: consecutive-failure recovery. _tlsClient.post()
@@ -637,7 +656,7 @@ bool MothershipService::performOneCheckin(bool& outBurst) {
   // buffers that re-handshake cannot fail from heap fragmentation.
   static uint8_t s_consec_failures = 0;
   if (code < 200 || code >= 300) {
-    log_w("[mship] server error: %s", respBody.c_str());
+    log_w("[mship] server error: %s", _respBuf.c_str());
     s_consec_failures++;
     ESPRack::HeapMonitor::logSnapshot("mship-fail");
     log_w("[mship] consecutive failures=%u (HTTP=%d)",
@@ -667,7 +686,7 @@ bool MothershipService::performOneCheckin(bool& outBurst) {
     s_warmup_anchor_logged = true;
   }
 
-  log_d("[mship] response %u B", (unsigned)respBody.length());
+  log_d("[mship] response %u B", (unsigned)_respBuf.length());
 
   // Response: {"actions": [...], "nextCheckInSec": N}
   // Was 16 KB which on a fragmented heap (the very condition this
@@ -681,7 +700,7 @@ bool MothershipService::performOneCheckin(bool& outBurst) {
   // chunked action_results in the OUTBOUND body, not in this
   // response.
   DynamicJsonDocument resp(4096);
-  DeserializationError jerr = deserializeJson(resp, respBody);
+  DeserializationError jerr = deserializeJson(resp, _respBuf);
   if (jerr) {
     log_e("[mship] JSON parse: %s", jerr.c_str());
     return false;

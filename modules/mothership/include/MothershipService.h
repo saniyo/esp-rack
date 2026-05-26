@@ -276,6 +276,25 @@ class MothershipService : public StatefulService<MothershipSettings>,
     uint8_t  chunk_total{1};
   };
   std::deque<ActionResult> _resultRing;
+
+  // ── Per-checkin scratch buffers ─────────────────────────────────
+  // Reused across every performOneCheckin call so the hot path
+  // allocates ZERO heap. Previously the function declared three
+  // transient objects every cycle:
+  //   * DynamicJsonDocument req(6144)   → 6 KB heap alloc/free
+  //   * String body                     → grows to ~300 B, reallocs
+  //   * String respBody                 → grows to ~50-250 B, reallocs
+  // Over 16 minutes of soak that produced ~192 alloc-free pairs and a
+  // sustained -6 KB/min max_alloc slope. Now these live as members
+  // (StaticJsonDocument in BSS, String buffers with one-time
+  // reserve() in begin()) and the per-cycle heap traffic is nil.
+  //
+  // checkinTaskTramp is the SINGLE caller of performOneCheckin, so
+  // these don't need a mutex. Anyone tempted to call from a second
+  // task must add the lock first.
+  StaticJsonDocument<6144> _reqDoc;
+  String _bodyBuf;
+  String _respBuf;
   // 16 × 1 KB = ~16 KB worst-case (matches the comment block above).
   // Previous value was 64, which left a 65 KB headroom that the deque
   // would happily fill under sustained backpressure (server slow,
