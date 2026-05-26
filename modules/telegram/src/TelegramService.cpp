@@ -198,11 +198,22 @@ void TelegramService::begin() {
     if (_feature) _feature->broadcastWs(origin);
   }, false);
 
+  // Static stack — the 6 KB lives in BSS (not heap), so it doesn't
+  // appear as a permanent contiguous-heap hole. See Phase 1 of
+  // docs/plans/heap-baseline-fix.md — measured ~6 KB max_alloc gain.
+  {
+    constexpr uint32_t kStackWords = 6144 / sizeof(StackType_t);
+    static StackType_t  s_telStack[kStackWords];
+    static StaticTask_t s_telBlock;
 #if defined(CONFIG_FREERTOS_UNICORE) && CONFIG_FREERTOS_UNICORE
-  xTaskCreate(taskTrampoline, "TelTask", 6144, this, 1, &_task);
+    _task = xTaskCreateStatic(taskTrampoline, "TelTask", kStackWords,
+                              this, 1, s_telStack, &s_telBlock);
 #else
-  xTaskCreatePinnedToCore(taskTrampoline, "TelTask", 6144, this, 1, &_task, 1);
+    _task = xTaskCreateStaticPinnedToCore(
+        taskTrampoline, "TelTask", kStackWords, this, 1,
+        s_telStack, &s_telBlock, 1);
 #endif
+  }
 
   if (_feature) _feature->broadcastWs("boot");
 }

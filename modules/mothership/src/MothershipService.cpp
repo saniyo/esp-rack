@@ -296,18 +296,27 @@ void MothershipService::begin() {
   // the next iteration POSTs or sleeps. 8 KB stack matches the cert-
   // manager enrollment task: mbedtls TLS handshake + JSON response
   // parsing under one stack.
+  //
+  // Static stack — the buffer lives in BSS (not heap) so the 8 KB
+  // never appears as a contiguous-heap allocation. Measured impact:
+  // Phase 1 of the heap baseline fix freed up ~8 KB of max_alloc
+  // that used to be punched out as a permanent hole in the middle
+  // of the heap. See docs/plans/heap-baseline-fix.md.
   if (_task == nullptr) {
-    BaseType_t rc = xTaskCreatePinnedToCore(
+    constexpr uint32_t kStackWords = 8192 / sizeof(StackType_t);
+    static StackType_t  s_taskStack[kStackWords];
+    static StaticTask_t s_taskBlock;
+    _task = xTaskCreateStaticPinnedToCore(
         &MothershipService::checkinTaskTramp,
         "mothership",
-        8192,
+        kStackWords,
         this,
         1,
-        &_task,
+        s_taskStack,
+        &s_taskBlock,
         tskNO_AFFINITY);
-    if (rc != pdPASS) {
-      log_e("[mship.begin] xTaskCreate failed: %d", (int)rc);
-      _task = nullptr;
+    if (_task == nullptr) {
+      log_e("[mship.begin] xTaskCreateStatic failed");
     }
   }
 
@@ -487,19 +496,16 @@ bool MothershipService::performOneCheckin(bool& outBurst) {
     return false;
   }
 
-  // Phase 1: persistent TLS client. The handshake fires once per
-  // host (logged "new TLS handshake — host=..."), subsequent
-  // requests reuse the existing socket + mbedtls SSL session via
-  // HTTPClient::setReuse(true). Lifetime stats on _tlsClient.stats()
-  // expose lifetime_handshakes vs lifetime_reuse_hits — a healthy
-  // device should accrue thousands of reuse hits for every handshake.
-  if (!_tlsClient.beginRequest(checkin_url)) {
-    log_e("[mship.do] EARLY: beginRequest failed for %s",
-          checkin_url.c_str());
-    return false;
-  }
-  HTTPClient& http = _tlsClient.http();
-  http.addHeader("Content-Type", "application/json");
+  // Phase 1 (BearSSL re-write): _tlsClient now owns a persistent
+  // ESP_SSLClient over WiFiClient. The very first call to post()
+  // does the TLS handshake; every subsequent call to the same host
+  // reuses the socket + TLS session. Lifetime stats on
+  // _tlsClient.stats() expose lifetime_handshakes vs
+  // lifetime_reuse_hits — a healthy device should accrue thousands
+  // of reuse hits for every handshake. BearSSL uses caller-supplied
+  // static buffers (SSLCLIENT_HALF_DUPLEX / STATIC_*_BUFFER_SIZE in
+  // platformio.ini), so the TLS layer no longer fragments heap on
+  // reconnect.
 
   // Body: {deviceId, fwVer, hwVer, hwRev, uptimeSec, freeHeap, action_results[]}
   // All identity fields come from the single source of truth in
@@ -618,45 +624,26 @@ bool MothershipService::performOneCheckin(bool& outBurst) {
                 checkin_url.c_str(),
                 (unsigned)body.length());
 
-  int code = http.POST(body);
+  String respBody;
+  int code = _tlsClient.post(checkin_url, body, "application/json", respBody);
   log_d("[mship] HTTP code=%d", code);
 
-  // Phase 1.5: consecutive-failure recovery. Phase 1's PersistentTlsClient
-  // keeps the TLS session alive across check-ins, but the moment the
-  // underlying TCP socket actually dies (Wi-Fi blip, server-side
-  // keep-alive timeout, NAT eviction) the reuse path collapses and
-  // every subsequent reconnect hits MBEDTLS_ERR_SSL_ALLOC_FAILED
-  // (-32512) because the 32 KB contiguous block is now blocked by
-  // small AsyncTCP/WS/JSON allocations that arrived during the soak.
-  //
-  // Recovery strategy:
-  //   * On every failure: log heap state via HeapMonitor.logSnapshot
-  //     so we can correlate failure with max_alloc drift.
-  //   * After 3 consecutive failures: hardReset() the PersistentTlsClient
-  //     (delete + recreate the WiFiClientSecure, which forces mbedtls
-  //     to fully free + reallocate). If the heap can satisfy the 32 KB
-  //     ask, we recover; if not, the next checkin will still fail and
-  //     trigger another hardReset cycle — far better than the silent
-  //     handshake-fail-loop we had before.
-  //
-  // The counter is a function-local static (not a member) because the
-  // semantics are purely local to performOneCheckin and we never want
-  // it to outlive the function across module re-init.
+  // Phase 1.5: consecutive-failure recovery. _tlsClient.post()
+  // returns negative for transport errors and the 2xx-or-not check
+  // here covers both. With BearSSL the failure mode is no longer
+  // OOM-on-reconnect — it's almost always a TCP RST or read timeout
+  // (peer restarted, NAT eviction, Wi-Fi blip). hardReset() drops
+  // the socket so the next call re-handshakes; with BearSSL's static
+  // buffers that re-handshake cannot fail from heap fragmentation.
   static uint8_t s_consec_failures = 0;
   if (code < 200 || code >= 300) {
-    String err = http.getString();
-    log_w("[mship] server error: %s", err.c_str());
-    _tlsClient.endRequest();
+    log_w("[mship] server error: %s", respBody.c_str());
     s_consec_failures++;
     ESPRack::HeapMonitor::logSnapshot("mship-fail");
     log_w("[mship] consecutive failures=%u (HTTP=%d)",
           (unsigned)s_consec_failures, code);
     if (s_consec_failures >= 2) {
-      log_w("[mship] threshold hit (2) — triggering tlsClient.hardReset() "
-            "to escape OOM handshake loop");
-      // Snapshot internal heap detail right before the reset so we
-      // can see what's blocking the 32 KB contig block. Internal-only
-      // (we don't care about PSRAM/DMA caps for mbedtls).
+      log_w("[mship] threshold hit (2) — triggering tlsClient.hardReset()");
       heap_caps_print_heap_info(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
       _tlsClient.hardReset();
       ESPRack::HeapMonitor::logSnapshot("after-hardReset");
@@ -668,19 +655,18 @@ bool MothershipService::performOneCheckin(bool& outBurst) {
   // across transient blips.
   s_consec_failures = 0;
 
-  // Phase 1.5b: anchor the "post-warmup" heap baseline. The very first
-  // successful checkin is when mbedtls just allocated its 32 KB content
-  // buffers — this snapshot tells us how much contiguous heap we had to
-  // burn for the handshake. Subsequent soak snapshots should sit at
-  // roughly this max_alloc level; drift downward = fragmentation.
+  // Anchor the post-warmup heap baseline. The very first successful
+  // checkin is when BearSSL just bound the cert chain; this snapshot
+  // tells us the resident TLS-layer cost. Subsequent soak snapshots
+  // should sit at roughly this max_alloc level; drift downward = a
+  // heap consumer elsewhere (web, AsyncTCP, modules) that we should
+  // investigate.
   static bool s_warmup_anchor_logged = false;
   if (!s_warmup_anchor_logged) {
     ESPRack::HeapMonitor::logSnapshot("post-warmup");
     s_warmup_anchor_logged = true;
   }
 
-  String respBody = http.getString();
-  _tlsClient.endRequest();
   log_d("[mship] response %u B", (unsigned)respBody.length());
 
   // Response: {"actions": [...], "nextCheckInSec": N}
