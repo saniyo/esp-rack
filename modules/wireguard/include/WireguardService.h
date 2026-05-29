@@ -30,7 +30,7 @@
 // without inspecting the firmware binary. Defaults to the
 // static-allocation fork; consumers can override from build_flags.
 #ifndef WIREGUARD_BACKEND_NAME
-#define WIREGUARD_BACKEND_NAME    "WireGuard-ESPRack v0.1.0"
+#define WIREGUARD_BACKEND_NAME    "WireGuard-ESPRack v0.1.1"
 #endif
 
 #include <StatefulService.h>
