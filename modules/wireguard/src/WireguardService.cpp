@@ -117,6 +117,15 @@ void WireguardSettings::buildForm(WireguardSettings& s,
                               (double)s.rx_bytes, format("0"),
                               label("Rx bytes"), icon("Download"));
 
+  // Library-backend identifier. Tells the operator which tunnel
+  // implementation is running — the static-allocation
+  // WireGuard-ESPRack fork (default v0.2.0+) or whatever override a
+  // consumer set via build_flags. Read-only diagnostic, not a config.
+  FormBuilder::addTextField(st, "backend", AF::R,
+                            WIREGUARD_BACKEND_NAME,
+                            label("Library backend"),
+                            icon("Memory"));
+
   FormBuilder::addMessageField(st, "m_config_where",
       "Configuration lives on the mothership, not here. The operator "
       "sets the subnet, port, and public endpoint once at "

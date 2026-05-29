@@ -24,6 +24,15 @@
 // operator sees identical numbers to whatever programmatic code
 // uses.
 
+// Identifier for the active WG-library backend. Surfaced in the
+// /uiManifest WireGuard form (read-only Backend field) and exposed
+// to operators so they know which tunnel implementation is running
+// without inspecting the firmware binary. Defaults to the
+// static-allocation fork; consumers can override from build_flags.
+#ifndef WIREGUARD_BACKEND_NAME
+#define WIREGUARD_BACKEND_NAME    "WireGuard-ESPRack v0.1.0"
+#endif
+
 #include <StatefulService.h>
 #include <ConfigManager.h>
 #include <ConfigDelegate.h>

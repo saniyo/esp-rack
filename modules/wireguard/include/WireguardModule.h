@@ -16,10 +16,23 @@
 #include "WireguardService.h"
 #include <memory>
 
+// Module version. Bumped to 0.2.0 when the underlying tunnel library
+// was switched from ciniml/francescolavra/WireGuard-ESP32-Arduino to
+// the static-allocation WireGuard-ESPRack fork (handshake + transport
+// pbufs from PBUF_POOL, wireguard_device in BSS — see
+// https://github.com/saniyo/WireGuard-ESPRack).
+// The library-backend identifier itself lives in WireguardService.h
+// as WIREGUARD_BACKEND_NAME so it can be surfaced through the
+// /uiManifest WG form without WireguardModule.h being on the include
+// path of WireguardService.cpp.
+#define WIREGUARD_MODULE_VERSION  "0.2.0"
+
 class WireGuardModule : public ESPRack::Module {
  public:
   void describe(ESPRack::ModuleDescriptor& d) override {
-    d.id = "wireguard"; d.version = "0.1.0"; d.priority = 14;
+    d.id = "wireguard";
+    d.version = WIREGUARD_MODULE_VERSION;
+    d.priority = 14;
     d.requires_ = {"wifi", "cert-manager"};
   }
 

@@ -1,7 +1,7 @@
 {
   "name": "WireGuardModule",
-  "version": "0.1.0",
-  "description": "ESPRack module: on-demand WireGuard tunnel to mothership. Curve25519 keypair generated via mbedtls on first boot, persisted encrypted in SecretsVault. Tunnel comes up on actionOpenTunnel from server, down on actionCloseTunnel or on idle teardown command. See docs/plans/wireguard-tunnel.md for the full architecture.",
+  "version": "0.2.0",
+  "description": "ESPRack module: on-demand WireGuard tunnel to mothership. Curve25519 keypair generated via mbedtls on first boot, persisted encrypted in SecretsVault. Tunnel comes up on actionOpenTunnel from server, down on actionCloseTunnel or on idle teardown command. As of v0.2.0 wired against WireGuard-ESPRack (static-allocation fork — handshake + transport pbufs routed through PBUF_POOL, wireguard_device in BSS) to keep WG up/down cycles from fragmenting heap on the ESP32-C3. See docs/plans/wireguard-tunnel.md for the full architecture and the WireGuard-ESPRack repo for the fork rationale.",
   "license": "MIT",
   "frameworks": [
     "arduino"
