@@ -13,6 +13,21 @@
 #include <esp_heap_caps.h>
 #include <HeapMonitor.h>
 
+// ── Observer-free heap mirror ───────────────────────────────────────
+// File-scope statics (instead of class statics) so the linker doesn't
+// need a single-instance class context — these are functionally
+// per-process anyway: a single mothership task fills them, a single
+// async_tcp task reads them. Word-sized reads/writes are atomic on
+// ESP32; the captured_at_ms write happens LAST (memory barrier
+// implicit via volatile + sequential C++ semantics here) so a reader
+// seeing a fresh ts can trust the value pair above. Zero ts means "no
+// check-in yet" → accessor returns false.
+namespace {
+volatile uint32_t s_last_sent_free        = 0;
+volatile uint32_t s_last_sent_max         = 0;
+volatile uint32_t s_last_sent_captured_ms = 0;
+}  // namespace
+
 // ===== Persistence =====
 //
 // readConfig / update are flat sequences — no loops, no conditionals,
@@ -527,13 +542,15 @@ bool MothershipService::performOneCheckin(bool& outBurst) {
   // memory variant — operator needs to tell N16R8 from N8R2 at a
   // glance when picking firmware.
   //
-  // 6 KB doc — header fields + up to ~3 chunks per drain (each
-  // chunk capped at 1 KB summary + small framing). Large responses
-  // (rest.proxy of /rest/uiManifest = 10-15 KB) are split across
-  // multiple check-ins via pushActionResult's chunking; we never
-  // need to fit the full payload in one body.
+  // 3 KB doc — header fields + up to ~3 chunks per drain (each
+  // chunk capped at 1 KB summary but typically <300 B). Typical
+  // serialised body is 260-370 B; ArduinoJson v6 needs ~3x that in
+  // pool memory, so 1.5 KB suffices and 3 KB keeps ×1.5 safety.
+  // Large responses (rest.proxy of /rest/uiManifest = 10-15 KB)
+  // are split across multiple check-ins via pushActionResult's
+  // chunking; we never need to fit the full payload in one body.
   //
-  // _reqDoc is a StaticJsonDocument<6144> member — its 6 KB pool
+  // _reqDoc is a StaticJsonDocument<3072> member — its 3 KB pool
   // lives in BSS, not heap. Reset between calls with .clear() to
   // recycle the pool. Previously this allocated a DynamicJsonDocument
   // on the heap every checkin and freed it on the way out, which
@@ -549,7 +566,24 @@ bool MothershipService::performOneCheckin(bool& outBurst) {
     req["hwRev"]   = DeviceIdentity::hwRevision();
   }
   req["uptimeSec"] = (uint32_t)(millis() / 1000);
-  req["freeHeap"]  = ESP.getFreeHeap();
+  // Capture heap exactly once, into locals first, then publish to the
+  // observer-free mirror (s_last_sent_*) AND into the checkin body.
+  // SystemStatus form reads the mirror via lastSentHeap() to display
+  // a "Heap @ last checkin" row that matches what the server sees —
+  // eliminates the observer effect that the form's own ESP.getFreeHeap()
+  // suffers from (AsyncJsonResponse pool + lwIP TCP_PCB held during
+  // the request).
+  const uint32_t fh = ESP.getFreeHeap();
+  const uint32_t ma = ESP.getMaxAllocHeap();
+  req["freeHeap"]  = fh;
+  req["maxAlloc"]  = ma;
+  s_last_sent_free       = fh;
+  s_last_sent_max        = ma;
+  // Write captured_at_ms LAST so a concurrent reader that observes
+  // a fresh ts is guaranteed to see fresh fh/ma above. The reader's
+  // retry loop in lastSentHeap() catches the inverse race (ts changed
+  // mid-read).
+  s_last_sent_captured_ms = millis();
 
   // WG self-report — server-side _handle_checkin uses this block to
   // auto-provision a peer + queue openTunnel when a trusted device
@@ -632,6 +666,16 @@ bool MothershipService::performOneCheckin(bool& outBurst) {
                   (unsigned)emitted, (unsigned)_resultRing.size());
   }
 
+  // Bounds-check the BSS pool before we serialise — _reqDoc is sized to
+  // the observed body shape (3 KB). If a future build emits more chunks
+  // or a heavier action payload, this fires before we send a truncated
+  // body to the server. Bump _reqDoc back up if it ever trips.
+  if (_reqDoc.overflowed()) {
+    log_w("[mship] _reqDoc pool overflowed (used=%u of %u) — body will be truncated",
+          (unsigned)_reqDoc.memoryUsage(),
+          (unsigned)_reqDoc.capacity());
+  }
+
   // Reuse the member String buffers. .remove(0) preserves the reserved
   // capacity and resets size to 0 — so serializeJson appends without
   // any realloc/free traffic on the heap. Member buffers were
@@ -639,9 +683,11 @@ bool MothershipService::performOneCheckin(bool& outBurst) {
   _bodyBuf.remove(0);
   serializeJson(req, _bodyBuf);
 
-  log_d("[mship] POST %s, body=%u B",
+  log_d("[mship] POST %s, body=%u B (pool=%u/%u)",
                 checkin_url.c_str(),
-                (unsigned)_bodyBuf.length());
+                (unsigned)_bodyBuf.length(),
+                (unsigned)_reqDoc.memoryUsage(),
+                (unsigned)_reqDoc.capacity());
 
   _respBuf.remove(0);
   int code = _tlsClient.post(checkin_url, _bodyBuf, "application/json", _respBuf);
@@ -699,7 +745,12 @@ bool MothershipService::performOneCheckin(bool& outBurst) {
   // window. Anything bigger (config.dump payloads etc.) ships via
   // chunked action_results in the OUTBOUND body, not in this
   // response.
-  DynamicJsonDocument resp(4096);
+  // P1 — reuse the BSS-resident _respDoc instead of a per-checkin
+  // DynamicJsonDocument(4096) heap alloc/free. clear() recycles the
+  // pool between checkins; mothership runs forever so a resident doc is
+  // the right call (same rationale as _reqDoc).
+  _respDoc.clear();
+  JsonDocument& resp = _respDoc;
   DeserializationError jerr = deserializeJson(resp, _respBuf);
   if (jerr) {
     log_e("[mship] JSON parse: %s", jerr.c_str());
@@ -1083,6 +1134,48 @@ int32_t MothershipService::nextCheckInInSec() const {
   uint32_t now_s = (uint32_t)(millis() / 1000);
   if (_state.next_checkin_at_s <= now_s) return 0;
   return (int32_t)(_state.next_checkin_at_s - now_s);
+}
+
+// Returns the (freeHeap, maxAlloc, age_ms) snapshot taken at the
+// performOneCheckin moment — the cleanest baseline available on
+// device. Returns false when no checkin has ever fired (boot before
+// the first /api/v1/checkin round-trip succeeded enough to even
+// build a body).
+//
+// The read-side retry guards against the rare torn-read where the
+// mothership task finishes a fresh check-in mid-call: we re-read
+// captured_at_ms after pulling fh/ma and retry once if it moved. One
+// retry is enough because the writer runs at most once per cadence
+// (≥5 s) — two writes inside one accessor call are impossible.
+bool MothershipService::lastSentHeap(uint32_t& free_out,
+                                       uint32_t& max_out,
+                                       uint32_t& age_ms_out) {
+  for (int attempt = 0; attempt < 2; ++attempt) {
+    const uint32_t ts1 = s_last_sent_captured_ms;
+    if (ts1 == 0) {
+      free_out = 0;
+      max_out = 0;
+      age_ms_out = 0;
+      return false;
+    }
+    const uint32_t fh  = s_last_sent_free;
+    const uint32_t ma  = s_last_sent_max;
+    const uint32_t ts2 = s_last_sent_captured_ms;
+    if (ts1 == ts2) {
+      free_out   = fh;
+      max_out    = ma;
+      const uint32_t now = millis();
+      age_ms_out = (now >= ts1) ? (now - ts1) : 0;
+      return true;
+    }
+    // Writer landed between reads — retry once. If we still race on
+    // the second attempt (essentially impossible), fall through to
+    // returning false to keep the caller deterministic.
+  }
+  free_out = 0;
+  max_out = 0;
+  age_ms_out = 0;
+  return false;
 }
 
 // ===== Phase 3 — Active-session cadence =====

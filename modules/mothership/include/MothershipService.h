@@ -175,6 +175,27 @@ class MothershipService : public StatefulService<MothershipSettings>,
   String checkinUrl()    const override { return _state.checkinUrl(); }
   String recoverUrl()    const override { return _state.recoverUrl(); }
 
+  // ── Observer-free heap mirror ──
+  // Snapshot of (freeHeap, maxAlloc, millis_at_capture) taken at the
+  // exact moment performOneCheckin filled req["freeHeap"] / "maxAlloc"
+  // for the server. That measurement path has near-zero transient
+  // overhead (static BSS reqDoc, no per-cycle alloc) so it's the
+  // cleanest baseline available on-device.
+  //
+  // Read by SystemStatus form so the operator sees on the device UI
+  // exactly the same numbers the mothership has. Returns `false` and
+  // leaves out-params zeroed if no check-in has happened yet.
+  //
+  // Word-sized loads/stores on ESP32 are atomic by hardware — no lock
+  // needed even though the writer is the mothership task and the
+  // reader is async_tcp. A torn read across the three values would
+  // make `age_ms` slightly inconsistent with the heap pair; the loop
+  // does a one-shot retry if it observes a `captured_at_ms` change
+  // mid-read to keep the snapshot atomic from the caller's view.
+  static bool lastSentHeap(uint32_t& free_out,
+                            uint32_t& max_out,
+                            uint32_t& age_ms_out);
+
  private:
   ConfigDelegate<MothershipSettings>      _cfg;
   WebFeatureEntry<MothershipSettings>*    _feature{nullptr};
@@ -292,7 +313,23 @@ class MothershipService : public StatefulService<MothershipSettings>,
   // checkinTaskTramp is the SINGLE caller of performOneCheckin, so
   // these don't need a mutex. Anyone tempted to call from a second
   // task must add the lock first.
-  StaticJsonDocument<6144> _reqDoc;
+  //
+  // _reqDoc pool sized to the observed body. Typical checkin payload
+  // serialises to ~260-370 B; ArduinoJson v6 needs ~3x that in pool
+  // memory (slot bookkeeping + copied keys + nested-object overhead),
+  // so 1.5 KB is comfortable, 3 KB leaves ×1.5 safety. Was 6144 —
+  // halved to 3072 to claw 3 KB back into BSS-for-heap on the C3.
+  // If a future build emits a heavier body (e.g. WG triplet + action
+  // chunk batches > MAX_CHUNKS_PER_CHECKIN), bump back up and add a
+  // bounds-check log.
+  StaticJsonDocument<3072> _reqDoc;
+  // P1 — inbound response-parse doc. The OUTBOUND scratch (req/body/
+  // respBody above) was already resident; the response parse was still
+  // a per-checkin DynamicJsonDocument(4096) — the last steady-state
+  // JSON heap churn. Now recycled in BSS via clear() each checkin.
+  // Sized like the old transient (4096): bigger payloads ship via
+  // chunked action_results in the OUTBOUND body, not this response.
+  StaticJsonDocument<4096> _respDoc;
   String _bodyBuf;
   String _respBuf;
   // 16 × 1 KB = ~16 KB worst-case (matches the comment block above).
