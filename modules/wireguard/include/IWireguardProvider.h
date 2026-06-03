@@ -27,7 +27,11 @@ class IWireguardProvider {
   // the first keypair generation (rare — happens on boot before
   // SecretsVault is unlocked). The PRIVATE key never leaves the
   // device, no getter for it.
-  virtual String publicKey() const = 0;
+  //
+  // Returned by const-ref to the provider's stable internal storage to
+  // avoid a per-call heap copy (P3); valid until the next WG state
+  // mutation — copy it if you need to hold it longer.
+  virtual const String& publicKey() const = 0;
 
   // ── Runtime state ──
   // True if the tunnel netif is currently up AND the most recent
@@ -49,8 +53,9 @@ class IWireguardProvider {
   // Assigned tunnel IP given by the mothership during the most
   // recent openTunnel cycle, e.g. "10.99.0.7". Empty if the tunnel
   // has never been brought up (so AsyncWebServer doesn't try to
-  // bind a non-existent address).
-  virtual String assignedIp() const = 0;
+  // bind a non-existent address). Returned by const-ref to stable
+  // internal storage (P3); valid until the next WG state mutation.
+  virtual const String& assignedIp() const = 0;
 
   // Seconds since the most recent successful handshake. INT32_MAX
   // when no handshake has ever happened on the current tunnel
