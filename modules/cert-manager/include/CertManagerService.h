@@ -194,17 +194,15 @@ class CertManagerService : public StatefulService<CertManagerSettings>,
   ConfigDelegate<CertManagerSettings>      _cfg;
   WebFeatureEntry<CertManagerSettings>*    _feature{nullptr};
   ITLSProvider*                            _tls{nullptr};
-  // TODO (Phase 1 of memory-fragmentation-master-plan, next iter):
-  // wrap cert-enroll / cert-renew / cert-recover TLS calls in a
-  // PersistentTlsClient too. Complication: enroll uses setInsecure
-  // (no CA pinned yet), renew/recover use full mTLS — so the
-  // persistent client needs a mode switch on first successful
-  // enrollment. For now, this module still does per-call
-  // WiFiClientSecure construction. cert-enroll fires once per
-  // enrollment window (until a cert lands), then never again per
-  // boot, so the per-attempt fragmentation cost here is bounded.
-  // The repeating-forever fragmentation source — mothership /checkin
-  // — has its persistent client in this same release.
+  // P0 (memory-fragmentation master plan) — DONE: cert-enroll /
+  // cert-renew / cert-recover now run through an ON-DEMAND BearSSL
+  // PersistentTlsClient (configureInsecure() for enroll + recover,
+  // full mTLS configure() for renew). It's heap-allocated only for the
+  // duration of each rare flow and freed immediately after, so its
+  // ~8 KB footprint is NOT resident in steady state — and there's no
+  // more per-call mbedtls WiFiClientSecure needing ~32 KB contiguous
+  // scratch per handshake. Each flow is gated on max_alloc so a
+  // fragmented heap defers instead of failing mid-handshake.
   // Optional — set via setWireguardProvider after WireGuardModule
   // installs (priorities 12 vs 14, but the App pointer is stable
   // throughout, so plain late-bind is enough).
@@ -336,11 +334,10 @@ class CertManagerService : public StatefulService<CertManagerSettings>,
   // Polling task that hits recover_url at RECOVERY_POLL_INTERVAL_S
   // cadence (60s) carrying {deviceId, recovery_token,
   // lastKnownSerial}. Runs WITHOUT mTLS (cert is dead) — uses
-  // setInsecure on the WiFiClientSecure since we can't even verify
-  // the server's cert against our existing CA when the entire
-  // cert.json might be lost. Production hardens this by bundling a
-  // bootstrap CA into firmware that signs the recover endpoint's
-  // cert.
+  // configureInsecure() on the on-demand BearSSL client since we can't
+  // even verify the server's cert against our existing CA when the
+  // entire cert.json might be lost. Production hardens this by bundling
+  // a bootstrap CA into firmware that signs the recover endpoint's cert.
   //
   // Server returns either {approved: false, status: "pending|...} or
   // {approved: true, cert_pem, ca_bundle_pem} — the latter triggers

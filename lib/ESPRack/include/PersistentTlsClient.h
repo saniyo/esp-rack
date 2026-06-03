@@ -65,6 +65,15 @@ class PersistentTlsClient {
   // on the FIRST post() if the provider wasn't ready yet.
   void configure(ITLSProvider* tls);
 
+  // Bootstrap / insecure mode — no CA pinned, no client cert. BearSSL
+  // skips peer-cert chain validation AND the NTP-clock gate (the clock
+  // is only needed to validate cert NotBefore/NotAfter, which we're not
+  // doing here). The channel is still TLS-encrypted; only peer
+  // authentication is waived. Used by cert-manager's enroll / recover
+  // flows, where the device has no trust anchor yet (the CA bundle
+  // arrives in the very response). Mutually exclusive with configure().
+  void configureInsecure();
+
   // POST `body` as `content_type` to the given HTTPS URL. Returns
   // the HTTP status code on success, or a negative transport error:
   //   -1 — bad URL / DNS / TCP-connect / TLS-handshake failure
@@ -78,10 +87,15 @@ class PersistentTlsClient {
   // On any failure the connection is dropped (so the next call
   // re-handshakes); on success the connection is kept alive for reuse
   // unless the server sent `Connection: close`.
+  // `extra_headers`, when non-null, is injected verbatim into the
+  // request header block — the caller supplies complete "Name: value\r\n"
+  // line(s) (e.g. an "Authorization: Bearer …" line for enroll). Pass
+  // nullptr for none; existing callers are unaffected.
   int post(const String& url,
            const String& body,
            const char*   content_type,
-           String&       out_response);
+           String&       out_response,
+           const char*   extra_headers = nullptr);
 
   // Hard reset — drop the current socket + clear the connection-live
   // flag. With BearSSL this does NOT free the static in/out buffers
@@ -106,6 +120,11 @@ class PersistentTlsClient {
   // well under any plausible heap-pressure threshold.
   static constexpr size_t kMaxResponseBytes = 4096;
 
+  // Override the response-body retention cap (default kMaxResponseBytes).
+  // cert-manager bumps this so a cert + full CA-chain PEM response isn't
+  // truncated. Call before post().
+  void setMaxResponseBytes(size_t n) { _max_response_bytes = n; }
+
  private:
   WiFiClient    _tcp;
   ESP_SSLClient _ssl;
@@ -115,6 +134,12 @@ class PersistentTlsClient {
   String        _current_path;
   bool          _connection_live{false};
   bool          _certs_loaded{false};
+  // Bootstrap/insecure mode (see configureInsecure). When true, certs
+  // are not loaded and the NTP gate + peer validation are skipped.
+  bool          _insecure{false};
+  // Response-body retention cap; overridable per-instance via
+  // setMaxResponseBytes (default kMaxResponseBytes).
+  size_t        _max_response_bytes{kMaxResponseBytes};
   // Stable BSS-resident copy of the host string handed to
   // ESP_SSLClient::connectSSL(). Empirically, passing
   // _current_host.c_str() (heap-resident String body) into the

@@ -24,6 +24,12 @@ PersistentTlsClient::PersistentTlsClient() {
 }
 
 void PersistentTlsClient::loadCerts() {
+  if (_insecure) {
+    // Bootstrap flows have no trust anchor and no client identity.
+    _ssl.setInsecure();
+    _certs_loaded = true;
+    return;
+  }
   if (!_tls) return;
   const String& ca = _tls->caBundlePem();
   const String& cert = _tls->clientCertPem();
@@ -66,8 +72,21 @@ void PersistentTlsClient::loadCerts() {
 }
 
 void PersistentTlsClient::configure(ITLSProvider* tls) {
+  _insecure = false;
   _tls = tls;
   loadCerts();
+}
+
+void PersistentTlsClient::configureInsecure() {
+  // No trust anchor, no client identity — BearSSL skips peer-cert
+  // validation. Intended for the rare bootstrap flows (enroll /
+  // recover) that run on an on-demand, heap-allocated client which is
+  // freed the moment the flow completes, so this ~8 KB TLS footprint
+  // is NOT resident in steady state.
+  _insecure = true;
+  _tls = nullptr;
+  _certs_loaded = true;   // nothing to load
+  _ssl.setInsecure();
 }
 
 bool PersistentTlsClient::extractHostPortPath(const String& url,
@@ -112,12 +131,17 @@ bool PersistentTlsClient::ensureConnected() {
   // waits for NTP (CertManager's task already waits on Wi-Fi+NTP
   // for the same reason).
   time_t now = time(nullptr);
-  if (now < 1700000000) {  // 2023-11-14
-    log_w("[tls.persist] skipping handshake — wall clock not yet "
-          "synced (epoch=%lu, need NTP)", (unsigned long)now);
-    return false;
+  // The clock only matters for validating the server cert's
+  // NotBefore/NotAfter. In insecure mode (no peer validation) skip the
+  // gate so bootstrap enroll can run before SNTP has landed.
+  if (!_insecure) {
+    if (now < 1700000000) {  // 2023-11-14
+      log_w("[tls.persist] skipping handshake — wall clock not yet "
+            "synced (epoch=%lu, need NTP)", (unsigned long)now);
+      return false;
+    }
+    _ssl.setX509Time((uint32_t)now);
   }
-  _ssl.setX509Time((uint32_t)now);
   _stats.lifetime_handshakes++;
   log_i("[tls.persist] new TLS handshake (BearSSL) — host=%s port=%u "
         "(handshake #%u for this client) X509Time=%lu",
@@ -230,7 +254,8 @@ String PersistentTlsClient::readLine(uint32_t deadline_ms,
 int PersistentTlsClient::post(const String& url,
                               const String& body,
                               const char*   content_type,
-                              String&       out_response) {
+                              String&       out_response,
+                              const char*   extra_headers) {
   out_response = "";
 
   String new_host, new_path;
@@ -264,8 +289,9 @@ int PersistentTlsClient::post(const String& url,
   // peer that ONLY looks at the literal header still keeps the
   // socket open. User-Agent matches what HTTPClient used to send so
   // any server-side log greps keep working.
+  size_t extra_len = (extra_headers ? strlen(extra_headers) : 0);
   String req;
-  req.reserve(256 + body.length());
+  req.reserve(256 + body.length() + extra_len);
   req += "POST ";       req += _current_path;        req += " HTTP/1.1\r\n";
   req += "Host: ";      req += _current_host;
   if (_current_port != 443) {
@@ -275,6 +301,9 @@ int PersistentTlsClient::post(const String& url,
   req += "User-Agent: ESPRack-PersistentTlsClient\r\n";
   req += "Accept: */*\r\n";
   req += "Connection: keep-alive\r\n";
+  if (extra_len) {
+    req += extra_headers;   // caller supplies complete "Name: value\r\n" line(s)
+  }
   req += "Content-Type: "; req += content_type;       req += "\r\n";
   req += "Content-Length: "; req += String(body.length()); req += "\r\n";
   req += "\r\n";
@@ -334,14 +363,14 @@ int PersistentTlsClient::post(const String& url,
   }
 
   // Body — bounded by Content-Length and by our own cap. If the
-  // server sent a > kMaxResponseBytes response, we still consume
+  // server sent a > _max_response_bytes response, we still consume
   // the rest from the socket (so the next request finds a clean
-  // stream) but only retain the first kMaxResponseBytes in
+  // stream) but only retain the first _max_response_bytes in
   // out_response. mship responses are tiny; this branch is purely
   // defensive.
   if (content_length > 0) {
-    size_t retain_max = (size_t)content_length < kMaxResponseBytes
-                        ? (size_t)content_length : kMaxResponseBytes;
+    size_t retain_max = (size_t)content_length < _max_response_bytes
+                        ? (size_t)content_length : _max_response_bytes;
     out_response.reserve(retain_max);
     long remaining = content_length;
     uint8_t buf[256];
@@ -354,8 +383,8 @@ int PersistentTlsClient::post(const String& url,
         delay(1);
         continue;
       }
-      if (out_response.length() < kMaxResponseBytes) {
-        size_t space = kMaxResponseBytes - out_response.length();
+      if (out_response.length() < _max_response_bytes) {
+        size_t space = _max_response_bytes - out_response.length();
         size_t take = (size_t)got < space ? (size_t)got : space;
         out_response.concat((const char*)buf, take);
       }

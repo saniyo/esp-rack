@@ -18,16 +18,30 @@
 #include <mbedtls/x509_crt.h>
 #include <mbedtls/error.h>
 
-// HTTPS client + JSON for the enrollment POST.
-#include <HTTPClient.h>
+// On-demand BearSSL HTTPS client (P0 memory-fragmentation work) + JSON
+// for the enroll / renew / recover POSTs. We no longer construct
+// mbedtls' WiFiClientSecure (~32 KB contiguous scratch per handshake);
+// the BearSSL PersistentTlsClient is heap-allocated only for the
+// duration of each rare cert flow and freed the moment it completes —
+// so its ~8 KB footprint is not resident in steady state.
+#include "PersistentTlsClient.h"
+#include <memory>
+#include <new>      // std::nothrow
 #include <WiFi.h>
-#include <WiFiClientSecure.h>
 #include <ArduinoJson.h>
 #include <time.h>
 
 #if defined(ESP32)
 #include <esp_mac.h>   // esp_read_mac for MAC-based CN derivation
 #endif
+
+// Minimum largest-contiguous-heap block required before we spin up an
+// on-demand BearSSL client (~8 KB object + request/response scratch).
+// Below this we fail soft and let the task retry later rather than risk
+// a mid-handshake allocation failure that leaves fragmentation residue
+// (see docs/plans/failed-handshake-leaves-residue.md). Tunable; confirm
+// against C3 soak data.
+static constexpr uint32_t kMinTlsContiguous = 14336;  // 14 KB
 
 // ===== Persistence (ConfigDelegate) =====
 
@@ -951,59 +965,15 @@ CertManagerService::EnrollResult CertManagerService::postEnrollOnce(
     return EnrollResult::ServerError;
   }
 
-  // Heap diagnostics before TLS — surfaces the
-  // MBEDTLS_ERR_SSL_ALLOC_FAILED (-32512) failure mode where the
-  // device's heap fragments enough that the next handshake can't
-  // get its ~25 KB contiguous scratch. When this fires it's a
-  // device-wide stuck state: mothership soft-watchdog (see
-  // MothershipService) catches the pattern and forces esp_restart()
-  // after N consecutive failures.
-  log_i("[cert.enroll] heap pre-TLS: free=%u max_alloc=%u",
-        (unsigned)ESP.getFreeHeap(),
-        (unsigned)ESP.getMaxAllocHeap());
-
-  WiFiClientSecure secureClient;
-  // FIRST-ENROLLMENT TLS POSTURE: we don't have a CA pinned yet
-  // (the bundle ARRIVES in this very response), so we accept
-  // whatever cert the server presents. Production builds should
-  // pre-bundle a bootstrap CA into firmware and load it here via
-  // _tls->loadCaChain(BOOTSTRAP_CA_PEM) BEFORE this call.
-  // For dev / mock-server testing, setInsecure() lets us reach
-  // a self-signed mock without any bundled trust store.
-  secureClient.setInsecure();
-  secureClient.setHandshakeTimeout(15);
-  secureClient.setTimeout(20000);
-
-  HTTPClient http;
-  if (!http.begin(secureClient, enroll_url)) {
-    outReason = "HTTPClient.begin failed";
-    log_d("[cert.enroll] %s", outReason.c_str());
-    return EnrollResult::NetworkFail;
-  }
-  http.setTimeout(20000);
-  http.addHeader("Content-Type", "application/json");
-  // Bootstrap-token fast-path (server's _handle_enroll path 2). Read
-  // straight from persisted state on every poll so a UI edit kicks
-  // in on the very next attempt. Empty → no Bearer header → server
-  // path 6 parks the request in PENDING_ENROLLMENTS for operator
-  // approval. Sending "Bearer " with empty value would trip path-2's
-  // 401 short-circuit and never reach the pending-park branch, so
-  // strict length check matters here.
-  const String& bootTok = _state.bootstrap_token;
-  if (bootTok.length() > 0) {
-    http.addHeader("Authorization", String("Bearer ") + bootTok);
-  }
-
-  // Body: {"deviceId": "...", "csr_pem": "...", "wg_pubkey": "..."}
-  // Allocate enough for csr_pem (~480 B base64) + WG pubkey (44 B)
-  // + framing.
+  // Build the request body first, so the on-demand TLS client lives
+  // for the shortest possible window.
+  //   {"deviceId": "...", "csr_pem": "...", "wg_pubkey": "..."}
   DynamicJsonDocument req(2048);
   req["deviceId"] = deviceSubjectCN();
   req["csr_pem"]  = csrPem;
   // Phase WG.3 — include our WG public key so the mothership can
   // pre-allocate a tunnel IP and add the peer at enrollment time.
-  // Optional: skipped when no WireGuard module is installed, or
-  // when keypair generation failed at boot.
+  // Skipped when no WireGuard module is installed or keypair gen failed.
   if (_wg) {
     String wgPub = _wg->publicKey();
     if (wgPub.length() > 0) {
@@ -1013,30 +983,66 @@ CertManagerService::EnrollResult CertManagerService::postEnrollOnce(
   String reqBody;
   serializeJson(req, reqBody);
 
-  log_d("[cert.enroll] POST %s, body=%u B, token=%s",
-                enroll_url.c_str(),
-                (unsigned)reqBody.length(),
-                bootTok.length() > 0 ? "yes" : "no");
+  // Bootstrap-token fast-path (server's _handle_enroll path 2). Read
+  // straight from persisted state on every poll so a UI edit kicks in
+  // on the very next attempt. Empty → no Bearer header → server path 6
+  // parks the request in PENDING_ENROLLMENTS for operator approval.
+  // (Sending "Bearer " with an empty value would trip path-2's 401
+  // short-circuit, so the strict length check matters.)
+  const String& bootTok = _state.bootstrap_token;
+  String authHeader;
+  if (bootTok.length() > 0) {
+    authHeader  = "Authorization: Bearer ";
+    authHeader += bootTok;
+    authHeader += "\r\n";
+  }
 
-  int code = http.POST(reqBody);
-  String respBody = http.getString();
-  http.end();
-  // Aggressive mbedtls teardown — `http.end()` calls client.stop()
-  // implicitly, but on arduino-esp32 there are paths (keep-alive,
-  // partial reads) where the inner WiFiClientSecure keeps its TLS
-  // context alive for the next call. Explicit .stop() forces the
-  // mbedtls scratch (16 KB tx + 16 KB rx record buffers) back into
-  // heap immediately so the next handshake doesn't compete with
-  // them for max-contiguous space.
-  secureClient.stop();
+  // Heap guard — refuse to start a handshake we can't afford. A
+  // fragmented heap that can't give the BearSSL client its block
+  // should DEFER, not fail mid-handshake and leave residue (see
+  // docs/plans/failed-handshake-leaves-residue.md).
+  log_i("[cert.enroll] heap pre-TLS: free=%u max_alloc=%u",
+        (unsigned)ESP.getFreeHeap(),
+        (unsigned)ESP.getMaxAllocHeap());
+  if (ESP.getMaxAllocHeap() < kMinTlsContiguous) {
+    outReason = "low heap, deferring enroll";
+    log_w("[cert.enroll] %s (max_alloc=%u < %u)", outReason.c_str(),
+          (unsigned)ESP.getMaxAllocHeap(), (unsigned)kMinTlsContiguous);
+    return EnrollResult::NetworkFail;
+  }
+
+  // On-demand BearSSL client: heap-allocated for this one POST, freed
+  // at the end of the scope below (its ~8 KB returns to the heap before
+  // we parse the response). FIRST-ENROLLMENT TLS POSTURE: no CA pinned
+  // yet (the bundle ARRIVES in this response), so we run insecure
+  // (trust-on-first-use). Production can pre-bundle a bootstrap CA and
+  // pin it instead of configureInsecure().
+  int code;
+  String respBody;
+  {
+    std::unique_ptr<ESPRack::PersistentTlsClient> tls(
+        new (std::nothrow) ESPRack::PersistentTlsClient());
+    if (!tls) {
+      outReason = "TLS client alloc failed";
+      log_w("[cert.enroll] %s", outReason.c_str());
+      return EnrollResult::NetworkFail;
+    }
+    tls->configureInsecure();
+    tls->setMaxResponseBytes(8192);   // cert + full CA-chain PEM
+    log_d("[cert.enroll] POST %s, body=%u B, token=%s",
+          enroll_url.c_str(), (unsigned)reqBody.length(),
+          bootTok.length() > 0 ? "yes" : "no");
+    code = tls->post(enroll_url, reqBody, "application/json", respBody,
+                     authHeader.length() ? authHeader.c_str() : nullptr);
+  }  // tls freed here
   log_d("[cert.enroll] HTTP code=%d, body=%u B",
-                code, (unsigned)respBody.length());
+        code, (unsigned)respBody.length());
   log_d("[cert.enroll] heap post-TLS: free=%u max_alloc=%u",
         (unsigned)ESP.getFreeHeap(),
         (unsigned)ESP.getMaxAllocHeap());
 
   if (code <= 0) {
-    outReason = String("network: ") + http.errorToString(code);
+    outReason = String("network err ") + code;
     return EnrollResult::NetworkFail;
   }
   if (code == 403) {
@@ -1444,26 +1450,11 @@ bool CertManagerService::postRecoveryRequest(String& outCertPem,
     return false;
   }
 
-  WiFiClientSecure client;
-  // Server-side TLS only — cert is dead, no client identity.
-  // Production: pin a bootstrap CA from firmware here. For dev mock,
-  // setInsecure to accept the self-signed cert without trust chain.
-  client.setInsecure();
-  client.setHandshakeTimeout(15);
-  client.setTimeout(20000);
-
   String recover_url = effectiveRecoverUrl();
   if (recover_url.length() == 0) {
     log_e("[cert.recover] no recover URL at request time");
     return false;
   }
-  HTTPClient http;
-  if (!http.begin(client, recover_url)) {
-    log_e("[cert.recover] http.begin failed");
-    return false;
-  }
-  http.setTimeout(20000);
-  http.addHeader("Content-Type", "application/json");
 
   DynamicJsonDocument req(2048);
   req["deviceId"]        = deviceSubjectCN();
@@ -1474,21 +1465,37 @@ bool CertManagerService::postRecoveryRequest(String& outCertPem,
   serializeJson(req, reqBody);
 
   log_d("[cert.recover] POST %s, body=%u B",
-                recover_url.c_str(),
-                (unsigned)reqBody.length());
+                recover_url.c_str(), (unsigned)reqBody.length());
 
-  int code = http.POST(reqBody);
-  log_d("[cert.recover] HTTP code=%d", code);
-
-  if (code < 200 || code >= 300) {
-    String err = http.getString();
-    log_w("[cert.recover] server error: %s", err.c_str());
-    http.end();
+  // Heap guard + on-demand BearSSL client. Insecure: the cert is dead,
+  // so there's no client identity and (like enroll) no pinned CA. Freed
+  // at scope exit so its ~8 KB doesn't linger between recovery polls.
+  if (ESP.getMaxAllocHeap() < kMinTlsContiguous) {
+    log_w("[cert.recover] low heap, deferring (max_alloc=%u < %u)",
+          (unsigned)ESP.getMaxAllocHeap(), (unsigned)kMinTlsContiguous);
     return false;
   }
 
-  String respBody = http.getString();
-  http.end();
+  int code;
+  String respBody;
+  {
+    std::unique_ptr<ESPRack::PersistentTlsClient> tls(
+        new (std::nothrow) ESPRack::PersistentTlsClient());
+    if (!tls) {
+      log_w("[cert.recover] TLS client alloc failed");
+      return false;
+    }
+    tls->configureInsecure();
+    tls->setMaxResponseBytes(8192);
+    code = tls->post(recover_url, reqBody, "application/json", respBody);
+  }  // tls freed here
+  log_d("[cert.recover] HTTP code=%d", code);
+
+  if (code < 200 || code >= 300) {
+    log_w("[cert.recover] server error (code=%d): %s",
+          code, respBody.c_str());
+    return false;
+  }
 
   DynamicJsonDocument resp(8192);
   DeserializationError jerr = deserializeJson(resp, respBody);
@@ -1522,23 +1529,7 @@ bool CertManagerService::postCsrToRenew(const String& csrPem,
     return false;
   }
 
-  WiFiClientSecure client;
-  // mTLS this time — attach the EXISTING cert (not insecure, not
-  // bootstrap-token). Server validates client cert; if valid,
-  // signs the new CSR.
-  _tls->attachToClient(client);
-  client.setHandshakeTimeout(15);
-  client.setTimeout(20000);
-
-  HTTPClient http;
-  if (!http.begin(client, renewUrl)) {
-    log_e("[cert.rotate] http.begin failed");
-    return false;
-  }
-  http.setTimeout(20000);
-  http.addHeader("Content-Type", "application/json");
-
-  // Body: just deviceId + csr_pem; no token (mTLS auth already)
+  // Body: just deviceId + csr_pem; no token (mTLS auth already).
   DynamicJsonDocument req(2048);
   req["deviceId"] = deviceSubjectCN();
   req["csr_pem"]  = csrPem;
@@ -1548,18 +1539,37 @@ bool CertManagerService::postCsrToRenew(const String& csrPem,
   log_d("[cert.rotate] POST %s, body=%u B",
                 renewUrl.c_str(), (unsigned)reqBody.length());
 
-  int code = http.POST(reqBody);
-  log_d("[cert.rotate] HTTP code=%d", code);
-
-  if (code < 200 || code >= 300) {
-    String err = http.getString();
-    log_w("[cert.rotate] server error: %s", err.c_str());
-    http.end();
+  // Heap guard + on-demand BearSSL client. mTLS this time: configure()
+  // attaches the EXISTING cert/key + CA from the provider (the server
+  // validates the client cert, then signs the new CSR). Freed at scope
+  // exit — rotation runs ~once per 90 days, so keeping this ~8 KB
+  // resident the rest of the time would be pure waste.
+  if (ESP.getMaxAllocHeap() < kMinTlsContiguous) {
+    log_w("[cert.rotate] low heap, deferring (max_alloc=%u < %u)",
+          (unsigned)ESP.getMaxAllocHeap(), (unsigned)kMinTlsContiguous);
     return false;
   }
 
-  String respBody = http.getString();
-  http.end();
+  int code;
+  String respBody;
+  {
+    std::unique_ptr<ESPRack::PersistentTlsClient> tls(
+        new (std::nothrow) ESPRack::PersistentTlsClient());
+    if (!tls) {
+      log_w("[cert.rotate] TLS client alloc failed");
+      return false;
+    }
+    tls->configure(_tls);             // full mTLS via the existing cert
+    tls->setMaxResponseBytes(8192);
+    code = tls->post(renewUrl, reqBody, "application/json", respBody);
+  }  // tls freed here
+  log_d("[cert.rotate] HTTP code=%d", code);
+
+  if (code < 200 || code >= 300) {
+    log_w("[cert.rotate] server error (code=%d): %s",
+          code, respBody.c_str());
+    return false;
+  }
 
   DynamicJsonDocument resp(8192);
   DeserializationError jerr = deserializeJson(resp, respBody);
