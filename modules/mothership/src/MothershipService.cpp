@@ -1076,13 +1076,32 @@ String MothershipService::actionRestProxy(JsonObjectConst params,
   JsonVariantConst body_in = params["body"];
 
   // 24 KB scratch doc holds the WHOLE response in-memory while we
-  // serialise it; the resulting String then flows into _resultRing
-  // where pushActionResult chunks it into 1 KB pieces across multiple
-  // check-ins. This is the only place we need the full payload
-  // assembled — beyond this point everything's chunked. PSRAM-backed
-  // allocator on S3/N16R8 makes the 24 KB transient cheap; internal
-  // heap stays clean.
-  DynamicJsonDocument respDoc(24576);
+  // serialise it; pushActionResult then chunks it into ~1 KB pieces
+  // across check-ins. PSRAM-backed allocator on S3/N16R8 makes this
+  // cheap; on a no-PSRAM C3 a fragmented heap can't always give 24 KB
+  // contiguous, and a failed DynamicJsonDocument silently yields a
+  // zero-capacity doc that serialises to garbage.
+  //
+  // P2a — guard up front (and re-check capacity) so we report a clean
+  // 503 instead of emitting a corrupt body. P2b (deferred) replaces
+  // this whole-payload assembly with chunked streaming.
+  static constexpr uint32_t kProxyDocBytes = 24576;
+  if (ESP.getMaxAllocHeap() < kProxyDocBytes + 2048) {
+    log_w("[mship.proxy] low heap, refusing proxy (max_alloc=%u < %u)",
+          (unsigned)ESP.getMaxAllocHeap(),
+          (unsigned)(kProxyDocBytes + 2048));
+    pushActionResult(reqId, 503,
+        "{\"error\":\"low_heap\",\"hint\":\"max_alloc below proxy buffer\"}");
+    return "low_heap";
+  }
+  DynamicJsonDocument respDoc(kProxyDocBytes);
+  if (respDoc.capacity() < kProxyDocBytes) {
+    log_e("[mship.proxy] respDoc alloc failed (cap=%u)",
+          (unsigned)respDoc.capacity());
+    pushActionResult(reqId, 503,
+        "{\"error\":\"alloc_failed\",\"hint\":\"proxy buffer\"}");
+    return "alloc_failed";
+  }
   JsonVariant out_var = respDoc.to<JsonVariant>();
   int out_status = 404;
 
@@ -1247,9 +1266,30 @@ String MothershipService::actionConfigDump(JsonObjectConst params,
     return "no_config_manager";
   }
   // 32 KB envelope — enough for ~15 services' worth of /config/*.json,
-  // each typically <2 KB. Bigger fleets / fatter configs would need a
-  // chunked transfer path (Phase 7 streaming).
-  DynamicJsonDocument dumpDoc(32768);
+  // each typically <2 KB. On a no-PSRAM C3 a fragmented heap often
+  // can't give 32 KB contiguous; a failed DynamicJsonDocument silently
+  // yields a zero-capacity doc that serialises to garbage.
+  //
+  // P2a — guard up front (and re-check capacity) so we report a clean
+  // 503 instead of emitting a corrupt dump. P2b (deferred) replaces the
+  // whole-envelope assembly with a chunked transfer.
+  static constexpr uint32_t kDumpDocBytes = 32768;
+  if (ESP.getMaxAllocHeap() < kDumpDocBytes + 2048) {
+    log_w("[mship.config.dump] low heap, refusing dump (max_alloc=%u < %u)",
+          (unsigned)ESP.getMaxAllocHeap(),
+          (unsigned)(kDumpDocBytes + 2048));
+    pushActionResult(reqId, 503,
+        "{\"error\":\"low_heap\",\"hint\":\"max_alloc below dump buffer\"}");
+    return "low_heap";
+  }
+  DynamicJsonDocument dumpDoc(kDumpDocBytes);
+  if (dumpDoc.capacity() < kDumpDocBytes) {
+    log_e("[mship.config.dump] dumpDoc alloc failed (cap=%u)",
+          (unsigned)dumpDoc.capacity());
+    pushActionResult(reqId, 503,
+        "{\"error\":\"alloc_failed\",\"hint\":\"dump buffer\"}");
+    return "alloc_failed";
+  }
   JsonObject root = dumpDoc.to<JsonObject>();
   root["fwVer"]    = DeviceIdentity::version();
   root["hwVer"]    = DeviceIdentity::chipModelFull();
