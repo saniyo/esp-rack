@@ -7,6 +7,11 @@
 #include <FormBuilder.h>
 #include <WebFeatureDelegate.h>
 
+// WiFiEvent_t / WiFiEventInfo_t for the onStationMode* handlers below.
+// ESPAsyncWebServer <= 3.6 pulled <WiFi.h> in transitively; ESP32Async
+// 3.7+ is leaner about its includes, so we depend on it explicitly.
+#include <WiFi.h>
+
 #ifdef ESP32
 #include <ESPmDNS.h>
 #elif defined(ESP8266)
