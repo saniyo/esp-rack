@@ -102,6 +102,11 @@ struct MothershipSettings {
   // ── Runtime state (not persisted) ──
   IMothershipProvider::State runtime_state{IMothershipProvider::State::Disabled};
   String   status_label{"Disabled"};
+  // Human-readable cause of the most recent check-in failure (HTTP /
+  // transport code mapped to a reason). Surfaced on the Status form so the
+  // operator sees WHY a check-in failed instead of a bare "LastFail".
+  // Runtime only (never persisted); "-" when there's no current failure.
+  String   last_error{"-"};
   uint32_t last_checkin_at_s{0};
   uint32_t next_checkin_at_s{0};
   uint32_t success_count{0};

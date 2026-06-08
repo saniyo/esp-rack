@@ -91,6 +91,22 @@ StateUpdateResult MothershipSettings::update(JsonObject& root,
 //
 // All JSON keys are string literals — see feedback_static_forms
 // memory for why snprintf'd keys are catastrophic.
+// Map a check-in transport/HTTP code to a human-readable failure cause for
+// the Status form. code <= 0 = no HTTP response (DNS / TCP / TLS failure);
+// a positive code is an actual HTTP status from the mothership.
+static String mshipFailureReason(int code) {
+  if (code >= 200 && code < 300) return String("-");
+  String r = "HTTP " + String(code) + ": ";
+  if (code <= 0)        r += "connect failed (DNS / TCP / TLS) - endpoint unreachable";
+  else if (code == 401) r += "auth rejected - device cert / enrollment";
+  else if (code == 403) r += "forbidden - device not trusted / blacklisted";
+  else if (code == 404) r += "endpoint not found - wrong base URL?";
+  else if (code >= 500) r += "mothership server error";
+  else if (code >= 400) r += "request rejected";
+  else                  r += "unexpected response";
+  return r;
+}
+
 void MothershipSettings::buildForm(MothershipSettings& s, JsonObject& root) {
   // ── STATUS ───────────────────────────────────────────────────────
   JsonArray st = FormBuilder::createForm(root, "status",
@@ -131,6 +147,12 @@ void MothershipSettings::buildForm(MothershipSettings& s, JsonObject& root) {
                               (double)s.fail_count, format("0"),
                               label("Failed check-ins"),
                               icon("ErrorOutline"));
+  // WHY the last check-in failed - concrete cause (DNS/TCP/TLS, auth,
+  // server error, ...) instead of leaving the operator to guess from a
+  // bare "LastFail" state chip.
+  FormBuilder::addTextField(st, "last_error", AF::R, s.last_error.c_str(),
+                            label("Last error"),
+                            icon("WarningAmber"));
 
   // ── SETTINGS ─────────────────────────────────────────────────────
   // One unified tab — was split into "settings" + "profiles" before
@@ -457,6 +479,7 @@ void MothershipService::runCheckinLoop() {
         s.last_checkin_at_s = now_s;
         s.runtime_state = IMothershipProvider::State::LastOk;
         s.status_label  = "LastOk";
+        s.last_error    = "-";  // clear the stale failure reason on success
       } else {
         s.fail_count++;
         s.runtime_state = IMothershipProvider::State::LastFail;
@@ -703,6 +726,15 @@ bool MothershipService::performOneCheckin(bool& outBurst) {
   static uint8_t s_consec_failures = 0;
   if (code < 200 || code >= 300) {
     log_w("[mship] server error: %s", _respBuf.c_str());
+    // Surface a human-readable cause on the Status form (not a bare
+    // "LastFail"). Runtime field; broadcast with the next tick.
+    {
+      String reason = mshipFailureReason(code);
+      update([reason](MothershipSettings& s) {
+        s.last_error = reason;
+        return StateUpdateResult::CHANGED;
+      }, "mship.fail-reason");
+    }
     s_consec_failures++;
     ESPRack::HeapMonitor::logSnapshot("mship-fail");
     log_w("[mship] consecutive failures=%u (HTTP=%d)",
