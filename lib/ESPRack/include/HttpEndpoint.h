@@ -63,7 +63,7 @@ class HttpGetEndpoint {
     // letting the alloc fail mid-build (heap churn + truncated/null doc).
     // Cheap, no allocation. Pairs with the auto-measured _bufferSize so the
     // threshold tracks the feature's real need, not a worst-case constant.
-    if (ESP.getMaxAllocHeap() < _bufferSize + 1024) {
+    if (ESP.getMaxAllocHeap() < _bufferSize) {
       request->send(503, "application/json",
                     "{\"error\":\"heap_pressure\",\"retryAfter\":1}");
       return;
@@ -155,7 +155,7 @@ class HttpPostEndpoint {
     // Proactive heap-pressure guard (see fetchSettings). The write already
     // applied via updateWithoutPropagation above; a retryable 503 here just
     // tells the client to refetch — state still propagates on the next GET.
-    if (ESP.getMaxAllocHeap() < _bufferSize + 1024) {
+    if (ESP.getMaxAllocHeap() < _bufferSize) {
       request->send(503, "application/json",
                     "{\"error\":\"heap_pressure\",\"retryAfter\":1}");
       return;
