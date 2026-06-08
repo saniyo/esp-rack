@@ -241,8 +241,15 @@ class WebFeatureEntry : public IWebFeatureEntry {
     _service->read(root, _restReader);
     const size_t used = probe.memoryUsage();
     if (used == 0) return kFallback;
-    size_t sized = used + (used / 2) + 512;                 // +50% +512 margin
-    if (probe.overflowed()) sized = kProbe + (kProbe / 2);  // schema > probe (rare)
+    // Flat +1.5 KB headroom for variable scalar values (text / textarea).
+    // FLAT on purpose, not a percentage: 50% of a ~6 KB schema would push
+    // the alloc to ~9.5 KB — right at the no-PSRAM C3's ~9.7 KB maxAlloc —
+    // and the proactive getMaxAllocHeap() guard (buf + 1024) would then
+    // 503 forever. 1.5 KB covers normal scalar fill; a pathological
+    // oversize value overflows the doc (same as the old fixed buffer) until
+    // the section-stream fallback lands.
+    size_t sized = used + 1536;
+    if (probe.overflowed()) sized = kProbe;  // schema > 24K probe — needs streaming (Phase 3)
     log_i("[webfeature:%s] REST buffer auto-sized: tree=%uB -> alloc=%uB",
           _spec.id ? _spec.id : "?", (unsigned)used, (unsigned)sized);
     return sized;
