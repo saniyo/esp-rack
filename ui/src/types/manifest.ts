@@ -6,6 +6,13 @@ export interface MenuMeta {
   order?: number;
   auth?: AuthLevel;
   hidden?: boolean;
+  // Tree-menu hierarchy (additive; both absent = legacy flat top-level).
+  // parent: id of the feature/group this item nests UNDER; undefined =
+  // top-level. The backend is the single source of truth for placement.
+  parent?: string;
+  // expandTabs: also surface this feature's own tabs as leaf children in
+  // the tree (jump straight to /<id>/<tabKey>), beside any child features.
+  expandTabs?: boolean;
 }
 
 export interface TabSpec {

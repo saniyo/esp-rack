@@ -128,6 +128,7 @@ void APSettingsService::registerManifest(WebManager* web) {
   spec.menu.icon  = "SettingsInputAntenna";
   spec.menu.order = 150;
   spec.menu.auth  = WebAuthLevel::Authenticated;
+  spec.menu.parent = "wifi";   // tree-menu demo: nest Access Point under WiFi Connection
   spec.auth       = WebAuthLevel::Authenticated;
   spec.restRead   = AP_FORM_PATH;
   spec.restUpdate = AP_FORM_PATH;

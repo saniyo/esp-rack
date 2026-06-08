@@ -8,68 +8,107 @@ import { FeaturesContext } from '../../contexts/features';
 import { useManifest } from '../../contexts/manifest';
 import { resolveIcon } from '../dynamic-component/utils/iconRegistry';
 import { FeatureEntry } from '../../types';
-import LayoutMenuItem from './LayoutMenuItem';
+import LayoutMenuItem, { MenuNode } from './LayoutMenuItem';
 
-// Manifest-driven side-nav. Every feature whose manifest entry has a
-// menu.label and a route is surfaced here automatically — adding a new
-// C++ service that registers a feature with menu metadata makes its tab
-// appear without touching the frontend. Order is honored from
-// menu.order (smaller = higher); ties keep manifest insertion order.
+// Manifest-driven side-nav — now a recursive TREE.
 //
-// Auth gating: an entry whose menu.auth === 'admin' renders disabled
-// for non-admin users (matches the legacy hardcoded /security and
-// /filesystem treatment). Entries flagged `menu.hidden` are skipped.
+// A feature nests under another via `menu.parent` (the C++ backend is the
+// single source of truth for placement: "drop X onto Y" == set X's
+// menu.parent = "Y"); no parent = top-level. Arbitrary depth.
 //
-// Standalone Security page (user CRUD) is not in the manifest today;
-// its menu item is rendered alongside the manifest-driven list, also
-// admin-gated. Anyone wanting to drop it can disable FT_SECURITY in
-// the build, which removes the AuthenticatedRouting route + this menu
-// surfaces nothing for it (the FeaturesContext gate suppresses it).
+//  - A node WITH a route opens its page-with-tabs on click (as before).
+//  - A route-less node is a pure GROUP whose row only toggles expand.
+//  - `menu.expandTabs` additionally surfaces a feature's own tabs as
+//    leaf children (navigate straight to /<id>/<tabKey>).
+//
+// Backward-compatible: with no `parent` declared anywhere this renders the
+// exact flat list it did before. Order within a level is menu.order.
+//
+// Auth gating unchanged: an entry whose menu.auth === 'admin' renders
+// disabled for non-admins; `menu.hidden` entries are skipped. The
+// standalone Security page (not in the manifest) is appended as before.
 
-const itemPathOf = (entry: FeatureEntry): string => {
-  // route is "/<id>/*" or "/<custom>/*". Menu link wants the prefix
-  // without the wildcard suffix.
-  const r = entry.route ?? `/${entry.id}`;
-  return r.replace(/\/\*$/, '');
-};
+const routePrefix = (entry: FeatureEntry): string | undefined =>
+  entry.route ? entry.route.replace(/\/\*$/, '') : undefined;
 
 const LayoutMenu: FC = () => {
   const { manifest } = useManifest();
   const { me } = useContext(AuthenticatedContext);
   const { features } = useContext(FeaturesContext);
 
-  const items = useMemo(() => {
-    return manifest.features
-      .filter((f) => f.menu?.label && !f.menu?.hidden)
-      .slice()
-      .sort((a, b) => (a.menu?.order ?? 0) - (b.menu?.order ?? 0));
-  }, [manifest]);
+  const roots = useMemo<MenuNode[]>(() => {
+    const visible = manifest.features.filter((f) => f.menu?.label && !f.menu?.hidden);
+
+    const nodeOf = (f: FeatureEntry): MenuNode => {
+      const wantsAdmin = f.menu?.auth === 'admin' || f.auth === 'admin';
+      const disabled = wantsAdmin && !me.admin;
+      const to = routePrefix(f);
+      const icon = resolveIcon(f.menu?.icon) ?? SettingsIcon;
+      const children: MenuNode[] = [];
+      // expandTabs: a multi-tab feature's own tabs become jump-to-tab
+      // leaves under it (a single-tab feature's page IS the tab — no point).
+      if (f.menu?.expandTabs && to && (f.tabs?.length ?? 0) > 1) {
+        f.tabs!.forEach((t) =>
+          children.push({
+            id: `${f.id}/${t.key}`,
+            label: t.title ?? t.key,
+            icon,
+            to: `${to}/${t.key}`,
+            disabled,
+            order: 0,
+            children: [],
+          }),
+        );
+      }
+      return {
+        id: f.id,
+        label: f.menu!.label!,
+        icon,
+        to,
+        disabled,
+        order: f.menu?.order ?? 0,
+        children,
+      };
+    };
+
+    const byId = new Map<string, MenuNode>();
+    visible.forEach((f) => byId.set(f.id, nodeOf(f)));
+
+    // Link children to parents; an orphan parent (id not registered)
+    // gracefully falls back to top-level so nothing is ever lost.
+    const rootNodes: MenuNode[] = [];
+    visible.forEach((f) => {
+      const node = byId.get(f.id)!;
+      const parent = f.menu?.parent ? byId.get(f.menu.parent) : undefined;
+      (parent ? parent.children : rootNodes).push(node);
+    });
+
+    const sortRec = (ns: MenuNode[]) => {
+      ns.sort((a, b) => a.order - b.order);
+      ns.forEach((n) => sortRec(n.children));
+    };
+    sortRec(rootNodes);
+    return rootNodes;
+  }, [manifest, me.admin]);
 
   return (
     <List disablePadding component="nav">
-      {items.map((f) => {
-        const Icon = resolveIcon(f.menu?.icon) ?? SettingsIcon;
-        const wantsAdmin = f.menu?.auth === 'admin' || f.auth === 'admin';
-        const disabled = wantsAdmin && !me.admin;
-        return (
-          <LayoutMenuItem
-            key={f.id}
-            icon={Icon}
-            label={f.menu!.label!}
-            to={itemPathOf(f)}
-            disabled={disabled}
-          />
-        );
-      })}
-      {/* Standalone Security page (user CRUD) — not in manifest yet,
-          rendered explicitly. When SecurityModule grows a top-level
-          manifest entry for the user list this block can be deleted. */}
+      {roots.map((n) => (
+        <LayoutMenuItem key={n.id} node={n} />
+      ))}
+      {/* Standalone Security page (user CRUD) — not in the manifest; still
+          appended explicitly, admin-gated, as before. */}
       {features.security && (
         <LayoutMenuItem
-          icon={LockIcon}
-          label="Security"
-          to="/security"
-          disabled={!me.admin}
+          node={{
+            id: '__security',
+            label: 'Security',
+            icon: LockIcon,
+            to: '/security',
+            disabled: !me.admin,
+            order: 9999,
+            children: [],
+          }}
         />
       )}
     </List>

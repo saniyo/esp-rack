@@ -14,6 +14,18 @@ struct WebMenuMeta {
   int order = 0;
   WebAuthLevel auth = WebAuthLevel::Authenticated;
   bool hidden = false;
+  // ── Tree-menu hierarchy (ADDITIVE: parent=null + expandTabs=false is
+  // the legacy flat top-level item, so existing modules are unchanged) ──
+  // parent: id of the feature/group this item nests UNDER in the sidebar
+  // tree. null = top-level. The frontend groups children by this and
+  // renders a recursive, collapsible tree. The backend is the single
+  // source of truth for menu placement — "drop X onto Y" == set X's
+  // menu.parent = "Y". Arbitrary depth (the parent can have its own parent).
+  const char* parent = nullptr;
+  // expandTabs: when true, this feature's own tabs are ALSO exposed as
+  // leaf children in the tree (navigate straight to /<id>/<tabKey>), in
+  // addition to any child features. Opt-in to avoid clutter.
+  bool expandTabs = false;
 };
 
 struct WebTabSpec {
