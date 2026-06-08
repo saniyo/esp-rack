@@ -1,6 +1,8 @@
 #include "HeapMonitor.h"
 
 #include <Arduino.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 namespace {
 
@@ -97,6 +99,38 @@ void HeapMonitor::logSnapshot(const char* tag) {
         (unsigned)s.boot.max_alloc,
         (int)s.max_alloc_slope_bpm,
         (unsigned)s.sample_count);
+}
+
+void HeapMonitor::dumpTasks(const char* tag) {
+  // Snapshot every FreeRTOS task. Allocates a temporary array of
+  // TaskStatus_t — one element per current task, ~52 bytes each.
+  // At ~20 tasks we transiently use ~1 KB heap; that's a one-shot
+  // call from boot/diagnostic paths, not the hot loop, so OK.
+  const UBaseType_t n = uxTaskGetNumberOfTasks();
+  if (n == 0) return;
+  TaskStatus_t* tasks = static_cast<TaskStatus_t*>(
+      pvPortMalloc(n * sizeof(TaskStatus_t)));
+  if (!tasks) {
+    log_w("[task.dump] alloc failed (n=%u)", (unsigned)n);
+    return;
+  }
+  const UBaseType_t got = uxTaskGetSystemState(tasks, n, nullptr);
+  log_i("[task.dump] %s — %u tasks (stack_free_min is uxTaskGetStackHighWaterMark in BYTES)",
+        tag ? tag : "?", (unsigned)got);
+  for (UBaseType_t i = 0; i < got; i++) {
+    // Convert StackType_t words to bytes. On ESP32 (Xtensa) and C3
+    // (RISC-V) StackType_t is uint8_t for the return value of
+    // uxTaskGetStackHighWaterMark — it's already in *bytes* per the
+    // ESP-IDF port. (FreeRTOS upstream returns words; ESP-IDF added
+    // a bytes shim. Either way the value is "smallest free room
+    // ever seen".)
+    log_i("[task.dump]   %-16s prio=%2u state=%u stack_free_min=%u",
+          tasks[i].pcTaskName,
+          (unsigned)tasks[i].uxCurrentPriority,
+          (unsigned)tasks[i].eCurrentState,
+          (unsigned)tasks[i].usStackHighWaterMark);
+  }
+  vPortFree(tasks);
 }
 
 }  // namespace ESPRack

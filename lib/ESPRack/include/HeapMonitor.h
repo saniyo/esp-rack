@@ -63,6 +63,17 @@ class HeapMonitor {
   // One-shot diagnostic line — useful at boot to anchor the "what
   // does FRESH heap look like?" reference. Logged via log_i.
   static void logSnapshot(const char* tag);
+
+  // Dump per-FreeRTOS-task stack usage. Uses uxTaskGetSystemState +
+  // uxTaskGetStackHighWaterMark to report, for every task in the
+  // system, its name + priority + minimum free stack ever (in
+  // bytes). Lets us spot oversized task stacks — Mothership/Telegram
+  // are sized 8 KB / 6 KB but the real high-water on a clean device
+  // is usually a fraction of that. Trim to actual usage × 1.5 to
+  // free BSS for the heap pool. Needs
+  // CONFIG_FREERTOS_USE_TRACE_FACILITY (on by default for ESP-IDF
+  // Arduino).
+  static void dumpTasks(const char* tag);
 };
 
 }  // namespace ESPRack

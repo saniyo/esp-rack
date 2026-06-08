@@ -34,7 +34,16 @@ class SystemStatus {
   // Builds the 'status' sub-form into `root`. Non-static now because it
   // reads the WebManager* captured at construction to surface module
   // versions; passing _web through every call site would be noise.
-  void buildForm(JsonObject& root);
+  //
+  // free_snap / max_snap — optional pre-captured heap values taken
+  // at the request-handler entry point, BEFORE AsyncJsonResponse's
+  // 2 KB DynamicJsonDocument pool was allocated. Used to display
+  // the "Heap (live, at request entry)" row. Pass 0 / 0 and the
+  // form falls back to a live read inside buildForm (legacy
+  // path for any callers that haven't been updated).
+  void buildForm(JsonObject& root,
+                  uint32_t free_snap = 0,
+                  uint32_t max_snap  = 0);
 
   // Builds the 'identity' sub-form into `root`. Pure DeviceIdentity
   // readout (project, MAC, eFuse UID, flash UID, canonical device

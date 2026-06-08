@@ -36,12 +36,24 @@
 #endif
 
 // Minimum largest-contiguous-heap block required before we spin up an
-// on-demand BearSSL client (~8 KB object + request/response scratch).
-// Below this we fail soft and let the task retry later rather than risk
-// a mid-handshake allocation failure that leaves fragmentation residue
-// (see docs/plans/failed-handshake-leaves-residue.md). Tunable; confirm
-// against C3 soak data.
-static constexpr uint32_t kMinTlsContiguous = 14336;  // 14 KB
+// on-demand BearSSL client. PersistentTlsClient + BearSSL minimal
+// actually needs ~6-7 KB contiguous to bring a handshake up:
+//   ~4 KB STATIC_IN_BUFFER (record reassembly) +
+//   ~2 KB working state (X.509 chain, ECDSA-P256 scratch, Curve25519
+//     keypair, ChaCha20-Poly1305 record cipher) +
+//   ~0.5 KB session + framing overhead.
+// Below this we fail soft and let the task retry later rather than
+// risk a mid-handshake allocation failure that leaves fragmentation
+// residue (see docs/plans/failed-handshake-leaves-residue.md).
+//
+// Was 14336 (14 KB), which was a "with comfortable safety" pick from
+// before we measured. On a fragmented C3 max_alloc steady-states at
+// ~7-8 KB after running for a while; 14 KB pinned cert-manager into a
+// permanent "deferring enroll" loop where /enroll never went out.
+// Tightened to 7168 (×1 of minimum real need). If BearSSL fails on
+// the lower bound we'll see `code <= 0` → NetworkFail in the logs
+// instead of silent deferral.
+static constexpr uint32_t kMinTlsContiguous = 7168;  // 7 KB
 
 // ===== Persistence (ConfigDelegate) =====
 
@@ -980,6 +992,16 @@ CertManagerService::EnrollResult CertManagerService::postEnrollOnce(
       req["wg_pubkey"] = wgPub;
     }
   }
+  // Full hardware fingerprint — the immutable FACTORY ANCHOR. device_id
+  // only embeds the first 4 bytes of the eFuse UID (uid8) + the MAC, and
+  // those can differ across projects / reflashes; the mothership keys
+  // hardware identity on THIS instead, so it can recognise a device that
+  // was reprogrammed with a different project (same factory_uid, new
+  // device_id) and retire the stale records. Full 128-bit eFuse UID plus
+  // the flash-chip 64-bit UID (anchor for classic ESP32 whose eFuse UID
+  // reads as zero, and a "was the flash swapped?" tamper signal).
+  req["factory_uid"] = DeviceIdentity::uidHex32();
+  req["flash_uid"]   = DeviceIdentity::flashUidHex();
   String reqBody;
   serializeJson(req, reqBody);
 

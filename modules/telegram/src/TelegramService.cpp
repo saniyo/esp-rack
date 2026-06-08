@@ -201,7 +201,19 @@ void TelegramService::begin() {
   // Static stack — the 6 KB lives in BSS (not heap), so it doesn't
   // appear as a permanent contiguous-heap hole. See Phase 1 of
   // docs/plans/heap-baseline-fix.md — measured ~6 KB max_alloc gain.
-  {
+  //
+  // Gate: only spawn the task when the operator has enabled Telegram
+  // in config. Idle measurement showed TelTask uses only ~400 B of
+  // its 6 KB stack when disabled (the polling loop just sees no work
+  // and sleeps), so we wasted a whole task slot + scheduler overhead
+  // for zero benefit. With this gate, an unconfigured device boots
+  // with one less task in the table and saves ~6 KB BSS reserved for
+  // the stack ALSO becomes claim-only-when-needed: the static arrays
+  // still occupy BSS (predictable layout), but no task is actually
+  // running against them. Future improvement: lazily spawn the task
+  // on first save where enabled=true (no reboot needed) — see
+  // docs/plans/disable-inactive-tasks.md.
+  if (_state.enabled) {
     constexpr uint32_t kStackWords = 6144 / sizeof(StackType_t);
     static StackType_t  s_telStack[kStackWords];
     static StaticTask_t s_telBlock;
@@ -213,6 +225,9 @@ void TelegramService::begin() {
         taskTrampoline, "TelTask", kStackWords, this, 1,
         s_telStack, &s_telBlock, 1);
 #endif
+    log_i("[tel] task started (enabled=true)");
+  } else {
+    log_i("[tel] task NOT started — Telegram disabled in config");
   }
 
   if (_feature) _feature->broadcastWs("boot");
