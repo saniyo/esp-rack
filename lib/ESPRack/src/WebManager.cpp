@@ -1,4 +1,6 @@
 #include <WebManager.h>
+#include <ESPFS.h>
+#include <esp_rom_crc.h>
 
 // ── ManifestBuilder method definitions ─────────────────────────────
 // The class itself is declared in WebManager.h so the singleton
@@ -205,6 +207,13 @@ void WebManager::begin() {
       [this](AsyncWebServerRequest* request) { this->serveManifest(request); };
   _server->on(UI_MANIFEST_PATH, HTTP_GET, handler);
 
+  // Pre-bake the manifest to LittleFS so /rest/uiManifest is a pure
+  // file stream from this point on. Signature gate inside ensures we
+  // only rewrite on firmware changes — no flash wear on every boot.
+  // Heap is at boot peak here (~70-90 KB max_alloc), so the one-shot
+  // ManifestBuilder cost is comfortable.
+  writeManifestCacheToFs();
+
   _begun = true;
 }
 
@@ -260,19 +269,151 @@ void WebManager::buildManifestObject(JsonObject root) {
   }
 }
 
-void WebManager::serveManifest(AsyncWebServerRequest* request) {
-  // OOM guard. ManifestBuilder is ~3 KB (StaticJsonDocument<2048> +
-  // 1 KB itemBuf + state). std::make_shared adds ~32 B control block.
-  // Under -fno-exceptions a std::bad_alloc would call std::terminate
-  // and reboot the device. Pre-check max_alloc so we 503 instead.
-  if (ESP.getMaxAllocHeap() < 4096) {
-    log_w("[web.manifest] heap pressure (max_alloc=%u) — 503 retry",
-          (unsigned)ESP.getMaxAllocHeap());
-    request->send(503, "application/json",
-                  "{\"error\":\"heap_pressure\",\"retryAfter\":2}");
+// Pump the ManifestBuilder into a LittleFS file. Used by
+// writeManifestCacheToFs() once per tier at boot. Lives at file
+// scope so the routine reads top-down. Returns true if the full
+// blob landed on flash without write errors.
+static bool dumpBuilderToFile(ManifestBuilder& b, fs::File& f) {
+  uint8_t buf[256];
+  while (true) {
+    size_t n = b.fillNext(buf, sizeof(buf));
+    if (n == 0) return true;            // builder done
+    size_t w = f.write(buf, n);
+    if (w != n) {
+      log_e("[web.manifest] short write to flash (%u/%u)",
+            (unsigned)w, (unsigned)n);
+      return false;
+    }
+  }
+}
+
+uint32_t WebManager::computeManifestSig() const {
+  // Fold every piece of the manifest's structural identity into a
+  // single CRC32. The bytes ordering matches the manifest emission
+  // order so any change (added / removed / reordered / version-bumped
+  // module or entry) flips the CRC. Excludes anything that's already
+  // stable across builds (e.g. schemaVersion).
+  auto feed = [](uint32_t crc, const void* data, size_t len) -> uint32_t {
+    if (!data || !len) return crc;
+    return esp_rom_crc32_le(crc, reinterpret_cast<const uint8_t*>(data),
+                            len);
+  };
+  uint32_t crc = 0xFFFFFFFF;
+  if (_deviceName)        crc = feed(crc, _deviceName,
+                                     std::strlen(_deviceName));
+  if (_deviceVersion)     crc = feed(crc, _deviceVersion,
+                                     std::strlen(_deviceVersion));
+  if (_frameworkVersion)  crc = feed(crc, _frameworkVersion,
+                                     std::strlen(_frameworkVersion));
+  for (const auto& b : _buildFeatures) {
+    if (b.key) crc = feed(crc, b.key, std::strlen(b.key));
+    uint8_t f = b.enabled ? 1 : 0;
+    crc = feed(crc, &f, 1);
+  }
+  for (const auto& m : _modules) {
+    if (m.id)      crc = feed(crc, m.id, std::strlen(m.id));
+    if (m.version) crc = feed(crc, m.version, std::strlen(m.version));
+  }
+  for (const auto& e : _entries) {
+    if (!e) continue;
+    const char* id = e->id();
+    if (id) crc = feed(crc, id, std::strlen(id));
+    // toJson is a slow walk; using the entry pointer's address would
+    // change across boots even with identical code. The id covers
+    // most realistic differences (modules either have an entry with
+    // this id or they don't). A rare case where two builds keep the
+    // same id but change the spec body would NOT bump the CRC — the
+    // cache stays stale. That's documented above; consumer can bump
+    // FACTORY_PROJECT_VERSION to force regeneration.
+  }
+  return crc;
+}
+
+void WebManager::writeManifestCacheToFs() {
+  // Build anon + authed manifests into two flash files — but only
+  // when the signature differs from what's currently on flash. Each
+  // build burns ~30 KB of LittleFS write traffic; doing it every boot
+  // on a long-running device that reboots a few times a week would
+  // wear out a SPI flash sector inside a year. With the signature
+  // gate, writes happen at most once per firmware update.
+  //
+  // Best-effort on FS errors: log and let serveManifest fall back to
+  // the legacy chunked-build path. Soft-degrade rather than refusing
+  // to boot.
+  const uint32_t sig = computeManifestSig();
+  // Cache the signature for serveManifest()'s ETag (conditional-GET
+  // revalidation). Set unconditionally — both the cache-hit early-return
+  // and the rebuild path below need it live for the process lifetime.
+  _manifestSig = sig;
+
+  // Read sidecar signature file. If it matches AND both manifest
+  // files exist, we're already current — skip the rewrite.
+  bool cache_ok = false;
+  {
+    fs::File sf = ESPFS.open(kManifestCacheSigPath, "r");
+    if (sf && sf.size() == sizeof(sig)) {
+      uint32_t stored = 0;
+      sf.read(reinterpret_cast<uint8_t*>(&stored), sizeof(stored));
+      cache_ok = (stored == sig)
+              && ESPFS.exists(kManifestCacheAnonPath)
+              && ESPFS.exists(kManifestCacheAuthedPath);
+      sf.close();
+    }
+  }
+  if (cache_ok) {
+    log_i("[web.manifest] cache sig 0x%08x matches — reusing existing flash files",
+          (unsigned)sig);
     return;
   }
 
+  log_i("[web.manifest] cache sig changed (or missing) — rebuilding to flash, sig=0x%08x",
+        (unsigned)sig);
+
+  ManifestBuilder builder;
+  {
+    fs::File f = ESPFS.open(kManifestCacheAnonPath, "w");
+    if (!f) {
+      log_w("[web.manifest] cannot open %s for write",
+            kManifestCacheAnonPath);
+    } else {
+      builder.reset(*this, /*authed=*/false);
+      bool ok = dumpBuilderToFile(builder, f);
+      size_t sz = f.size();
+      f.close();
+      log_i("[web.manifest] wrote anon cache: %u B (%s)",
+            (unsigned)sz, ok ? "ok" : "TRUNCATED");
+    }
+  }
+  {
+    fs::File f = ESPFS.open(kManifestCacheAuthedPath, "w");
+    if (!f) {
+      log_w("[web.manifest] cannot open %s for write",
+            kManifestCacheAuthedPath);
+    } else {
+      builder.reset(*this, /*authed=*/true);
+      bool ok = dumpBuilderToFile(builder, f);
+      size_t sz = f.size();
+      f.close();
+      log_i("[web.manifest] wrote authed cache: %u B (%s)",
+            (unsigned)sz, ok ? "ok" : "TRUNCATED");
+    }
+  }
+  // Commit the new signature LAST. If a reboot interrupts the rewrite
+  // mid-flight, the old (mismatching) signature stays — next boot
+  // notices the mismatch and retries. Sig-file written last keeps the
+  // detection honest.
+  {
+    fs::File sf = ESPFS.open(kManifestCacheSigPath, "w");
+    if (!sf) {
+      log_w("[web.manifest] cannot open sig file for write");
+    } else {
+      sf.write(reinterpret_cast<const uint8_t*>(&sig), sizeof(sig));
+      sf.close();
+    }
+  }
+}
+
+void WebManager::serveManifest(AsyncWebServerRequest* request) {
   // Auth probe — ALWAYS replies, never 401s here. The result decides
   // payload depth: anonymous = stub; authenticated = full. Real
   // endpoints behind the manifest still 401 on their own.
@@ -281,21 +422,76 @@ void WebManager::serveManifest(AsyncWebServerRequest* request) {
     Authentication auth = _sm->authenticateRequest(request);
     authed = auth.authenticated;
   }
+  const char* path = authed ? kManifestCacheAuthedPath
+                            : kManifestCacheAnonPath;
 
-  // Per-request builder so concurrent fetches (e.g. browser refetches
-  // after login while the anonymous fetch is still streaming) don't
-  // share state. Singleton + mutex was attempted but AsyncWebServer's
-  // chunked-response lifecycle does not enforce serial fillNext calls
-  // strictly enough — both lambdas can be in flight on the SAME
-  // builder at once, corrupting the state machine. With per-request
-  // allocation each fetch gets its own ~3 KB builder, isolated.
-  //
-  // Captured by shared_ptr (copyable; std::function requires that)
-  // and released on the lambda's destruction when the response object
-  // is torn down by AsyncWebServer.
+  // Conditional-GET revalidation. The manifest body changes ONLY on a
+  // firmware update (computeManifestSig is a content hash cached in
+  // _manifestSig at boot). Tag every response "<sig>-<a|n>" — auth state
+  // is baked in so an anon browser can never revalidate into the authed
+  // manifest (or vice-versa). The browser caches the ~15 KB body once and
+  // sends a conditional GET on later loads; we answer 304 (a few bytes)
+  // instead of re-streaming 15 KB. On the no-PSRAM C3 that re-stream is
+  // the single biggest concurrent fetch that craters maxAlloc and
+  // collapses the menu to "only Security" — the 304 sidesteps it.
+  // Worst case (browser omits/garbles If-None-Match) = a normal 200, no
+  // regression; a stale-serve is impossible because a new firmware sig
+  // yields a new ETag that the old If-None-Match can never match.
+  String etag;
+  if (_manifestSig != 0) {
+    etag = "\"";
+    etag += String(_manifestSig, HEX);
+    etag += authed ? "-a\"" : "-n\"";
+    if (request->hasHeader("If-None-Match")
+        && request->header("If-None-Match") == etag) {
+      AsyncWebServerResponse* nm = request->beginResponse(304, "text/plain", "");
+      nm->addHeader("ETag", etag);
+      nm->addHeader("Cache-Control", "private, no-cache");
+      request->send(nm);
+      return;
+    }
+  }
+
+  // Happy path: serve directly from LittleFS via AsyncFileResponse.
+  // AsyncWebServer streams the file in PBUF_POOL-sized chunks straight
+  // into the TCP write loop — no heap-resident copy of the payload,
+  // no per-request ManifestBuilder, no std::make_shared. Whatever the
+  // current heap pressure, this path is allocation-free apart from
+  // the AsyncBasicResponse object itself (~150 B).
+  if (ESPFS.exists(path)) {
+    AsyncWebServerResponse* res = request->beginResponse(ESPFS, path,
+                                                         "application/json");
+    // Tell the browser not to keep this socket open after the response.
+    // The manifest is fetched once at page load; sustained keepalive
+    // ties up an lwIP tcp_pcb slot we'd rather hand to the asset
+    // requests that follow. Cuts the chance that the device runs out
+    // of TCP state while the page is finishing its initial cascade.
+    res->addHeader("Connection", "close");
+    if (etag.length()) {
+      // Cacheable but must-revalidate: the browser stores the body and
+      // re-checks via If-None-Match → the 304 fast-path above on a match.
+      res->addHeader("ETag", etag);
+      res->addHeader("Cache-Control", "private, no-cache");
+    } else {
+      res->addHeader("Cache-Control", "no-store");
+    }
+    request->send(res);
+    return;
+  }
+
+  // Fallback: cache file missing (FS write failed at boot, or got
+  // deleted out from under us). Rebuild on the fly via ManifestBuilder
+  // + chunked response. Same OOM guard the old path used.
+  if (ESP.getMaxAllocHeap() < 4096) {
+    log_w("[web.manifest] cache missing AND heap pressure (max_alloc=%u) — 503",
+          (unsigned)ESP.getMaxAllocHeap());
+    request->send(503, "application/json",
+                  "{\"error\":\"heap_pressure\",\"retryAfter\":2}");
+    return;
+  }
+  log_w("[web.manifest] cache file missing — falling back to on-the-fly build");
   auto builder = std::make_shared<ManifestBuilder>();
   builder->reset(*this, authed);
-
   AsyncWebServerResponse* response = request->beginChunkedResponse(
       "application/json",
       [builder](uint8_t* buf, size_t maxLen, size_t /*index*/) -> size_t {

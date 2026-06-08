@@ -358,6 +358,42 @@ class WebManager {
  private:
   void serveManifest(AsyncWebServerRequest* request);
 
+  // Build the manifest ONCE per firmware build into two on-flash
+  // files (anon + authed tiers). The two files are rewritten only
+  // when the manifest signature changes — practically: only on the
+  // first boot after a firmware update. Subsequent reboots open the
+  // existing files and serve them straight from flash. This avoids
+  // burning LittleFS write cycles on every boot of a long-running
+  // device.
+  //
+  // Signature is a CRC32 over a stable summary of the registered
+  // modules + entries + framework + project versions; stored in a
+  // sidecar file .manifest.sig. Mismatch (or missing files) →
+  // rebuild + rewrite + update sig. Match → return without touching
+  // flash.
+  //
+  // /rest/uiManifest then streams the appropriate file via
+  // AsyncFileResponse — zero per-request heap, immune to the
+  // bad_alloc / std::terminate cascade we hit when ManifestBuilder
+  // fires under heap pressure. Called from begin() right after
+  // _entries / _modules are registered; by then heap is at boot
+  // peak (max_alloc ~70-90 KB) so the one-shot build fits.
+  void writeManifestCacheToFs();
+
+  static constexpr const char* kManifestCacheAnonPath
+      = "/config/.manifest.anon.json";
+  static constexpr const char* kManifestCacheAuthedPath
+      = "/config/.manifest.authed.json";
+  static constexpr const char* kManifestCacheSigPath
+      = "/config/.manifest.sig";
+
+  // Compute a 32-bit signature over the current registration state.
+  // Folded into CRC32 in registration order so adding / removing /
+  // version-bumping any module or entry yields a different value.
+  // Used by writeManifestCacheToFs() to decide whether the on-flash
+  // cache is still current.
+  uint32_t computeManifestSig() const;
+
   AsyncWebServer* _server{nullptr};
   SecurityManager* _sm{nullptr};
   WsManager* _wsManager{nullptr};
@@ -389,6 +425,14 @@ class WebManager {
   const char* _frameworkVersion{""};
 
   bool _begun{false};
+
+  // Content signature of the current manifest (computeManifestSig),
+  // cached at boot by writeManifestCacheToFs(). Doubles as the ETag base
+  // for /rest/uiManifest conditional GETs — it changes only when the
+  // manifest content changes (a firmware update), so the browser can
+  // revalidate with a cheap 304 instead of re-streaming the ~15 KB body
+  // on every page load. 0 = not yet computed → ETag path skipped.
+  uint32_t _manifestSig{0};
 
   // Singleton manifest builder — BSS-resident, NOT allocated per
   // request. Mutex guards concurrent /rest/uiManifest fetches; a

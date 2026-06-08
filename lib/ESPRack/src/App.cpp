@@ -8,6 +8,10 @@
 #include "DeviceIdentity.h"
 #include "HeapMonitor.h"
 
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <esp_timer.h>
+
 // Firmware-tag anchors — keep the strings emitted in FwTags.cpp
 // alive through --gc-sections. A function-local volatile load isn't
 // enough (compiler drops the load as a dead store before the linker
@@ -256,9 +260,45 @@ void App::begin() {
 #ifdef PROGMEM_WWW
   WWWData::registerRoutes(
       [srv](const String& uri, const String& contentType, const uint8_t* content, size_t len) {
-        ArRequestHandlerFunction handler = [contentType, content, len](AsyncWebServerRequest* req) {
+        // Per-asset Cache-Control. Hashed bundle assets (/js/*.HASH.js,
+        // /css/*.HASH.css, /fonts/*.woff2) are content-addressed by
+        // the build pipeline and never change for a given firmware —
+        // safe to tell the browser to cache them forever. Everything
+        // else (/, /index.html, /favicon.ico, /app/manifest.json) can
+        // change on a UI iteration without a new firmware, so cache
+        // for a few minutes only — long enough to stop the browser's
+        // favicon-refetch-every-second storm but short enough that a
+        // hot-flashed bundle still shows up on the next reload.
+        // Tier 1 — content-hashed bundle assets (/js/*.HASH.js,
+        // /css/*.HASH.css, /fonts/*.woff2): never change for a given
+        // build, cache forever.
+        bool hashed_asset = uri.startsWith("/js/")
+                          || uri.startsWith("/css/")
+                          || uri.startsWith("/fonts/");
+        // Tier 2 — static images baked into the firmware (brand
+        // /app/icon.png, /favicon.ico, any /app/*.svg): they change only
+        // on a reflash, NOT on a UI hot-iteration. The previous 10-min
+        // policy made the browser RE-FETCH the brand icon on every page
+        // load past that window; on the no-PSRAM C3 that re-fetch lands
+        // in the concurrent-request failure window (verified: 1/40 ok
+        // under 4-way concurrency, 15/15 sequential) and renders a BROKEN
+        // ICON — the "sometimes the logo is missing" symptom. Cache them
+        // for a day so the logo/favicon drop out of the per-load fetch
+        // cascade entirely. A stale logo after a reflash is purely
+        // cosmetic and self-heals within 24 h.
+        bool static_image = uri.endsWith(".png")
+                          || uri.endsWith(".ico")
+                          || uri.endsWith(".svg")
+                          || uri.endsWith(".webp");
+        const char* cache_header =
+            hashed_asset  ? "public, max-age=31536000, immutable"
+          : static_image  ? "public, max-age=86400"
+          :                 "public, max-age=600";
+        const String uriCopy = uri;
+        ArRequestHandlerFunction handler = [contentType, content, len, uriCopy, cache_header](AsyncWebServerRequest* req) {
           AsyncWebServerResponse* res = req->beginResponse(200, contentType, content, len);
           res->addHeader("Content-Encoding", "gzip");
+          res->addHeader("Cache-Control", cache_header);
           req->send(res);
         };
         srv->on(uri.c_str(), HTTP_GET, handler);
@@ -304,8 +344,50 @@ void App::begin() {
 
 void App::loop() {
   if (!begun_) return;
-  for (auto& m : modules_) {
-    if (m) m->onLoop();
+
+  // Per-module loop profiler. Once every 60 s, snapshot:
+  //   * stack high-water mark for loopTask BEFORE/AFTER each
+  //     m->onLoop() — reveals which module sinks the most stack
+  //   * free heap / max_alloc deltas — reveals which module churns
+  //     heap inside its loop tick
+  //   * elapsed micros — reveals which module spends the most CPU
+  // Off-cycle ticks (every other 60 s pass) skip the instrumentation
+  // entirely so the steady-state cost is one `millis()` compare per
+  // loop iteration. Pure diagnostic — strip the block when the
+  // per-module audit is done.
+  static uint32_t s_lastProfile_ms = 0;
+  const uint32_t now_ms = millis();
+  const bool profile_this_pass = (now_ms - s_lastProfile_ms) >= 60000;
+  if (profile_this_pass) {
+    s_lastProfile_ms = now_ms;
+    uint32_t stack_free_in  = uxTaskGetStackHighWaterMark(nullptr);
+    log_i("[loop.profile] sample @ uptime=%us — loopTask stack_free_min=%u B",
+          (unsigned)(now_ms / 1000), (unsigned)stack_free_in);
+    for (auto& m : modules_) {
+      if (!m) continue;
+      ModuleDescriptor d;
+      m->describe(d);
+      uint32_t  free_in  = ESP.getFreeHeap();
+      uint32_t  ma_in    = ESP.getMaxAllocHeap();
+      uint32_t  stack_in = uxTaskGetStackHighWaterMark(nullptr);
+      uint64_t  t0       = esp_timer_get_time();
+      m->onLoop();
+      uint64_t  t1       = esp_timer_get_time();
+      uint32_t  free_out = ESP.getFreeHeap();
+      uint32_t  ma_out   = ESP.getMaxAllocHeap();
+      uint32_t  stack_out= uxTaskGetStackHighWaterMark(nullptr);
+      int32_t dheap  = (int32_t)free_out - (int32_t)free_in;
+      int32_t dma    = (int32_t)ma_out   - (int32_t)ma_in;
+      int32_t dstack = (int32_t)stack_out- (int32_t)stack_in;  // negative => stack consumed
+      log_i("[loop.profile]   %-16s dt=%lluus dheap=%d dmax=%d dstack=%d",
+            d.id ? d.id : "?",
+            (unsigned long long)(t1 - t0),
+            (int)dheap, (int)dma, (int)dstack);
+    }
+  } else {
+    for (auto& m : modules_) {
+      if (m) m->onLoop();
+    }
   }
   wsManager_.processAllQueues();
 
@@ -315,7 +397,6 @@ void App::loop() {
   // certified-uptime rationale.
   static uint32_t s_lastHeapTick_ms = 0;
   static uint8_t  s_ticksSinceLog  = 0;
-  uint32_t now_ms = millis();
   if (now_ms - s_lastHeapTick_ms >= 60000) {
     s_lastHeapTick_ms = now_ms;
     HeapMonitor::tick();
