@@ -51,6 +51,13 @@ class WebFeatureEntry : public IWebFeatureEntry {
   void registerEndpoints(AsyncWebServer* server, SecurityManager* sm) override {
     if (_mounted || !server || !_service) return;
 
+    // Auto-size the REST buffer from the real schema tree if the feature
+    // opted in (WEBFEATURE_BUFFER_AUTO). Once, here at boot (heap fresh) —
+    // never per request.
+    if (_restBufferSize == WEBFEATURE_BUFFER_AUTO) {
+      _restBufferSize = measureRestBuffer();
+    }
+
     auto predicate = webAuthLevelToPredicate(_spec.auth);
 
     if (_spec.restRead && _spec.restUpdate && std::strcmp(_spec.restRead, _spec.restUpdate) == 0) {
@@ -218,6 +225,29 @@ class WebFeatureEntry : public IWebFeatureEntry {
   const WebFeatureSpec& spec() const { return _spec; }
 
  private:
+  // Build the REST tree once into a generous temp doc and size the runtime
+  // buffer to the ACTUAL pool used + 50% headroom for variable scalar values
+  // — replaces hand-guessed worst-case constants. Called once at boot (heap
+  // fresh); the temp doc is freed on return. Safe fallback if the probe
+  // can't allocate or the feature has no reader.
+  size_t measureRestBuffer() {
+    static constexpr size_t kProbe    = 24576;  // > any realistic schema
+    static constexpr size_t kFallback = 8192;
+    if (!_service || !_restReader) return kFallback;
+    DynamicJsonDocument probe(kProbe);
+    if (probe.capacity() == 0) return kFallback;            // boot heap too tight
+    JsonObject root = probe.to<JsonObject>();
+    if (root.isNull()) return kFallback;
+    _service->read(root, _restReader);
+    const size_t used = probe.memoryUsage();
+    if (used == 0) return kFallback;
+    size_t sized = used + (used / 2) + 512;                 // +50% +512 margin
+    if (probe.overflowed()) sized = kProbe + (kProbe / 2);  // schema > probe (rare)
+    log_i("[webfeature:%s] REST buffer auto-sized: tree=%uB -> alloc=%uB",
+          _spec.id ? _spec.id : "?", (unsigned)used, (unsigned)sized);
+    return sized;
+  }
+
   WebFeatureSpec _spec;
   StatefulService<T>* _service{nullptr};
   JsonStateReader<T> _restReader;

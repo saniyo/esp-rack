@@ -19,6 +19,13 @@ class WebManager;
 
 #define HTTP_ENDPOINT_ORIGIN_ID "http"
 
+// Sentinel for registerFeature(..., bufferSize) / WebFeatureEntry: a feature
+// that passes WEBFEATURE_BUFFER_AUTO gets its REST buffer sized automatically
+// at boot from the REAL ArduinoJson tree (doc.memoryUsage()) instead of a
+// hand-guessed worst-case constant. 0 is safe — a 0-byte response buffer is
+// never a real request.
+static constexpr size_t WEBFEATURE_BUFFER_AUTO = 0;
+
 template <class T>
 class HttpGetEndpoint {
  public:
@@ -51,6 +58,16 @@ class HttpGetEndpoint {
   size_t _bufferSize;
 
   void fetchSettings(AsyncWebServerRequest* request) {
+    // Proactive heap-pressure guard: if the largest contiguous free block
+    // can't hold _bufferSize, shed cleanly with a retryable 503 instead of
+    // letting the alloc fail mid-build (heap churn + truncated/null doc).
+    // Cheap, no allocation. Pairs with the auto-measured _bufferSize so the
+    // threshold tracks the feature's real need, not a worst-case constant.
+    if (ESP.getMaxAllocHeap() < _bufferSize + 1024) {
+      request->send(503, "application/json",
+                    "{\"error\":\"heap_pressure\",\"retryAfter\":1}");
+      return;
+    }
     AsyncJsonResponse* response = new AsyncJsonResponse(false, _bufferSize);
     JsonObject jsonObject = response->getRoot().to<JsonObject>();
     // Heap fragmentation guard. When the underlying DynamicJsonDocument
@@ -133,6 +150,14 @@ class HttpPostEndpoint {
     StateUpdateResult outcome = _statefulService->updateWithoutPropagation(jsonObject, _stateUpdater);
     if (outcome == StateUpdateResult::ERROR) {
       request->send(400);
+      return;
+    }
+    // Proactive heap-pressure guard (see fetchSettings). The write already
+    // applied via updateWithoutPropagation above; a retryable 503 here just
+    // tells the client to refetch — state still propagates on the next GET.
+    if (ESP.getMaxAllocHeap() < _bufferSize + 1024) {
+      request->send(503, "application/json",
+                    "{\"error\":\"heap_pressure\",\"retryAfter\":1}");
       return;
     }
     AsyncJsonResponse* response = new AsyncJsonResponse(false, _bufferSize);
