@@ -479,7 +479,11 @@ void MothershipService::runCheckinLoop() {
         s.last_checkin_at_s = now_s;
         s.runtime_state = IMothershipProvider::State::LastOk;
         s.status_label  = "LastOk";
-        s.last_error    = "-";  // clear the stale failure reason on success
+        // last_error is deliberately NOT cleared on success — it stays as
+        // the LAST failure reason (a sticky diagnostic record) so the
+        // operator can still see WHAT the most recent failure was after the
+        // device has recovered to LastOk. It is only ever overwritten by
+        // the NEXT failure. Boot default is "-" (no failure seen yet).
       } else {
         s.fail_count++;
         s.runtime_state = IMothershipProvider::State::LastFail;
