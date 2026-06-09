@@ -1,17 +1,14 @@
 #include <OTASettingsService.h>
 
-#include <FormBuilder.h>
+#include <web/Form.h>
 #include <WebManager.h>
 
 void OTASettings::buildForm(OTASettings& settings, JsonObject& root) {
-  JsonArray set = FormBuilder::createForm(root, "ota", "OTA Settings");
-  FormBuilder::addSwitchField(set, "enabled", AF::RW, settings.enabled,
-                              icon("SystemUpdate"));
-  FormBuilder::addNumberField(set, "port", AF::RW, (double)settings.port,
-                              minVal(1), maxVal(65535), format("0"),
-                              icon("Settings"));
-  FormBuilder::addSecretField(set, "pwd", AF::RW, settings.password.c_str(),
-                              icon("Lock"));
+  web::Form form(root, "ota", "OTA Settings");
+  form.add(web::Switch("enabled", settings.enabled).icon("SystemUpdate"));
+  form.add(web::Number("port", (double)settings.port)
+               .min(1).max(65535).format("0").icon("Settings"));
+  form.add(web::Secret("pwd", settings.password.c_str()).icon("Lock"));
 }
 
 OTASettingsService::OTASettingsService(ConfigManager* cfgMgr) :
