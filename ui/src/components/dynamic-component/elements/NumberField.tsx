@@ -43,33 +43,37 @@ const NumberField: React.FC<NumberFieldProps> = ({
     }
   }, [value, isEditing]);
 
-  // Коли користувач вводить
+  // Free typing: store the raw input verbatim. We must NOT clamp here, on
+  // every keystroke — that makes intermediate values impossible to type: to
+  // enter "15" when min=10 the transient "1" would snap to "10" and you could
+  // never reach 15, and clearing the field would snap straight to min. Bounds
+  // are applied once, at commit (blur), in clampToBounds().
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    let newValue = e.target.value;
-    // Перевірка меж
-    if (minValue !== undefined && +newValue < +minValue) newValue = String(minValue);
-    if (maxValue !== undefined && +newValue > +maxValue) newValue = String(maxValue);
+    setInternalValue(e.target.value);
+  };
 
-    setInternalValue(newValue);
+  // Clamp to [min, max] — only at commit time. Empty / non-numeric is passed
+  // through untouched (the form keeps the last good value).
+  const clampToBounds = (raw: string): string => {
+    if (raw === '') return raw;
+    const n = parseFloat(raw);
+    if (Number.isNaN(n)) return raw;
+    let c = n;
+    if (minValue !== undefined && c < +minValue) c = +minValue;
+    if (maxValue !== undefined && c > +maxValue) c = +maxValue;
+    return String(c);
   };
 
   // Коли користувач втрачає фокус
   const handleBlur = () => {
     setIsEditing(false);
-    // -- Викликаємо onBlur, якщо воно передане
-    //    і передаємо «фінальне» internalValue
-    if (onBlur) {
-      onBlur(field.label, internalValue);
-    }
-    // **Важливо**: НЕ скидаємо internalValue назад на старе value!
-    //    Інакше ми втрачатимемо зміни
-    // setInternalValue(value); // <-- Прибрати!
-
-    // Також викликаємо onChange, щоб «сказати» вищому компоненту,
-    // що внутрішній стан змінився. (Якщо це потрібно)
-    if (onChange) {
-      onChange(field.label, internalValue);
-    }
+    // Apply min/max ONCE, here at commit — not per keystroke (see
+    // handleInputChange). Reflect the clamped value back into the input and
+    // notify the parent with the final value.
+    const finalValue = clampToBounds(internalValue);
+    if (finalValue !== internalValue) setInternalValue(finalValue);
+    if (onBlur) onBlur(field.label, finalValue);
+    if (onChange) onChange(field.label, finalValue);
   };
 
   // Коли поле отримує фокус
