@@ -87,7 +87,18 @@ const LayoutMenuItem: FC<Props> = ({ node, depth = 0, ancestors = [] }) => {
   const sx = {
     pl: 2 + depth * 2,
     pr: hasKids ? 6 : 2,
-    ...(node.isTab && !active ? { bgcolor: "grey.100" } : {}),
+    // Sub-tab leaves form a cohesive GREY panel under the component (always
+    // grey, including the active one), so they clearly read as the
+    // component's own internal tabs vs. nested feature components (white).
+    // The active tab keeps the selected tint layered on top of the grey.
+    ...(node.isTab
+      ? {
+          bgcolor: "grey.200",
+          "&:hover": { bgcolor: "grey.300" },
+          "&.Mui-selected": { bgcolor: "action.selected" },
+          "&.Mui-selected:hover": { bgcolor: "action.selected" },
+        }
+      : {}),
   };
 
   return (
