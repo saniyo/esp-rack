@@ -111,7 +111,10 @@ const NumberField: React.FC<NumberFieldProps> = ({
       <Tooltip title={field.placeholder || 'Enter a value'}>
         <StyledTextField
           type="number"
-          label={readableLabel}
+          // While editing, surface the PREVIOUS committed value next to the
+          // label so the operator can see what was there before typing a new
+          // one (value is stable mid-edit — Number commits on blur).
+          label={<>{readableLabel} {isEditing && `: ${value}`}</>}
           placeholder={field.placeholder || ''}
           value={internalValue}
           onChange={handleInputChange}

@@ -32,6 +32,10 @@ const Textarea: React.FC<TextareaProps> = ({ field, value, onChange, onBlur }) =
 
   const [internalValue, setInternalValue] = useState<string>(value);
   const [isEditing, setIsEditing] = useState(false);
+  // Snapshot of the value at focus time. Textarea commits live (onChange on
+  // every keystroke), so `value` would track the edit — we capture the
+  // original here to show it beside the label while editing.
+  const [originalValue, setOriginalValue] = useState<string>(value);
 
   useEffect(() => {
     if (!isEditing) {
@@ -52,6 +56,7 @@ const Textarea: React.FC<TextareaProps> = ({ field, value, onChange, onBlur }) =
 
   const handleFocus = () => {
     setIsEditing(true);
+    setOriginalValue(value);  // snapshot the previous value for the editing label
   };
 
   const hint = field.placeholder || 'Enter text';
@@ -89,7 +94,10 @@ const Textarea: React.FC<TextareaProps> = ({ field, value, onChange, onBlur }) =
     <ListItem>
       <Tooltip title={hint}>
         <MuiTextField
-          label={readableLabel}
+          // Show the value-at-focus beside the label while editing. Textarea
+          // commits live on every keystroke, so we use the focus-time snapshot
+          // (originalValue) rather than `value`, which tracks the live edit.
+          label={<>{readableLabel} {isEditing && `: ${originalValue}`}</>}
           placeholder={field.placeholder || ''}
           value={internalValue}
           onChange={handleInputChange}

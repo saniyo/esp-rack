@@ -79,7 +79,9 @@ const IPAddressField: React.FC<IPAddressFieldProps> = ({ field, value, onChange,
     <ListItem>
       <Tooltip title={field.placeholder || 'Enter IPv4 address (e.g. 192.168.4.1)'}>
         <StyledTextField
-          label={readableLabel}
+          // Show the previous committed value beside the label while editing
+          // (value is stable mid-edit — IP commits on blur).
+          label={<>{readableLabel} {isEditing && `: ${value}`}</>}
           placeholder={field.placeholder || '0.0.0.0'}
           value={internalValue}
           onChange={(e) => setInternalValue(e.target.value)}
