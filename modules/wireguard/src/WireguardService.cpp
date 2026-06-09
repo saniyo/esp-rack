@@ -1,5 +1,6 @@
 #include <WireguardService.h>
 #include <WebManager.h>
+#include <web/Form.h>
 #include <HeapMonitor.h>
 
 #include <Arduino.h>
@@ -88,45 +89,36 @@ StateUpdateResult WireguardSettings::update(JsonObject& root,
 
 void WireguardSettings::buildForm(WireguardSettings& s,
                                     JsonObject& root) {
-  JsonArray st = FormBuilder::createForm(root, "status",
-                                          "Tunnel status");
+  web::Form st(root, "status", "Tunnel status");
 
   String state_label = s.is_up ? "Up" : "Down";
   // PowerSettingsNew — clearer Up/Down semantic than VpnLock (which
   // implied "VPN with lock" — wrong concept for on-demand reverse-
   // access tunnel). Color flips to success when the tunnel is up.
-  FormBuilder::addTextField(st, "state", AF::R, state_label.c_str(),
-                            label("State"), icon("PowerSettingsNew"),
-                            colorMap("Up:success,Down:default"));
+  st.add(web::Text("state", state_label.c_str()).readOnly()
+             .label("State").icon("PowerSettingsNew")
+             .colorMap("Up:success,Down:default"));
   // Router — the tunnel IP is the device's address inside the WG
   // overlay network, semantically a network-routing identifier.
-  FormBuilder::addTextField(st, "assigned_ip", AF::R,
-                            s.assigned_ip.c_str(),
-                            label("Tunnel IP"), icon("Router"));
-  FormBuilder::addTextField(st, "endpoint", AF::R,
-                            s.endpoint.c_str(),
-                            label("Server endpoint"), icon("Cloud"));
-  FormBuilder::addTextField(st, "pub_key", AF::R,
-                            s.pub_key.c_str(),
-                            label("Device public key"),
-                            icon("Key"));
-  FormBuilder::addNumberField(st, "tx_bytes", AF::R,
-                              (double)s.tx_bytes, format("0"),
-                              label("Tx bytes"), icon("Upload"));
-  FormBuilder::addNumberField(st, "rx_bytes", AF::R,
-                              (double)s.rx_bytes, format("0"),
-                              label("Rx bytes"), icon("Download"));
+  st.add(web::Text("assigned_ip", s.assigned_ip.c_str()).readOnly()
+             .label("Tunnel IP").icon("Router"));
+  st.add(web::Text("endpoint", s.endpoint.c_str()).readOnly()
+             .label("Server endpoint").icon("Cloud"));
+  st.add(web::Text("pub_key", s.pub_key.c_str()).readOnly()
+             .label("Device public key").icon("Key"));
+  st.add(web::Number("tx_bytes", (double)s.tx_bytes).readOnly()
+             .format("0").label("Tx bytes").icon("Upload"));
+  st.add(web::Number("rx_bytes", (double)s.rx_bytes).readOnly()
+             .format("0").label("Rx bytes").icon("Download"));
 
   // Library-backend identifier. Tells the operator which tunnel
   // implementation is running — the static-allocation
   // WireGuard-ESPRack fork (default v0.2.0+) or whatever override a
   // consumer set via build_flags. Read-only diagnostic, not a config.
-  FormBuilder::addTextField(st, "backend", AF::R,
-                            WIREGUARD_BACKEND_NAME,
-                            label("Library backend"),
-                            icon("Memory"));
+  st.add(web::Text("backend", WIREGUARD_BACKEND_NAME).readOnly()
+             .label("Library backend").icon("Memory"));
 
-  FormBuilder::addMessageField(st, "m_config_where",
+  st.add(web::Message("m_config_where",
       "Configuration lives on the mothership, not here. The operator "
       "sets the subnet, port, and public endpoint once at "
       "/mothership/wg on the server. The triplet (server pubkey + "
@@ -134,19 +126,19 @@ void WireguardSettings::buildForm(WireguardSettings& s,
       "device through the /api/v1/enroll response and on every "
       "openTunnel action — that's why the Server endpoint row "
       "above is empty until the first enrollment + openTunnel cycle "
-      "completes against a properly configured mothership.",
-      level("info"), icon("Settings"));
-  FormBuilder::addMessageField(st, "m_lifecycle",
+      "completes against a properly configured mothership.")
+      .level("info").icon("Settings"));
+  st.add(web::Message("m_lifecycle",
       "Tunnel is on-demand. It comes up only when an operator opens "
       "this device's UI panel on the mothership dashboard, and is "
       "torn down after idle timeout. No manual controls here — this "
       "tab is read-only for diagnostics. Use the 'Open UI' button "
-      "on the device's panel page (mothership side) to bring it up.",
-      level("info"), icon("Info"));
+      "on the device's panel page (mothership side) to bring it up.")
+      .level("info").icon("Info"));
 
   // ── INTERNALS ──────────────────────────────────────────────────
   // The device's Curve25519 private key — generated locally on first
-  // boot and never leaves the device. Marked as addSecretField so
+  // boot and never leaves the device. Marked as a Secret field so
   // SecretsVault's auto-discovery picks it up (it scans for
   // FieldType::SECRET in the form schema, not field-name patterns)
   // and encrypts the on-disk value in /config/wireguard.json as
@@ -154,21 +146,18 @@ void WireguardSettings::buildForm(WireguardSettings& s,
   // reason to edit it; rotating means clearing it and rebooting
   // (the service regenerates a fresh pair on next ensureKeypair()
   // when the field is empty).
-  JsonArray intl = FormBuilder::createForm(root, "internals",
-                                            "Sensitive material (encrypted on disk)");
-  FormBuilder::addMessageField(intl, "m_internals_warn",
+  web::Form intl(root, "internals", "Sensitive material (encrypted on disk)");
+  intl.add(web::Message("m_internals_warn",
       "The device's Curve25519 private key. Generated locally on "
       "first boot, never transmitted. Encrypted at rest by "
       "SecretsVault — eye icon reveals plaintext for debug. Do NOT "
       "modify by hand: edits via this UI are discarded on save "
       "(AF::R). To rotate the keypair, clear this field manually "
       "and reboot the device (next ensureKeypair() generates a fresh "
-      "pair, and the next enrollment ships the new public half).",
-      level("warning"), icon("Warning"));
-  FormBuilder::addSecretField(intl, "priv_key", AF::R,
-                              s.priv_key.c_str(),
-                              label("Device private key (Curve25519)"),
-                              icon("Key"));
+      "pair, and the next enrollment ships the new public half).")
+      .level("warning").icon("Warning"));
+  intl.add(web::Secret("priv_key", s.priv_key.c_str()).readOnly()
+             .label("Device private key (Curve25519)").icon("Key"));
 }
 
 void WireguardSettings::staRead(WireguardSettings& s,
