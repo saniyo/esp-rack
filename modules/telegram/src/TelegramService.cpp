@@ -2,7 +2,7 @@
 #include <ArduinoJson.h>
 #include <WebManager.h>
 #include <WebFeatureSpec.h>
-#include <FormBuilder.h>
+#include <web/Form.h>
 #include <DeviceIdentity.h>
 
 // ─── ctor / dtor ────────────────────────────────────────────────────
@@ -113,22 +113,20 @@ void TelegramService::registerManifest(WebManager* web) {
   auto fullReader = [this](TelegramSettings& s, JsonObject& root) {
     TelegramSettings::buildForm(s, root);
 
-    JsonArray subs = FormBuilder::createForm(root, "subs",
-                                             "Internal services streaming through this bot");
-    JsonObject tbl = FormBuilder::addTableField(
-        subs, "subscriptions", AF::R,
-        col("name",      "Service",      "text"),
-        col("sent",      "Sent",         "number", format("0")),
-        col("errors",    "Errors",       "number", format("0")),
-        col("dropped",   "Dropped",      "number", format("0")),
-        col("rate",      "Rate (msg/min)", "number", format("0")),
-        col("lastAt",    "Last (s ago)", "number", format("0")),
-        col("topic",     "Topic ID",     "text"),
-        col("enabled",   "Enabled",      "text"),
-        tableMode("replace"), maxRows(32),
-        icon("Cable"),
-        label("Active subscriptions"));
-    JsonArray rows = tbl["subscriptions"].as<JsonArray>();
+    web::Form subs(root, "subs",
+                   "Internal services streaming through this bot");
+    subs.add(web::Table("subscriptions")
+                 .col("name", "Service", "text")
+                 .col("sent", "Sent", "number", "0")
+                 .col("errors", "Errors", "number", "0")
+                 .col("dropped", "Dropped", "number", "0")
+                 .col("rate", "Rate (msg/min)", "number", "0")
+                 .col("lastAt", "Last (s ago)", "number", "0")
+                 .col("topic", "Topic ID", "text")
+                 .col("enabled", "Enabled", "text")
+                 .mode("replace").maxRows(32)
+                 .icon("Cable").label("Active subscriptions"));
+    JsonArray rows = subs.rowsOf("subscriptions");
     uint32_t now_s = (uint32_t)(millis() / 1000);
     for (const auto& r : _subs) {
       if (r.id == 0) continue;

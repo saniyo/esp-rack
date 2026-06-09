@@ -1,5 +1,6 @@
 #include "TelegramSettings.h"
-#include <FormBuilder.h>
+#include <FormBuilder.h>   // still used: updateValue() in update parsers
+#include <web/Form.h>
 
 // ─── Persisted config (ConfigDelegate readConfig) ────────────────────
 //
@@ -65,7 +66,7 @@ StateUpdateResult TelegramSettings::upd(JsonObject& j, TelegramSettings& s) {
 // action so the operator sees the queued line in the log.
 void TelegramSettings::buildForm(TelegramSettings& s, JsonObject& root) {
   // ── STATUS ────────────────────────────────────────────────────────
-  JsonArray sta = FormBuilder::createForm(root, "status", "Telegram bot status");
+  web::Form sta(root, "status", "Telegram bot status");
 
   // Status avatar: success (green) when the service is enabled and the
   // last send succeeded — mirrors the NTP "Active/Inactive" pattern so
@@ -86,11 +87,10 @@ void TelegramSettings::buildForm(TelegramSettings& s, JsonObject& root) {
   } else {
     statusColor = "info";
   }
-  FormBuilder::addTextField(sta, "status", AF::R, s.statusLabel.c_str(),
-                            label("Status"), icon("Cable"), color(statusColor));
-  FormBuilder::addNumberField(sta, "qsize", AF::R, (double)s.qSize,
-                              label("Queue depth"), unit("msgs"), format("0"),
-                              icon("Inventory2"));
+  sta.add(web::Text("status", s.statusLabel.c_str()).readOnly()
+              .label("Status").icon("Cable").color(statusColor));
+  sta.add(web::Number("qsize", (double)s.qSize).readOnly()
+              .label("Queue depth").unit("msgs").format("0").icon("Inventory2"));
 
   if (s.lastMessage.length() > 0) {
     String lastLine;
@@ -99,34 +99,29 @@ void TelegramSettings::buildForm(TelegramSettings& s, JsonObject& root) {
       lastLine += String(s.lastSendAt_s) + "s · ";
     }
     lastLine += s.lastMessage;
-    FormBuilder::addTextField(sta, "last", AF::R, lastLine.c_str(),
-                              label("Last attempt"),
-                              icon(s.lastSendOk ? "Check" : "ErrorOutline"));
+    sta.add(web::Text("last", lastLine.c_str()).readOnly()
+                .label("Last attempt").icon(s.lastSendOk ? "Check" : "ErrorOutline"));
   }
 
   // Composer card — textarea + Send action button. The action's
   // refetchForm() decorator pushes a Status GET right after firing so
   // the new log row lands without a manual reload.
-  FormBuilder::addTextareaField(sta, "manualText", AF::RW, s.manualText,
-                                label("Compose"), placeholder("Type a message…"),
-                                icon("Edit"));
-  FormBuilder::addActionField(sta, "manualSend", "Send", AF::RW,
-                              actionRef("telegram.sendManual"),
-                              icon("Send"), color("primary"), refetchForm());
+  sta.add(web::Textarea("manualText", s.manualText)
+              .label("Compose").placeholder("Type a message…").icon("Edit"));
+  sta.add(web::Action("manualSend", "Send")
+              .ref("telegram.sendManual").icon("Send").color("primary").refetchForm());
 
   // Chat log — TableField; rows are pushed inline below (see
   // WiFiSettingsService scan-results pattern). One column per
   // structured field; frontend renders timestamps / status badges
   // using formatters specified per column.
-  JsonObject logTbl = FormBuilder::addTableField(
-      sta, "log", AF::R,
-      col("ts",    "Time",   "number", format("0")),
-      col("stage", "Stage",  "text"),
-      col("text",  "Message", "text"),
-      tableMode("replace"), maxRows(TelegramSettings::LOG_MAX),
-      icon("History"),
-      label("Recent activity"));
-  JsonArray logRows = logTbl["log"].as<JsonArray>();
+  sta.add(web::Table("log")
+              .col("ts", "Time", "number", "0")
+              .col("stage", "Stage", "text")
+              .col("text", "Message", "text")
+              .mode("replace").maxRows(TelegramSettings::LOG_MAX)
+              .icon("History").label("Recent activity"));
+  JsonArray logRows = sta.rowsOf("log");
   for (const auto& e : s.chatLog) {
     JsonObject row = logRows.createNestedObject();
     row["ts"]    = e.ts_s;
@@ -135,43 +130,35 @@ void TelegramSettings::buildForm(TelegramSettings& s, JsonObject& root) {
   }
 
   // ── SETTINGS ──────────────────────────────────────────────────────
-  JsonArray set = FormBuilder::createForm(root, "settings", "Bot configuration");
+  web::Form set(root, "settings", "Bot configuration");
 
-  FormBuilder::addSecretField(set, "token", AF::RW, s.botToken.c_str(),
-                              label("Bot Token"), icon("Lock"),
-                              placeholder("123456:ABC-…"));
-  FormBuilder::addTextField(set, "chat", AF::RW, s.chatId.c_str(),
-                            label("Default Chat ID"), icon("Forum"),
-                            placeholder("-1001234567890 or @channelname"));
-  FormBuilder::addTextField(set, "topic", AF::RW, s.topicId.c_str(),
-                            label("Default Topic ID"), icon("Topic"),
-                            placeholder("optional, numeric thread ID"));
+  set.add(web::Secret("token", s.botToken.c_str())
+              .label("Bot Token").icon("Lock").placeholder("123456:ABC-…"));
+  set.add(web::Text("chat", s.chatId.c_str())
+              .label("Default Chat ID").icon("Forum").placeholder("-1001234567890 or @channelname"));
+  set.add(web::Text("topic", s.topicId.c_str())
+              .label("Default Topic ID").icon("Topic").placeholder("optional, numeric thread ID"));
   // Device label — read-only mirror of the canonical Device ID.
   // Prepended to every outgoing message as `[label] <text>` so chat
   // readers can distinguish devices sharing a single bot. Not editable:
   // single-source-of-truth identity, identical to cert CN / MQTT
   // clientId / mothership deviceId.
-  FormBuilder::addTextField(set, "device_label", AF::R, s.deviceLabel.c_str(),
-                            label("Device Label (auto)"), icon("Badge"));
-  FormBuilder::addSwitchField(set, "ena", AF::RW, s.enabled,
-                              label("Enabled"), icon("Sync"));
+  set.add(web::Text("device_label", s.deviceLabel.c_str()).readOnly()
+              .label("Device Label (auto)").icon("Badge"));
+  set.add(web::Switch("ena", s.enabled).label("Enabled").icon("Sync"));
 
-  FormBuilder::addNumberField(set, "interval_ms", AF::RW, (double)s.sendIntervalMs,
-                              label("Min send interval"),
-                              minVal(50), maxVal(60000), format("0"),
-                              unit("ms"), icon("Timer"),
-                              placeholder("≥50ms; lower = faster but watch Telegram rate limit (~30 msg/s)"));
+  set.add(web::Number("interval_ms", (double)s.sendIntervalMs)
+              .label("Min send interval").min(50).max(60000).format("0")
+              .unit("ms").icon("Timer")
+              .placeholder("≥50ms; lower = faster but watch Telegram rate limit (~30 msg/s)"));
 
-  FormBuilder::addDropdownField(set, "parse_mode", AF::RW, s.parseMode,
-                                opt("None",        0),
-                                opt("Markdown",    1),
-                                opt("MarkdownV2",  2),
-                                opt("HTML",        3),
-                                label("Default parse mode"), icon("FormatPaint"));
+  set.add(web::Dropdown("parse_mode", s.parseMode)
+              .option("None", 0).option("Markdown", 1)
+              .option("MarkdownV2", 2).option("HTML", 3)
+              .label("Default parse mode").icon("FormatPaint"));
 
-  FormBuilder::addSwitchField(set, "silent_default", AF::RW, s.silentDefault,
-                              label("Silent by default"),
-                              icon("NotificationsOff"));
+  set.add(web::Switch("silent_default", s.silentDefault)
+              .label("Silent by default").icon("NotificationsOff"));
 }
 
 // ─── WS push (live status updates) ──────────────────────────────────
