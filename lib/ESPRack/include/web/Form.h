@@ -81,12 +81,16 @@ class FieldSpec {
   String head(const char* type) const { String o = type; o += ';'; o += _af; return o; }
   const String& tail() const { return _opts; }
 
-  // Default materializer for "simple" fields (value already a JSON scalar):
-  // create the field object, leave value-setting to the caller, append o.
-  JsonObject open(JsonArray& fields, const char* type) const {
+  // Materializer for "simple" fields. Writes the VALUE key FIRST, then "o".
+  // Order MATTERS: the live-status renderer reads Object.keys(field)[0] as the
+  // value key (DynamicStatus.tsx), and the legacy FormBuilder also emitted the
+  // value before "o". Emitting "o" first makes Status tabs render the raw
+  // option string in place of the value.
+  template <typename V>
+  void emit(JsonArray& fields, const char* type, const V& value) const {
     JsonObject f = fields.createNestedObject();
-    f["o"] = head(type) + _opts;
-    return f;
+    f[_key] = value;              // value FIRST
+    f["o"] = head(type) + _opts;  // "o" SECOND
   }
 };
 
@@ -97,7 +101,7 @@ class Text : public FieldSpec<Text> {
   Text& placeholder(const char* p) { return putStr(Opt::Placeholder, p); }
   Text& unit(const char* u)        { return putStr(Opt::Unit, u); }
   Text& colorMap(const char* spec) { return putStr(Opt::ColorMap, spec); }
-  void writeTo(JsonArray& fields) const { open(fields, FieldType::Text)[_key] = String(_v ? _v : ""); }
+  void writeTo(JsonArray& fields) const { emit(fields, FieldType::Text, String(_v ? _v : "")); }
  private:
   const char* _v;
 };
@@ -107,7 +111,7 @@ class Secret : public FieldSpec<Secret> {
   Secret(const char* key, const char* value) : FieldSpec(key), _v(value) {}
   Secret& placeholder(const char* p) { return putStr(Opt::Placeholder, p); }
   Secret& colorMap(const char* spec) { return putStr(Opt::ColorMap, spec); }
-  void writeTo(JsonArray& fields) const { open(fields, FieldType::Secret)[_key] = String(_v ? _v : ""); }
+  void writeTo(JsonArray& fields) const { emit(fields, FieldType::Secret, String(_v ? _v : "")); }
  private:
   const char* _v;
 };
@@ -117,7 +121,7 @@ class Textarea : public FieldSpec<Textarea> {
   Textarea(const char* key, const String& value) : FieldSpec(key), _v(value) {}
   Textarea& placeholder(const char* p) { return putStr(Opt::Placeholder, p); }
   Textarea& colorMap(const char* spec) { return putStr(Opt::ColorMap, spec); }
-  void writeTo(JsonArray& fields) const { open(fields, FieldType::Textarea)[_key] = _v; }
+  void writeTo(JsonArray& fields) const { emit(fields, FieldType::Textarea, _v); }
  private:
   String _v;
 };
@@ -128,7 +132,7 @@ class Ip : public FieldSpec<Ip> {
   Ip& placeholder(const char* p) { return putStr(Opt::Placeholder, p); }
   Ip& unit(const char* u)        { return putStr(Opt::Unit, u); }
   Ip& colorMap(const char* spec) { return putStr(Opt::ColorMap, spec); }
-  void writeTo(JsonArray& fields) const { open(fields, FieldType::Ip)[_key] = String(_v ? _v : ""); }
+  void writeTo(JsonArray& fields) const { emit(fields, FieldType::Ip, String(_v ? _v : "")); }
  private:
   const char* _v;
 };
@@ -136,7 +140,7 @@ class Ip : public FieldSpec<Ip> {
 class TimeZones : public FieldSpec<TimeZones> {
  public:
   TimeZones(const char* key, const char* label) : FieldSpec(key), _v(label) {}
-  void writeTo(JsonArray& fields) const { open(fields, FieldType::TimeZones)[_key] = String(_v ? _v : ""); }
+  void writeTo(JsonArray& fields) const { emit(fields, FieldType::TimeZones, String(_v ? _v : "")); }
  private:
   const char* _v;
 };
@@ -147,7 +151,7 @@ class Checkbox : public FieldSpec<Checkbox> {
   Checkbox(const char* key, bool value) : FieldSpec(key), _v(value) {}
   Checkbox& placeholder(const char* p) { return putStr(Opt::Placeholder, p); }
   Checkbox& colorMap(const char* spec) { return putStr(Opt::ColorMap, spec); }
-  void writeTo(JsonArray& fields) const { open(fields, FieldType::Checkbox)[_key] = _v; }
+  void writeTo(JsonArray& fields) const { emit(fields, FieldType::Checkbox, _v); }
  private:
   bool _v;
 };
@@ -157,7 +161,7 @@ class Switch : public FieldSpec<Switch> {
   Switch(const char* key, bool value) : FieldSpec(key), _v(value) {}
   Switch& placeholder(const char* p) { return putStr(Opt::Placeholder, p); }
   Switch& colorMap(const char* spec) { return putStr(Opt::ColorMap, spec); }
-  void writeTo(JsonArray& fields) const { open(fields, FieldType::Switch)[_key] = _v; }
+  void writeTo(JsonArray& fields) const { emit(fields, FieldType::Switch, _v); }
  private:
   bool _v;
 };
@@ -167,7 +171,7 @@ class Button : public FieldSpec<Button> {
   Button(const char* key, bool value) : FieldSpec(key), _v(value) {}
   Button& placeholder(const char* p) { return putStr(Opt::Placeholder, p); }
   Button& colorMap(const char* spec) { return putStr(Opt::ColorMap, spec); }
-  void writeTo(JsonArray& fields) const { open(fields, FieldType::Button)[_key] = _v; }
+  void writeTo(JsonArray& fields) const { emit(fields, FieldType::Button, _v); }
  private:
   bool _v;
 };
@@ -400,7 +404,7 @@ class DateTime : public FieldSpec<DateTime> {
   DateTime& dateOnly() { return putStr(Opt::DateTimeMode, "date"); }
   DateTime& timeOnly() { return putStr(Opt::DateTimeMode, "time"); }
   DateTime& dateTime() { return putStr(Opt::DateTimeMode, "datetime"); }
-  void writeTo(JsonArray& fields) const { open(fields, FieldType::DateTime)[_key] = _v; }
+  void writeTo(JsonArray& fields) const { emit(fields, FieldType::DateTime, _v); }
  private:
   int32_t _v;
 };
@@ -414,7 +418,7 @@ class Action : public FieldSpec<Action> {
   Action& confirm(const char* t)    { return putStr(Opt::Confirm, t); }
   Action& ref(const char* actionId) { return putStr(Opt::ActionRef, actionId); }
   Action& withFields(const char* spec) { return putStr(Opt::WithFields, spec); }
-  void writeTo(JsonArray& fields) const { open(fields, FieldType::Action)[_key] = String(_label ? _label : _key); }
+  void writeTo(JsonArray& fields) const { emit(fields, FieldType::Action, String(_label ? _label : _key)); }
  private:
   const char* _label;
 };
@@ -424,7 +428,7 @@ class Message : public FieldSpec<Message> {
  public:
   Message(const char* key, const char* text) : FieldSpec(key), _text(text) { _af = Access::Read; }
   Message& level(const char* lvl) { return putStr(Opt::Level, lvl); }
-  void writeTo(JsonArray& fields) const { open(fields, FieldType::Message)[_key] = String(_text ? _text : ""); }
+  void writeTo(JsonArray& fields) const { emit(fields, FieldType::Message, String(_text ? _text : "")); }
  private:
   const char* _text;
 };
