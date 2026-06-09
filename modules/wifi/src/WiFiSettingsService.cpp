@@ -1,5 +1,6 @@
 #include <WiFiSettingsService.h>
 #include <WebManager.h>
+#include <web/Form.h>
 #include <DeviceIdentity.h>
 
 // File-scope snapshot of the service's dual-AP selection. buildForm / wsRead
@@ -80,60 +81,56 @@ void WiFiSettings::buildForm(WiFiSettings& s, JsonObject& root) {
   const bool connected = (wst == WL_CONNECTED);
 
   // ---------- STATUS tab — 8 rows (was 12), DNS joined, live Avatar color ----------
-  JsonArray status = FormBuilder::createForm(root, "status", "Status");
+  web::Form status(root, "status", "Status");
 
   // Live-color map: each status-label transitions to a palette key. When WS
   // pushes a new label the Avatar background follows in real time.
-  FormBuilder::addTextField(status, "status", AF::R,
-                            connStatusLabel(wst),
-                            icon("Wifi"),
-                            colorMap("Connected:success,"
-                                     "Connecting:warning,"
-                                     "SSID not available:warning,"
-                                     "Connect failed:error,"
-                                     "Connection lost:error,"
-                                     "WiFi off:info,"
-                                     "Disconnected:info,"
-                                     "default:info"));
+  status.add(web::Text("status", connStatusLabel(wst)).readOnly().icon("Wifi")
+                 .colorMap("Connected:success,"
+                           "Connecting:warning,"
+                           "SSID not available:warning,"
+                           "Connect failed:error,"
+                           "Connection lost:error,"
+                           "WiFi off:info,"
+                           "Disconnected:info,"
+                           "default:info"));
 
   const char* activeAp = connected ? (s_activeAp == 1 ? "Secondary" : "Primary") : "—";
-  FormBuilder::addTextField(status, "active_ap", AF::R,
-                            activeAp,
-                            label("Active AP"), icon("SwapVerticalCircle"));
+  status.add(web::Text("active_ap", activeAp).readOnly()
+                 .label("Active AP").icon("SwapVerticalCircle"));
 
   const String ssidLive = connected ? WiFi.SSID() : String("");
-  FormBuilder::addTextField(status, "ssid", AF::R, ssidLive.c_str(),
-                            label("SSID"), icon("SettingsInputAntenna"));
+  status.add(web::Text("ssid", ssidLive.c_str()).readOnly()
+                 .label("SSID").icon("SettingsInputAntenna"));
 
   const String localIp = connected ? WiFi.localIP().toString() : String("");
-  FormBuilder::addTextField(status, "local_ip", AF::R, localIp.c_str(),
-                            label("Local IP"), icon("Router"));
+  status.add(web::Text("local_ip", localIp.c_str()).readOnly()
+                 .label("Local IP").icon("Router"));
 
   // Same source as the cert CN / mothership deviceId / AutoUpdate
   // did= — colon-separated upper-case (matches the legacy
   // WiFi.macAddress() string format so this is a visual drop-in).
   const String mac = DeviceIdentity::macColon();
-  FormBuilder::addTextField(status, "mac_address", AF::R, mac.c_str(),
-                            label("MAC address"), icon("DeviceHub"));
+  status.add(web::Text("mac_address", mac.c_str()).readOnly()
+                 .label("MAC address").icon("DeviceHub"));
 
   const String subnetMask = connected ? WiFi.subnetMask().toString() : String("");
-  FormBuilder::addTextField(status, "subnet_mask", AF::R, subnetMask.c_str(),
-                            label("Subnet mask"), icon("Language"));
+  status.add(web::Text("subnet_mask", subnetMask.c_str()).readOnly()
+                 .label("Subnet mask").icon("Language"));
 
   const String gatewayIp = connected ? WiFi.gatewayIP().toString() : String("none");
-  FormBuilder::addTextField(status, "gateway_ip", AF::R, gatewayIp.c_str(),
-                            label("Gateway IP"), icon("Router"));
+  status.add(web::Text("gateway_ip", gatewayIp.c_str()).readOnly()
+                 .label("Gateway IP").icon("Router"));
 
   String dnsJoined = joinDns(connected);
-  FormBuilder::addTextField(status, "dns_servers", AF::R,
-                            dnsJoined.length() ? dnsJoined.c_str() : "none",
-                            label("DNS servers"), icon("Dns"));
+  status.add(web::Text("dns_servers", dnsJoined.length() ? dnsJoined.c_str() : "none")
+                 .readOnly().label("DNS servers").icon("Dns"));
 
   // ---------- SCAN tab ----------
   // Lazy (user-triggered) scan — no auto-kick on tab open. scanComplete()
   // returns -2 until the user presses the button; phase label surfaces the
   // state so the empty card list isn't confusing.
-  JsonArray scan = FormBuilder::createForm(root, "scan", "Network Scanner");
+  web::Form scan(root, "scan", "Network Scanner");
 
   // Networks appear AT THE TOP — found APs surface above the status/button
   // so the user's eye lands on them immediately when a scan completes.
@@ -144,31 +141,29 @@ void WiFiSettings::buildForm(WiFiSettings& s, JsonObject& root) {
   // by the Scan action surfaces the fresh list without a tab reopen.
   // loadingIf() shows a CircularProgress spinner while scan_status is
   // still "Scanning…".
-  JsonObject tbl = FormBuilder::addTableField(
-      scan, "networks", AF::R,
-      col("ssid", "SSID", "text"),
-      col("rssi", "RSSI", "number", format("0")),
-      col("channel", "Ch", "number", format("0")),
-      col("security", "Security", "text"),
-      icon("Wifi"),
-      layout("cards"),
-      primaryField("ssid"),
-      secondaryTemplate("Security: {security}, Ch: {channel}"),
-      avatarFromField("avatar_icon"),
-      badgeField("rssi", "dBm", "Wifi"),
-      rowFill("ssid=ssid,pwd="),
-      // Spec syntax is `<target>=<col>` — i.e. "set form field
-      // <target> from the row's <col>". Fallback writes the scanned
-      // row's `ssid` column into the SECONDARY form field `ssid_2`
-      // (and clears the secondary `pwd_2`).
-      rowFillFallback("ssid_2=ssid,pwd_2="),
-      rowNav("../settings"),
-      hideAvatar(),
-      loadingIf("scan_status:Scanning"));
+  scan.add(web::Table("networks")
+               .col("ssid", "SSID", "text")
+               .col("rssi", "RSSI", "number", "0")
+               .col("channel", "Ch", "number", "0")
+               .col("security", "Security", "text")
+               .icon("Wifi")
+               .layout("cards")
+               .primary("ssid")
+               .secondary("Security: {security}, Ch: {channel}")
+               .avatar("avatar_icon")
+               .badge("rssi", "dBm", "Wifi")
+               .rowFill("ssid=ssid,pwd=")
+               // Spec syntax is `<target>=<col>` — set form field <target>
+               // from the row's <col>. Fallback writes the scanned row's
+               // `ssid` into the SECONDARY field `ssid_2` (clears `pwd_2`).
+               .rowFillFallback("ssid_2=ssid,pwd_2=")
+               .rowNav("../settings")
+               .hideAvatar()
+               .loadingIf("scan_status:Scanning"));
 
   const int scanN = WiFi.scanComplete();
   if (scanN > 0) {
-    JsonArray arr = tbl["networks"].as<JsonArray>();
+    JsonArray arr = scan.rowsOf("networks");
     for (int i = 0; i < scanN; ++i) {
       JsonObject row = arr.createNestedObject();
       row["ssid"]    = WiFi.SSID(i);
@@ -186,70 +181,52 @@ void WiFiSettings::buildForm(WiFiSettings& s, JsonObject& root) {
   }
 
   const String phase = scanPhaseLabel(scanN);
-  FormBuilder::addTextField(scan, "scan_status", AF::R, phase.c_str(),
-                            icon("Refresh"));
+  scan.add(web::Text("scan_status", phase.c_str()).readOnly().icon("Refresh"));
 
   // Scan trigger — posts to /rest/wifiScan. refetchForm tells the frontend
   // to poll /rest/wifiForm on a short schedule after the action fires so
   // the networks table above updates automatically as soon as the radio
   // surfaces results.
-  FormBuilder::addActionField(scan, "scan_btn", "Scan WiFi", AF::RW,
-                              actionRef("wifi.scan"), icon("Refresh"),
-                              color("secondary"), refetchForm());
+  scan.add(web::Action("scan_btn", "Scan WiFi")
+               .ref("wifi.scan").icon("Refresh").color("secondary").refetchForm());
 
   // ---------- SETTINGS tab ----------
   // Three cards: Primary credentials, Backup credentials, Advanced
   // (hostname + static IP block). Wrapping the advanced section in a
   // card visually unifies it with the credentials section so the tab
   // doesn't trail off into bare list items.
-  JsonArray set = FormBuilder::createForm(root, "settings", "Settings");
+  web::Form set(root, "settings", "Settings");
 
   // Card 1 — Primary network. Clearing writes "" to both fields so a
   // single tap wipes the slot before the user saves.
-  FormBuilder::addTextField(set, "ssid", AF::RW, s.ssid.c_str(),
-                            label("SSID"), icon("Wifi"),
-                            card("wifi_primary"),
-                            cardTitle("Primary network"),
-                            cardDeletable());
-  FormBuilder::addSecretField(set, "pwd", AF::RW, s.password.c_str(),
-                              label("Password"), icon("Lock"),
-                              card("wifi_primary"));
+  set.add(web::Text("ssid", s.ssid.c_str()).label("SSID").icon("Wifi")
+              .card("wifi_primary").cardTitle("Primary network").cardDeletable());
+  set.add(web::Secret("pwd", s.password.c_str()).label("Password").icon("Lock")
+              .card("wifi_primary"));
 
   // Card 2 — Backup network. Same shape as primary; left blank disables
   // the slot entirely (failover code skips empty rows).
-  FormBuilder::addTextField(set, "ssid_2", AF::RW, s.ssid2.c_str(),
-                            label("SSID"), icon("Wifi"),
-                            card("wifi_secondary"),
-                            cardTitle("Backup network"),
-                            cardDeletable());
-  FormBuilder::addSecretField(set, "pwd_2", AF::RW, s.password2.c_str(),
-                              label("Password"), icon("Lock"),
-                              card("wifi_secondary"));
+  set.add(web::Text("ssid_2", s.ssid2.c_str()).label("SSID").icon("Wifi")
+              .card("wifi_secondary").cardTitle("Backup network").cardDeletable());
+  set.add(web::Secret("pwd_2", s.password2.c_str()).label("Password").icon("Lock")
+              .card("wifi_secondary"));
 
   // Card 3 — Advanced. Hostname + static IP toggle and its dependent IP
   // fields. Static-IP block renders only when the switch is on.
-  FormBuilder::addTextField(set, "hostname", AF::RW, s.hostname.c_str(),
-                            label("Hostname"), icon("DeviceHub"),
-                            card("wifi_advanced"),
-                            cardTitle("Advanced"));
-  FormBuilder::addSwitchField(set, "static_ip_config", AF::RW, s.staticIPConfig,
-                              label("Static IP"), icon("Router"),
-                              card("wifi_advanced"));
-  FormBuilder::addIPAddressField(set, "local_ip",    AF::RW, s.localIP.toString().c_str(),
-                                 label("Local IP"), icon("Router"), card("wifi_advanced"),
-                                 showIf("static_ip_config", "true"));
-  FormBuilder::addIPAddressField(set, "gateway_ip",  AF::RW, s.gatewayIP.toString().c_str(),
-                                 label("Gateway IP"), icon("Router"), card("wifi_advanced"),
-                                 showIf("static_ip_config", "true"));
-  FormBuilder::addIPAddressField(set, "subnet_mask", AF::RW, s.subnetMask.toString().c_str(),
-                                 label("Subnet mask"), icon("Language"), card("wifi_advanced"),
-                                 showIf("static_ip_config", "true"));
-  FormBuilder::addIPAddressField(set, "dns_ip_1",    AF::RW, s.dnsIP1.toString().c_str(),
-                                 label("DNS server 1"), icon("Dns"), card("wifi_advanced"),
-                                 showIf("static_ip_config", "true"));
-  FormBuilder::addIPAddressField(set, "dns_ip_2",    AF::RW, s.dnsIP2.toString().c_str(),
-                                 label("DNS server 2"), icon("Dns"), card("wifi_advanced"),
-                                 showIf("static_ip_config", "true"));
+  set.add(web::Text("hostname", s.hostname.c_str()).label("Hostname").icon("DeviceHub")
+              .card("wifi_advanced").cardTitle("Advanced"));
+  set.add(web::Switch("static_ip_config", s.staticIPConfig).label("Static IP").icon("Router")
+              .card("wifi_advanced"));
+  set.add(web::Ip("local_ip", s.localIP.toString().c_str()).label("Local IP").icon("Router")
+              .card("wifi_advanced").showIf("static_ip_config", "true"));
+  set.add(web::Ip("gateway_ip", s.gatewayIP.toString().c_str()).label("Gateway IP").icon("Router")
+              .card("wifi_advanced").showIf("static_ip_config", "true"));
+  set.add(web::Ip("subnet_mask", s.subnetMask.toString().c_str()).label("Subnet mask").icon("Language")
+              .card("wifi_advanced").showIf("static_ip_config", "true"));
+  set.add(web::Ip("dns_ip_1", s.dnsIP1.toString().c_str()).label("DNS server 1").icon("Dns")
+              .card("wifi_advanced").showIf("static_ip_config", "true"));
+  set.add(web::Ip("dns_ip_2", s.dnsIP2.toString().c_str()).label("DNS server 2").icon("Dns")
+              .card("wifi_advanced").showIf("static_ip_config", "true"));
 }
 
 /* ================= UPDATE ================= */

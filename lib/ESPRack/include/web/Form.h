@@ -446,6 +446,19 @@ class Form {
     return *this;
   }
 
+  // Seed runtime rows into a Table field already add()-ed to this form —
+  // for REST-only tables whose data is baked into the GET response (e.g. the
+  // WiFi scan results, which have no WS channel). Returns the field's value
+  // array to fill, or a null array if the key isn't a table on this form.
+  JsonArray rowsOf(const char* fieldKey) {
+    for (JsonObject f : _fields) {
+      if (f.containsKey(fieldKey) && f[fieldKey].is<JsonArray>()) {
+        return f[fieldKey].as<JsonArray>();
+      }
+    }
+    return JsonArray();
+  }
+
   // Escape hatch for code still building rows/fields by hand during migration.
   JsonArray& fields() { return _fields; }
 
