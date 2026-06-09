@@ -96,11 +96,16 @@ time, each verified (build + form JSON spot-check / on-device render).
 - [x] **ap** — status + settings (Text/Number/Dropdown/Switch/Secret/Ip)
 - [x] **wifi** — status (Text+colorMap) + scan (full Table + Action, rows via Form::rowsOf) + settings (cards + showIf)
 - [x] **wireguard** — status + internals (Text/Number/Message/Secret)
-- [ ] mqtt — settings + **kill lambda wrapper** (runtime subscriptions table → Form::rowsOf)
-- [ ] telegram — settings/status + **kill lambda wrapper**
-- [ ] system-status — resources + identity + **kill raw `root["k"]=v` JSON**
-- [ ] LightStateService (demo) — settings/status/integrations; Trend + Tables
-      (inbox/attached rows via Form::rowsOf)
+- [x] **mqtt** — settings + status (lambda kept; runtime tables → Form::rowsOf)
+- [x] **telegram** — settings/status + lambda subscriptions table → Form::rowsOf
+- [x] **system-status** — resources + identity (the raw `root[k]=v` is the WS
+      staRead live-push, NOT a form — correctly left as-is)
+- [x] **LightStateService** (demo) — settings/status/integrations; every widget
+      type + Trend×3 + Table×3 (inbox/attached rows via Form::rowsOf)
+
+**ALL 10 modules converted + verified on C3.** RAM unchanged (19.6%); Flash
+actually dropped (~80.7% vs ~81.0% pre-DSL — the fluent builders are more
+compact than the variadic add*Field machinery). Identical wire JSON throughout.
 
 Runtime-row seeding turned out NOT to need a new `Table.row()` builder — the
 `Form::rowsOf(key)` accessor (added for WiFi scan) covers every hand-coded
