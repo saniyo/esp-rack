@@ -387,12 +387,13 @@ class WebManager {
   static constexpr const char* kManifestCacheSigPath
       = "/config/.manifest.sig";
 
-  // Compute a 32-bit signature over the current registration state.
-  // Folded into CRC32 in registration order so adding / removing /
-  // version-bumping any module or entry yields a different value.
-  // Used by writeManifestCacheToFs() to decide whether the on-flash
-  // cache is still current.
-  uint32_t computeManifestSig() const;
+  // Compute a 32-bit signature over the current manifest CONTENT —
+  // CRC32 of the authed-tier bytes, so any change to any emitted field
+  // (not merely id / version) yields a different value. Used by
+  // writeManifestCacheToFs() to decide whether the on-flash cache is
+  // current. Reuses the caller's ManifestBuilder by reference — a second
+  // ~4 KB builder on this boot stack path overflows the loopTask stack.
+  uint32_t computeManifestSig(ManifestBuilder& builder) const;
 
   AsyncWebServer* _server{nullptr};
   SecurityManager* _sm{nullptr};

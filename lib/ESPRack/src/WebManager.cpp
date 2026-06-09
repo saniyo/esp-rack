@@ -287,44 +287,33 @@ static bool dumpBuilderToFile(ManifestBuilder& b, fs::File& f) {
   }
 }
 
-uint32_t WebManager::computeManifestSig() const {
-  // Fold every piece of the manifest's structural identity into a
-  // single CRC32. The bytes ordering matches the manifest emission
-  // order so any change (added / removed / reordered / version-bumped
-  // module or entry) flips the CRC. Excludes anything that's already
-  // stable across builds (e.g. schemaVersion).
-  auto feed = [](uint32_t crc, const void* data, size_t len) -> uint32_t {
-    if (!data || !len) return crc;
-    return esp_rom_crc32_le(crc, reinterpret_cast<const uint8_t*>(data),
-                            len);
-  };
+uint32_t WebManager::computeManifestSig(ManifestBuilder& builder) const {
+  // CRC32 over the ACTUAL authed-tier manifest bytes — the exact stream the
+  // flash cache stores. The authed tier is a superset of the anon stub
+  // (device + buildFeatures + modules + features), so folding it covers
+  // every emitted field: menu.parent / menu.expandTabs, tab keys, rest
+  // paths, route, component, version, order — not merely the entry id.
+  //
+  // Supersedes the former id-only fold, which silently kept the flash cache
+  // STALE whenever an entry changed its spec body but kept its id — e.g.
+  // adding tree-menu nesting (menu.parent / expandTabs) bumped no id and no
+  // version, so the cache was never rebuilt and the device kept serving the
+  // pre-change manifest. That hole is now closed structurally; no reliance
+  // on the consumer remembering to bump FACTORY_PROJECT_VERSION.
+  //
+  // Stack discipline: REUSES the caller's builder (by ref) — it does NOT
+  // construct its own. writeManifestCacheToFs reserves ~4 KB of stack for its
+  // `builder` local across the whole frame; a second builder here would
+  // coexist with it and, layered under ArduinoJson's recursive serialization,
+  // overflow the 8 KB loopTask stack (observed: "Stack canary watchpoint
+  // triggered" at boot). One shared builder keeps peak stack identical to the
+  // original id-only path. No heap, no flash write here.
+  builder.reset(*this, /*authed=*/true);
   uint32_t crc = 0xFFFFFFFF;
-  if (_deviceName)        crc = feed(crc, _deviceName,
-                                     std::strlen(_deviceName));
-  if (_deviceVersion)     crc = feed(crc, _deviceVersion,
-                                     std::strlen(_deviceVersion));
-  if (_frameworkVersion)  crc = feed(crc, _frameworkVersion,
-                                     std::strlen(_frameworkVersion));
-  for (const auto& b : _buildFeatures) {
-    if (b.key) crc = feed(crc, b.key, std::strlen(b.key));
-    uint8_t f = b.enabled ? 1 : 0;
-    crc = feed(crc, &f, 1);
-  }
-  for (const auto& m : _modules) {
-    if (m.id)      crc = feed(crc, m.id, std::strlen(m.id));
-    if (m.version) crc = feed(crc, m.version, std::strlen(m.version));
-  }
-  for (const auto& e : _entries) {
-    if (!e) continue;
-    const char* id = e->id();
-    if (id) crc = feed(crc, id, std::strlen(id));
-    // toJson is a slow walk; using the entry pointer's address would
-    // change across boots even with identical code. The id covers
-    // most realistic differences (modules either have an entry with
-    // this id or they don't). A rare case where two builds keep the
-    // same id but change the spec body would NOT bump the CRC — the
-    // cache stays stale. That's documented above; consumer can bump
-    // FACTORY_PROJECT_VERSION to force regeneration.
+  uint8_t buf[256];
+  for (size_t n = builder.fillNext(buf, sizeof(buf)); n;
+       n = builder.fillNext(buf, sizeof(buf))) {
+    crc = esp_rom_crc32_le(crc, buf, n);
   }
   return crc;
 }
@@ -340,7 +329,11 @@ void WebManager::writeManifestCacheToFs() {
   // Best-effort on FS errors: log and let serveManifest fall back to
   // the legacy chunked-build path. Soft-degrade rather than refusing
   // to boot.
-  const uint32_t sig = computeManifestSig();
+  // ONE ManifestBuilder for this whole routine: the signature walk
+  // (computeManifestSig) and the anon+authed cache writes all reuse it.
+  // See computeManifestSig for why a second builder would blow the stack.
+  ManifestBuilder builder;
+  const uint32_t sig = computeManifestSig(builder);
   // Cache the signature for serveManifest()'s ETag (conditional-GET
   // revalidation). Set unconditionally — both the cache-hit early-return
   // and the rebuild path below need it live for the process lifetime.
@@ -369,7 +362,6 @@ void WebManager::writeManifestCacheToFs() {
   log_i("[web.manifest] cache sig changed (or missing) — rebuilding to flash, sig=0x%08x",
         (unsigned)sig);
 
-  ManifestBuilder builder;
   {
     fs::File f = ESPFS.open(kManifestCacheAnonPath, "w");
     if (!f) {
