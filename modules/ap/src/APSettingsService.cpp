@@ -1,6 +1,7 @@
 #include <APSettingsService.h>
 #include <WebManager.h>
 #include <WebFeatureBuilder.h>
+#include <web/Form.h>
 #include <DeviceIdentity.h>
 
 /* ================= Static runtime emitters ================= */
@@ -17,52 +18,40 @@ void APSettings::buildForm(APSettings& s, JsonObject& root) {
   uint8_t st = currentAPStatus(s.provisionMode);
 
   // STATUS (read-only; WS pushes keep values fresh)
-  JsonArray status = FormBuilder::createForm(root, "status", "Status");
-  FormBuilder::addTextField(status, "status",      AF::R,
-                            APSettings::statusLabel(st),
-                            icon("SettingsInputAntenna"),
-                            color(APSettings::statusColor(st)));
-  FormBuilder::addTextField(status, "ip_address",  AF::R,
-                            WiFi.softAPIP().toString().c_str(), icon("Router"));
-  FormBuilder::addTextField(status, "mac_address", AF::R,
-                            WiFi.softAPmacAddress().c_str(), icon("DeviceHub"));
-  FormBuilder::addNumberField(status, "station_num", AF::R,
-                              (uint32_t)WiFi.softAPgetStationNum(),
-                              format("0"), icon("Computer"));
+  web::Form status(root, "status", "Status");
+  status.add(web::Text("status", APSettings::statusLabel(st)).readOnly()
+                 .icon("SettingsInputAntenna").color(APSettings::statusColor(st)));
+  status.add(web::Text("ip_address", WiFi.softAPIP().toString().c_str()).readOnly().icon("Router"));
+  status.add(web::Text("mac_address", WiFi.softAPmacAddress().c_str()).readOnly().icon("DeviceHub"));
+  status.add(web::Number("station_num", (double)(uint32_t)WiFi.softAPgetStationNum())
+                 .readOnly().format("0").icon("Computer"));
 
   // SETTINGS
-  JsonArray set = FormBuilder::createForm(root, "settings", "Settings");
-  FormBuilder::addDropdownField(set, "provision_mode", AF::RW, (int)s.provisionMode,
-                                opt("Always", AP_MODE_ALWAYS),
-                                opt("When WiFi Disconnected", AP_MODE_DISCONNECTED),
-                                opt("Never", AP_MODE_NEVER),
-                                icon("SettingsInputAntenna"));
+  web::Form set(root, "settings", "Settings");
+  set.add(web::Dropdown("provision_mode", (int)s.provisionMode)
+              .option("Always", AP_MODE_ALWAYS)
+              .option("When WiFi Disconnected", AP_MODE_DISCONNECTED)
+              .option("Never", AP_MODE_NEVER)
+              .icon("SettingsInputAntenna"));
   // SSID is read-only — auto-derived from DeviceIdentity at every
   // startAP() so the broadcast name stays in lock-step with the cert /
   // MQTT clientId / mothership identity. Single source of truth: no
   // operator override surface exists.
-  FormBuilder::addTextField (set, "ssid",     AF::R, s.ssid.c_str(),
-                             label("SSID (auto)"), icon("Wifi"));
-  FormBuilder::addSecretField(set, "pwd", AF::RW, s.password.c_str(),
-                              icon("Lock"));
-  FormBuilder::addDropdownField(set, "channel", AF::RW, (int)s.channel,
-                                opt("1", 1),  opt("2", 2),  opt("3", 3),
-                                opt("4", 4),  opt("5", 5),  opt("6", 6),
-                                opt("7", 7),  opt("8", 8),  opt("9", 9),
-                                opt("10", 10), opt("11", 11), opt("12", 12), opt("13", 13),
-                                icon("Wifi"));
-  FormBuilder::addSwitchField(set, "ssid_hidden", AF::RW, s.ssidHidden,
-                              icon("Visibility"));
-  FormBuilder::addDropdownField(set, "max_clients", AF::RW, (int)s.maxClients,
-                                opt("1", 1), opt("2", 2), opt("3", 3), opt("4", 4),
-                                opt("5", 5), opt("6", 6), opt("7", 7), opt("8", 8),
-                                icon("Computer"));
-  FormBuilder::addIPAddressField(set, "local_ip",    AF::RW, s.localIP.toString().c_str(),
-                                 icon("Router"));
-  FormBuilder::addIPAddressField(set, "gateway_ip",  AF::RW, s.gatewayIP.toString().c_str(),
-                                 icon("Router"));
-  FormBuilder::addIPAddressField(set, "subnet_mask", AF::RW, s.subnetMask.toString().c_str(),
-                                 icon("Language"));
+  set.add(web::Text("ssid", s.ssid.c_str()).readOnly().label("SSID (auto)").icon("Wifi"));
+  set.add(web::Secret("pwd", s.password.c_str()).icon("Lock"));
+  set.add(web::Dropdown("channel", (int)s.channel)
+              .option("1", 1).option("2", 2).option("3", 3).option("4", 4)
+              .option("5", 5).option("6", 6).option("7", 7).option("8", 8)
+              .option("9", 9).option("10", 10).option("11", 11).option("12", 12)
+              .option("13", 13).icon("Wifi"));
+  set.add(web::Switch("ssid_hidden", s.ssidHidden).icon("Visibility"));
+  set.add(web::Dropdown("max_clients", (int)s.maxClients)
+              .option("1", 1).option("2", 2).option("3", 3).option("4", 4)
+              .option("5", 5).option("6", 6).option("7", 7).option("8", 8)
+              .icon("Computer"));
+  set.add(web::Ip("local_ip", s.localIP.toString().c_str()).icon("Router"));
+  set.add(web::Ip("gateway_ip", s.gatewayIP.toString().c_str()).icon("Router"));
+  set.add(web::Ip("subnet_mask", s.subnetMask.toString().c_str()).icon("Language"));
 }
 
 StateUpdateResult APSettings::update(JsonObject& root, APSettings& s) {

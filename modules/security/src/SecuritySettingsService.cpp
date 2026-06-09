@@ -1,7 +1,7 @@
 #include <SecuritySettingsService.h>
 
 #include <PresenceService.h>
-#include <FormBuilder.h>
+#include <web/Form.h>
 #include <WebManager.h>
 
 #if FT_ENABLED(FT_SECURITY)
@@ -10,13 +10,12 @@ void SecuritySettings::buildJwtForm(SecuritySettings& settings, JsonObject& root
   // Single-tab, single-field form — JWT signing key only. The Users
   // table lives on the standalone /security React page; this tab is
   // System-area territory and therefore intentionally minimal.
-  JsonArray jwt = FormBuilder::createForm(root, "jwt", "JWT Secret");
-  FormBuilder::addMessageField(jwt, "jwt_info",
+  web::Form form(root, "jwt", "JWT Secret");
+  form.add(web::Message("jwt_info",
       "Changing this secret immediately invalidates every signed JWT — "
-      "all logged-in admins/guests will be forced to sign in again.",
-      level("info"), icon("Info"));
-  FormBuilder::addSecretField(jwt, "jwt_secret", AF::RW, settings.jwtSecret.c_str(),
-                              icon("Lock"));
+      "all logged-in admins/guests will be forced to sign in again.")
+      .level("info").icon("Info"));
+  form.add(web::Secret("jwt_secret", settings.jwtSecret.c_str()).icon("Lock"));
 }
 
 StateUpdateResult SecuritySettings::update(JsonObject& root, SecuritySettings& settings) {
