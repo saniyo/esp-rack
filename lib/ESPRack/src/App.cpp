@@ -204,7 +204,28 @@ void App::begin() {
 
   // 1. Filesystem first — ConfigManager and several modules need /config
   // available before they can ensureLoaded().
-  ESPFS.begin(true);
+  //
+  // CRITICAL (config durability): mount WITHOUT format-on-fail first. The old
+  // `ESPFS.begin(true)` reformatted the partition on ANY mount failure —
+  // a transient hiccup or a LittleFS-version skew across a reflash would
+  // silently wipe every config file AND every .snapshot backup (they live on
+  // the same partition), which is exactly the "config gets overwritten when I
+  // reflash" symptom. Now: try a clean mount, retry once, and only as a LAST
+  // resort format a genuinely unmountable FS (first-ever boot / real
+  // corruption) — and log loudly so a wipe is never silent.
+  bool fsOk = ESPFS.begin(false);
+  if (!fsOk) {
+    log_e("[fs] LittleFS mount failed — retrying once before any format");
+    delay(50);
+    fsOk = ESPFS.begin(false);
+  }
+  if (!fsOk) {
+    log_e("[fs] LittleFS still unmountable — FORMATTING (all config + "
+          "snapshots on this partition will be lost; expected only on a "
+          "first-ever boot or a genuinely corrupt filesystem)");
+    fsOk = ESPFS.begin(true);  // format-on-fail: deliberate last resort only
+    if (!fsOk) log_e("[fs] LittleFS format+mount FAILED — running without FS");
+  }
   HeapMonitor::logSnapshot("boot:fs-mounted");
 
   // 2. ConfigManager picks up its work directories under /config.

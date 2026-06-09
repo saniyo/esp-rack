@@ -383,19 +383,38 @@ class ConfigManager {
       auto res = mgr.loadOrRecover(_primary.c_str(), _backup.c_str(), _tmp.c_str(), _d.bufferSize, doc, &vP, &vB);
 
       if (res == LoadResult::NeedDefaults) {
-        // defaults via updater(empty)
+        // Seed defaults into RAM via updater(empty).
         DynamicJsonDocument emptyDoc(_d.bufferSize);
         JsonObject empty = emptyDoc.to<JsonObject>();
         _d.service->updateWithoutPropagation(empty, _d.updater);
-
-        _hasLastSavedCrc = false;  // force first save
         _loaded = true;
 
+        // RELIABILITY GUARD: persist defaults ONLY on a genuine first boot —
+        // when NEITHER the primary NOR the snapshot file exists on disk. If a
+        // file IS present but failed to load/verify (transient FS error, CRC
+        // drift across a reflash, partial corruption), do NOT overwrite it
+        // with defaults: keep it on disk and run on defaults in RAM for this
+        // boot, so a later successful boot recovers the real config.
+        // Saving defaults here would rotate the user's real config into
+        // <primary>.snapshot and then never auto-restore it (the fresh
+        // defaults primary verifies fine on the next boot), silently
+        // destroying settings on a single spurious load failure — exactly the
+        // "config wiped on reflash" symptom this guard exists to prevent.
+        const bool haveFileOnDisk =
+            mgr.fileExists(_primary.c_str()) || mgr.fileExists(_backup.c_str());
 
         mgr.unlock();
-
         _stats.loads++;
-        (void)saveIfChanged(mgr, "defaults");
+
+        if (haveFileOnDisk) {
+          log_w("[CFG] %s: load FAILED but a config/snapshot file exists — "
+                "running defaults in RAM, NOT overwriting (will retry next "
+                "boot). Persisted settings preserved.",
+                _primary.c_str());
+        } else {
+          _hasLastSavedCrc = false;  // genuine first boot → seed the file
+          (void)saveIfChanged(mgr, "defaults");
+        }
         return true;
       }
 
