@@ -90,17 +90,23 @@ Old `FormBuilder::add*Field` stays working throughout; modules convert one at a
 time, each verified (build + form JSON spot-check / on-device render).
 
 **Module checklist** (`buildForm` conversions):
-- [x] **ota** — Switch/Number/Secret (done, parity verified)
-- [ ] security — JWT form (2 fields)
-- [ ] ntp — settings
-- [ ] ap — status + settings (IP/switch/number/text)
-- [ ] wifi — status (8 TF) + scan (table + action) + settings (IP/TZ/cards)
-- [ ] wireguard — status + internals
-- [ ] mqtt — settings + **kill lambda wrapper** (runtime subscriptions table)
+- [x] **ota** — Switch/Number/Secret (parity verified)
+- [x] **security** — JWT form (Message + Secret)
+- [x] **ntp** — status + settings (Text/Switch/TimeZones); FormBuilder.h kept for updateValue()
+- [x] **ap** — status + settings (Text/Number/Dropdown/Switch/Secret/Ip)
+- [x] **wifi** — status (Text+colorMap) + scan (full Table + Action, rows via Form::rowsOf) + settings (cards + showIf)
+- [x] **wireguard** — status + internals (Text/Number/Message/Secret)
+- [ ] mqtt — settings + **kill lambda wrapper** (runtime subscriptions table → Form::rowsOf)
 - [ ] telegram — settings/status + **kill lambda wrapper**
 - [ ] system-status — resources + identity + **kill raw `root["k"]=v` JSON**
-- [ ] LightStateService (demo) — settings/status/integrations; trends + tables;
-      **first-class `.row()`** replaces hand-coded `createNestedObject()` loops
+- [ ] LightStateService (demo) — settings/status/integrations; Trend + Tables
+      (inbox/attached rows via Form::rowsOf)
+
+Runtime-row seeding turned out NOT to need a new `Table.row()` builder — the
+`Form::rowsOf(key)` accessor (added for WiFi scan) covers every hand-coded
+`createNestedObject()` loop (mqtt/telegram/LightState) cleanly. So P4's only
+real work is dropping the MQTT/Telegram lambda wrappers + the raw JSON, not a
+new capability.
 
 ## Phases
 - **P1** ✅ fluent layer + vocab (additive; old API untouched).
