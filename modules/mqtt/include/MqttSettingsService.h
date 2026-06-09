@@ -5,7 +5,8 @@
 #include <StatefulService.h>
 #include <ConfigManager.h>
 #include <ConfigDelegate.h>
-#include <FormBuilder.h>
+#include <FormBuilder.h>   // still used: updateValue() in update() + secret-key probe
+#include <web/Form.h>
 #include <WebFeatureDelegate.h>
 // WiFiEvent_t / WiFiEventInfo_t for the onStationMode* handlers below.
 // ESPAsyncWebServer <= 3.6 pulled <WiFi.h> in transitively; ESP32Async
@@ -228,7 +229,7 @@ class MqttSettings {
   /* ----- REST form (status + settings) ----- */
   static void buildForm(MqttSettings& s, JsonObject& root) {
     // STATUS
-    JsonArray st = FormBuilder::createForm(root, "status", "Status");
+    web::Form st(root, "status", "Status");
     // Status avatar: green when broker connected, info (blue) when
     // intentionally disabled, error (red) for any enabled-but-not-
     // connected state. Driven by frontend `colorMap` so WS-pushed
@@ -238,11 +239,11 @@ class MqttSettings {
     // refresh). Disconnected reasons vary
     // ("Disconnected (TCP disconnected)" etc.) so we can't enumerate
     // them; `default` catches every disconnect variant as error.
-    FormBuilder::addTextField(st, "status", AF::R, statusLabel(s).c_str(),
-                              label("Status"), icon("DeviceHub"),
-                              colorMap("Connected:success,Not enabled:info,default:error"));
-    FormBuilder::addTextField(st, "client_id", AF::R, s.runtimeClientId.c_str(),
-                              label("Client ID"), icon("Memory"));
+    st.add(web::Text("status", statusLabel(s).c_str()).readOnly()
+               .label("Status").icon("DeviceHub")
+               .colorMap("Connected:success,Not enabled:info,default:error"));
+    st.add(web::Text("client_id", s.runtimeClientId.c_str()).readOnly()
+               .label("Client ID").icon("Memory"));
 
     // ── Discovery controls — sit ABOVE the live table so the
     // operator's eye flow is: read the controls, then read the data
@@ -251,17 +252,17 @@ class MqttSettings {
     // they configured here. ──
 
     // Sniffer toggle (runtime-only — see snifferEnabled field doc).
-    FormBuilder::addSwitchField(st, "sniffer_enabled", AF::RW, s.snifferEnabled,
-                                label("Sniffer"),
-                                placeholder("Subscribe to all matching topics for discovery (resets on boot)"),
-                                icon("Visibility"));
+    st.add(web::Switch("sniffer_enabled", s.snifferEnabled)
+               .label("Sniffer")
+               .placeholder("Subscribe to all matching topics for discovery (resets on boot)")
+               .icon("Visibility"));
     // Sniffer pattern — defaults to "#" (everything). Narrow it to
     // e.g. "home/+/temp/#" to avoid the firehose. Persisted; the
     // ON/OFF toggle alone is per-session.
-    FormBuilder::addTextField(st, "sniffer_pattern", AF::RW, s.snifferPattern.c_str(),
-                              label("Sniffer pattern"),
-                              placeholder("MQTT wildcard, e.g. # or home/+/temp/#"),
-                              icon("FilterAlt"));
+    st.add(web::Text("sniffer_pattern", s.snifferPattern.c_str())
+               .label("Sniffer pattern")
+               .placeholder("MQTT wildcard, e.g. # or home/+/temp/#")
+               .icon("FilterAlt"));
 
     // Selection mask — auto-filled by row-click on the live table
     // (rowFill="selected_topic=topic" below), or typed manually for
@@ -271,66 +272,53 @@ class MqttSettings {
     // Empty initial value on every form GET — selected_topic is a
     // pure UI-transient (see staRead comment). Server-side state
     // never holds a meaningful value here, so always emit "".
-    FormBuilder::addTextField(st, "selected_topic", AF::RW, "",
-                              label("Topic mask"),
-                              placeholder("Click a row below or type a pattern"),
-                              icon("CheckCircleOutline"));
-    FormBuilder::addActionField(st, "attachSel", "Attach", AF::RW,
-                                actionRef("mqtt.attachTopic"),
-                                withFields("topic=selected_topic"),
-                                icon("Add"), color("primary"), refetchForm());
-    FormBuilder::addActionField(st, "detachSel", "Detach", AF::RW,
-                                actionRef("mqtt.detachTopic"),
-                                withFields("topic=selected_topic"),
-                                icon("Remove"), color("warning"), refetchForm());
+    st.add(web::Text("selected_topic", "")
+               .label("Topic mask")
+               .placeholder("Click a row below or type a pattern")
+               .icon("CheckCircleOutline"));
+    st.add(web::Action("attachSel", "Attach")
+               .ref("mqtt.attachTopic").withFields("topic=selected_topic")
+               .icon("Add").color("primary").refetchForm());
+    st.add(web::Action("detachSel", "Detach")
+               .ref("mqtt.detachTopic").withFields("topic=selected_topic")
+               .icon("Remove").color("warning").refetchForm());
 
     // Live table — populated by sniffer + every attached subscription.
     // tableMode("upsert") merges by FIRST column (topic): the same
     // topic re-pushed updates that row's lastValue/count/age, a new
     // topic appends. Capped at MQTT_TOPICS_LOG_MAX. Row click writes
     // the topic into "selected_topic" above for one-click attach.
-    FormBuilder::addTableField(
-        st, "seen_topics", AF::R,
-        col("topic",      "Topic",          "text"),
-        col("lastValue",  "Value",          "text"),
-        col("count",      "Count",          "number", format("0")),
-        col("lastSeenAt", "Last (s)",       "number", format("0")),
-        tableMode("upsert"), maxRows(MQTT_TOPICS_LOG_MAX),
-        rowFill("selected_topic=topic"),
-        icon("Topic"),
-        label("Live topics (sniffer + attached)"));
+    st.add(web::Table("seen_topics")
+               .col("topic", "Topic", "text")
+               .col("lastValue", "Value", "text")
+               .col("count", "Count", "number", "0")
+               .col("lastSeenAt", "Last (s)", "number", "0")
+               .mode("upsert").maxRows(MQTT_TOPICS_LOG_MAX)
+               .rowFill("selected_topic=topic")
+               .icon("Topic").label("Live topics (sniffer + attached)"));
 
     // SETTINGS — pure transport configuration. Discovery controls
     // (sniffer / mask / attach) live in Status because they belong
     // to the runtime-observation flow, not the connection setup.
-    JsonArray set = FormBuilder::createForm(root, "settings", "Settings");
-    FormBuilder::addSwitchField(set, "enabled", AF::RW, s.enabled,
-                                label("Enabled"), icon("Sync"));
-    FormBuilder::addTextField(set, "host", AF::RW, s.host.c_str(),
-                              label("Host"), icon("Cloud"));
-    FormBuilder::addNumberField(set, "port", AF::RW, s.port,
-                                label("Port"),
-                                minVal(1), maxVal(65535), format("0"));
-    FormBuilder::addTextField(set, "username", AF::RW, s.username.c_str(),
-                              label("Username"), icon("Lock"));
-    FormBuilder::addSecretField(set, "pwd", AF::RW, s.password.c_str(),
-                                label("Password"), icon("Lock"));
+    web::Form set(root, "settings", "Settings");
+    set.add(web::Switch("enabled", s.enabled).label("Enabled").icon("Sync"));
+    set.add(web::Text("host", s.host.c_str()).label("Host").icon("Cloud"));
+    set.add(web::Number("port", s.port).label("Port").min(1).max(65535).format("0"));
+    set.add(web::Text("username", s.username.c_str()).label("Username").icon("Lock"));
+    set.add(web::Secret("pwd", s.password.c_str()).label("Password").icon("Lock"));
     // Client ID is read-only — auto-derived from DeviceIdentity at every
     // connect so it stays in lock-step with the cert / mothership /
     // AutoUpdate identity. The Status tab's `client_id` row above shows
     // the same value while connected; this row mirrors it in the Settings
     // tab so the operator can confirm the broker-side identifier without
     // tab-switching.
-    FormBuilder::addTextField(set, "client_id_cfg", AF::R, s.clientId.c_str(),
-                              label("Client ID (auto)"), icon("Memory"));
-    FormBuilder::addNumberField(set, "keep_alive", AF::RW, s.keepAlive,
-                                label("Keep alive"),
-                                minVal(1), maxVal(600), format("0"), unit("s"), icon("Timer"));
-    FormBuilder::addSwitchField(set, "clean_session", AF::RW, s.cleanSession,
-                                label("Clean session"));
-    FormBuilder::addNumberField(set, "max_topic_length", AF::RW, s.maxTopicLength,
-                                label("Max topic length"),
-                                minVal(16), maxVal(4096), format("0"), unit("B"));
+    set.add(web::Text("client_id_cfg", s.clientId.c_str()).readOnly()
+               .label("Client ID (auto)").icon("Memory"));
+    set.add(web::Number("keep_alive", s.keepAlive).label("Keep alive")
+               .min(1).max(600).format("0").unit("s").icon("Timer"));
+    set.add(web::Switch("clean_session", s.cleanSession).label("Clean session"));
+    set.add(web::Number("max_topic_length", s.maxTopicLength).label("Max topic length")
+               .min(16).max(4096).format("0").unit("B"));
   }
 
   /* ----- Unified update (REST + FS + WS) ----- */

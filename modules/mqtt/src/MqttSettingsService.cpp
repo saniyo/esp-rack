@@ -244,23 +244,21 @@ void MqttSettingsService::registerManifest(WebManager* web) {
   auto fullReader = [this](MqttSettings& s, JsonObject& root) {
     MqttSettings::buildForm(s, root);
 
-    JsonArray subs = FormBuilder::createForm(root, "subs",
-                                             "Internal services routing through this broker");
-    JsonObject tbl = FormBuilder::addTableField(
-        subs, "subscriptions", AF::R,
-        col("name",       "Service",      "text"),
-        col("prefix",     "Topic prefix", "text"),
-        col("published",  "Published",    "number", format("0")),
-        col("errors",     "Errors",       "number", format("0")),
-        col("dropped",    "Dropped",      "number", format("0")),
-        col("received",   "Received",     "number", format("0")),
-        col("rate",       "Rate (msg/min)", "number", format("0")),
-        col("lastPubAt",  "Last pub (s ago)", "number", format("0")),
-        col("enabled",    "Enabled",      "text"),
-        tableMode("replace"), maxRows(32),
-        icon("Cable"),
-        label("Active subscriptions"));
-    JsonArray rows = tbl["subscriptions"].as<JsonArray>();
+    web::Form subs(root, "subs",
+                   "Internal services routing through this broker");
+    subs.add(web::Table("subscriptions")
+                 .col("name", "Service", "text")
+                 .col("prefix", "Topic prefix", "text")
+                 .col("published", "Published", "number", "0")
+                 .col("errors", "Errors", "number", "0")
+                 .col("dropped", "Dropped", "number", "0")
+                 .col("received", "Received", "number", "0")
+                 .col("rate", "Rate (msg/min)", "number", "0")
+                 .col("lastPubAt", "Last pub (s ago)", "number", "0")
+                 .col("enabled", "Enabled", "text")
+                 .mode("replace").maxRows(32)
+                 .icon("Cable").label("Active subscriptions"));
+    JsonArray rows = subs.rowsOf("subscriptions");
     uint32_t now_s = (uint32_t)(millis() / 1000);
     for (const auto& r : _subs) {
       if (r.id == 0) continue;
@@ -289,15 +287,13 @@ void MqttSettingsService::registerManifest(WebManager* web) {
     // column is filled by joining attachedTopics × seenTopics —
     // wildcards (+ / #) match many concrete topics so we can't show
     // "the" value for them, those rows display `(wildcard)`.
-    JsonObject att = FormBuilder::addTableField(
-        subs, "attached_topics_view", AF::R,
-        col("topic", "Attached topic", "text"),
-        col("value", "Last value",     "text"),
-        tableMode("replace"), maxRows(MQTT_ATTACHED_TOPICS_MAX),
-        rowFill("selected_topic=topic"),
-        icon("PushPin"),
-        label("Persistent subscriptions"));
-    JsonArray attRows = att["attached_topics_view"].as<JsonArray>();
+    subs.add(web::Table("attached_topics_view")
+                 .col("topic", "Attached topic", "text")
+                 .col("value", "Last value", "text")
+                 .mode("replace").maxRows(MQTT_ATTACHED_TOPICS_MAX)
+                 .rowFill("selected_topic=topic")
+                 .icon("PushPin").label("Persistent subscriptions"));
+    JsonArray attRows = subs.rowsOf("attached_topics_view");
     for (const auto& t : s.attachedTopics) {
       JsonObject row = attRows.createNestedObject();
       row["topic"] = t;
