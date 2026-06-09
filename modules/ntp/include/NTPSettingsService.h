@@ -5,7 +5,8 @@
 #include <StatefulService.h>
 #include <ConfigManager.h>
 #include <ConfigDelegate.h>
-#include <FormBuilder.h>
+#include <FormBuilder.h>   // still used for updateValue() in update()
+#include <web/Form.h>
 #include <WebFeatureDelegate.h>
 
 #include <time.h>
@@ -121,39 +122,28 @@ class NTPSettings {
     const char* srv = WIFI_SAFE_SNTP_GETSERVER(0);
 
     // STATUS
-    JsonArray st = FormBuilder::createForm(root, "status", "Status");
+    web::Form st(root, "status", "Status");
     // The `state` avatar switches to success (green) when NTP is actively
     // syncing, info (blue) otherwise — mirrors the legacy pre-refactor
     // highlight. Colour is baked into the REST form at fetch time; WS ticks
     // only refresh field VALUES, so the avatar colour transitions appear
     // on next page reload.
-    FormBuilder::addTextField(st, "state",      AF::R, active ? "Active" : "Inactive",
-                              label("State"),
-                              icon("Update"), color(active ? "success" : "info"));
-    FormBuilder::addTextField(st, "run_server", AF::R, srv ? srv : "",
-                              label("Active server"),
-                              icon("Dns"));
-    FormBuilder::addTextField(st, "local_time", AF::R,
-                              formatTime(localtime(&now), "%b %d, %Y %H:%M:%S").c_str(),
-                              label("Local time"),
-                              icon("AccessTime"));
-    FormBuilder::addTextField(st, "utc_time",   AF::R,
-                              formatTime(gmtime(&now),    "%b %d, %Y %H:%M:%S").c_str(),
-                              label("UTC time"),
-                              icon("SwapVerticalCircle"));
-    FormBuilder::addTextField(st, "uptime",     AF::R,
-                              formatDurationSec((uint32_t)(millis() / 1000UL)).c_str(),
-                              label("Uptime"),
-                              icon("AvTimer"));
+    st.add(web::Text("state", active ? "Active" : "Inactive").readOnly()
+               .label("State").icon("Update").color(active ? "success" : "info"));
+    st.add(web::Text("run_server", srv ? srv : "").readOnly()
+               .label("Active server").icon("Dns"));
+    st.add(web::Text("local_time", formatTime(localtime(&now), "%b %d, %Y %H:%M:%S").c_str())
+               .readOnly().label("Local time").icon("AccessTime"));
+    st.add(web::Text("utc_time", formatTime(gmtime(&now), "%b %d, %Y %H:%M:%S").c_str())
+               .readOnly().label("UTC time").icon("SwapVerticalCircle"));
+    st.add(web::Text("uptime", formatDurationSec((uint32_t)(millis() / 1000UL)).c_str())
+               .readOnly().label("Uptime").icon("AvTimer"));
 
     // SETTINGS
-    JsonArray set = FormBuilder::createForm(root, "settings", "Settings");
-    FormBuilder::addSwitchField(set, "enabled", AF::RW, s.enabled,
-                                label("Enabled"), icon("Sync"));
-    FormBuilder::addTextField  (set, "server",  AF::RW, s.server.c_str(),
-                                label("NTP server"), icon("Cloud"));
-    FormBuilder::addTimeZonesField(set, "tz_label", AF::RW, s.tzLabel.c_str(),
-                                   label("Timezone"), icon("Schedule"));
+    web::Form set(root, "settings", "Settings");
+    set.add(web::Switch("enabled", s.enabled).label("Enabled").icon("Sync"));
+    set.add(web::Text("server", s.server.c_str()).label("NTP server").icon("Cloud"));
+    set.add(web::TimeZones("tz_label", s.tzLabel.c_str()).label("Timezone").icon("Schedule"));
   }
 
   /* ----- Unified update ----- */
