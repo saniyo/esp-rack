@@ -18,6 +18,7 @@ export interface MenuMeta {
 export interface TabSpec {
   key: string;
   title?: string;
+  icon?: string;        // optional per-tab MUI icon, surfaced on the menu sub-tab leaf
   restPath: string;
   postable?: boolean;  // tab can POST updates to restPath
   live?: boolean;       // tab subscribes to feature.ws for push updates

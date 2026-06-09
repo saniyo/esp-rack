@@ -31,6 +31,7 @@ struct WebMenuMeta {
 struct WebTabSpec {
   const char* key = nullptr;
   const char* title = nullptr;
+  const char* icon = nullptr;   // optional MUI icon for the menu sub-tab leaf (expandTabs)
   const char* restPath = nullptr;
   bool postable = false;  // tab can POST updates to restPath
   bool live = false;      // tab subscribes to feature.wsPath for push updates

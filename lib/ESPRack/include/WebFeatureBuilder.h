@@ -105,6 +105,7 @@ class WebTab {
     _t.title = title;
   }
 
+  WebTab& icon(const char* i)     { _t.icon = i; return *this; }
   WebTab& rest(const char* path)  { _t.restPath = path; return *this; }
   WebTab& postable(bool v = true) { _t.postable = v; return *this; }
   WebTab& live(bool v = true)     { _t.live = v; return *this; }

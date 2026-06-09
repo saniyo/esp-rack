@@ -52,10 +52,13 @@ const LayoutMenu: FC = () => {
           children.push({
             id: `${f.id}/${t.key}`,
             label: t.title ?? t.key,
-            icon,
+            // Per-tab icon if the backend declared one; else fall back to the
+            // parent feature's icon so the leaf is never icon-less.
+            icon: resolveIcon(t.icon) ?? icon,
             to: `${to}/${t.key}`,
             disabled,
             order: 0,
+            isTab: true,   // marks an expandTabs leaf → grey background in the tree
             children: [],
           }),
         );

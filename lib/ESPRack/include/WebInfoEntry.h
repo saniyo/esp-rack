@@ -99,6 +99,7 @@ class WebInfoEntry : public IWebFeatureEntry {
       JsonObject jt = tabs.createNestedObject();
       if (t.key) jt["key"] = t.key;
       if (t.title) jt["title"] = t.title;
+      if (t.icon) jt["icon"] = t.icon;
       if (t.restPath) jt["restPath"] = t.restPath;
       jt["postable"] = t.postable;
       jt["live"] = t.live;

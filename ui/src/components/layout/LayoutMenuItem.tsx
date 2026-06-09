@@ -28,6 +28,9 @@ export interface MenuNode {
   to?: string;
   disabled?: boolean;
   order: number;
+  // True for an expandTabs leaf (a component's own internal tab). Rendered on
+  // a grey background to distinguish from nested feature components (white).
+  isTab?: boolean;
   children: MenuNode[];
 }
 
@@ -54,7 +57,14 @@ const LayoutMenuItem: FC<Props> = ({ node, depth = 0, ancestors = [] }) => {
   const hasKids = kids.length > 0;
 
   const navigable = !!node.to;
-  const active = navigable && routeMatches(node.to!, pathname);
+  // Selected = this node's route matches AND no child's route matches more
+  // deeply — so the active leaf (the open sub-tab) takes the highlight, not
+  // its parent. A feature with no matching child still highlights on its own
+  // sub-routes (e.g. WiFi on /wifi/status, which has no menu leaf).
+  const active =
+    navigable &&
+    routeMatches(node.to!, pathname) &&
+    !node.children.some((c) => !!c.to && routeMatches(c.to!, pathname));
 
   const [open, setOpen] = useState<boolean>(() => subtreeActive(node, pathname));
   useEffect(() => {
@@ -70,13 +80,20 @@ const LayoutMenuItem: FC<Props> = ({ node, depth = 0, ancestors = [] }) => {
 
   const Icon = node.icon;
   const childAnc = [...ancestors, node.id];
-  const pad = { pl: 2 + depth * 2, pr: hasKids ? 6 : 2 };
+  // Sub-tab leaves (expandTabs) get a subtle grey background so they read as
+  // the component's own internal tabs, distinct from nested feature components
+  // (which stay on the default white). Dropped when active, so the normal
+  // `selected` highlight shows which tab is currently open.
+  const sx = {
+    pl: 2 + depth * 2,
+    pr: hasKids ? 6 : 2,
+    ...(node.isTab && !active ? { bgcolor: "grey.100" } : {}),
+  };
 
   return (
     <>
       <ListItem
         disablePadding
-        selected={active}
         secondaryAction={
           hasKids ? (
             <IconButton
@@ -91,14 +108,14 @@ const LayoutMenuItem: FC<Props> = ({ node, depth = 0, ancestors = [] }) => {
         }
       >
         {navigable ? (
-          <ListItemButton component={Link} to={node.to!} disabled={node.disabled} sx={pad}>
+          <ListItemButton component={Link} to={node.to!} selected={active} disabled={node.disabled} sx={sx}>
             <ListItemIcon sx={{ minWidth: 36 }}>
               <Icon />
             </ListItemIcon>
             <ListItemText>{node.label}</ListItemText>
           </ListItemButton>
         ) : (
-          <ListItemButton onClick={() => toggle()} disabled={node.disabled} sx={pad}>
+          <ListItemButton onClick={() => toggle()} selected={active} disabled={node.disabled} sx={sx}>
             <ListItemIcon sx={{ minWidth: 36 }}>
               <Icon />
             </ListItemIcon>
