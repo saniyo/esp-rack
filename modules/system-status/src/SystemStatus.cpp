@@ -1,6 +1,7 @@
 #include <SystemStatus.h>
 
-#include <FormBuilder.h>
+#include <FormBuilder.h>   // still used by buildIdentityForm during migration
+#include <web/Form.h>
 #include <WebManager.h>
 #include <DeviceIdentity.h>
 #include <HeapMonitor.h>
@@ -120,7 +121,7 @@ void SystemStatus::registerManifest(WebManager* web) {
 void SystemStatus::buildForm(JsonObject& root,
                               uint32_t free_snap,
                               uint32_t max_snap) {
-  JsonArray sta = FormBuilder::createForm(root, "status", "Resources");
+  web::Form sta(root, "status", "Resources");
 
   // Pure runtime telemetry: CPU / heap / PSRAM / sketch / flash / fs.
   // Identity-class fields (device id, MAC, chip model, SDK, framework
@@ -130,8 +131,8 @@ void SystemStatus::buildForm(JsonObject& root,
   // String lifetimes are safe.
 
   String cpuFreq = String(ESP.getCpuFreqMHz()) + " MHz";
-  FormBuilder::addTextField(sta, "cpu_frequency", AF::R, cpuFreq.c_str(),
-                            label("CPU frequency"), icon("ShowChart"));
+  sta.add(web::Text("cpu_frequency", cpuFreq.c_str()).readOnly()
+              .label("CPU frequency").icon("ShowChart"));
 
   // ── Three heap views, each captured at a different observer cost ──
   //
@@ -162,9 +163,8 @@ void SystemStatus::buildForm(JsonObject& root,
   uint32_t fh_live = free_snap ? free_snap : ESP.getFreeHeap();
   uint32_t ma_live = max_snap  ? max_snap  : ESP.getMaxAllocHeap();
   String heap_live = String(fh_live) + " / " + String(ma_live) + " bytes";
-  FormBuilder::addTextField(sta, "heap_free_max_alloc", AF::R, heap_live.c_str(),
-                            label("Heap (live, at request entry)"),
-                            icon("Memory"));
+  sta.add(web::Text("heap_free_max_alloc", heap_live.c_str()).readOnly()
+              .label("Heap (live, at request entry)").icon("Memory"));
 
   // Idle baseline — HeapMonitor::snapshot() returns the most recent
   // ring sample plus a synthesised "live" fallback if the ring is
@@ -182,9 +182,8 @@ void SystemStatus::buildForm(JsonObject& root,
                      + String(snap.latest.max_alloc) + " bytes  ("
                      + String(age_s) + "s ago, "
                      + String(snap.sample_count) + " samples)";
-    FormBuilder::addTextField(sta, "heap_at_idle", AF::R, heap_idle.c_str(),
-                              label("Heap @ idle (last 60s tick)"),
-                              icon("Memory"));
+    sta.add(web::Text("heap_at_idle", heap_idle.c_str()).readOnly()
+                .label("Heap @ idle (last 60s tick)").icon("Memory"));
   }
 
 #if SYSTEM_STATUS_HAS_MOTHERSHIP
@@ -198,34 +197,33 @@ void SystemStatus::buildForm(JsonObject& root,
       uint32_t age_s = age_ms / 1000;
       String heap_ck = String(fh_ck) + " / " + String(ma_ck) + " bytes  ("
                      + String(age_s) + "s ago)";
-      FormBuilder::addTextField(sta, "heap_at_checkin", AF::R, heap_ck.c_str(),
-                                label("Heap @ last checkin (server mirror)"),
-                                icon("CloudSync"));
+      sta.add(web::Text("heap_at_checkin", heap_ck.c_str()).readOnly()
+                  .label("Heap @ last checkin (server mirror)").icon("CloudSync"));
     }
   }
 #endif
 
   if (ESP.getPsramSize() > 0) {
     String psram = String(ESP.getPsramSize()) + " / " + String(ESP.getFreePsram()) + " bytes";
-    FormBuilder::addTextField(sta, "psram_size_free", AF::R, psram.c_str(),
-                              label("PSRAM (size / free)"), icon("Apps"));
+    sta.add(web::Text("psram_size_free", psram.c_str()).readOnly()
+                .label("PSRAM (size / free)").icon("Apps"));
   }
 
   String sketch = String(ESP.getSketchSize()) + " / " + String(ESP.getFreeSketchSpace()) + " bytes";
-  FormBuilder::addTextField(sta, "sketch_size_free", AF::R, sketch.c_str(),
-                            label("Sketch (size / free)"), icon("DataUsage"));
+  sta.add(web::Text("sketch_size_free", sketch.c_str()).readOnly()
+              .label("Sketch (size / free)").icon("DataUsage"));
 
   String flash = String(ESP.getFlashChipSize()) + " bytes / "
                + String((int)(ESP.getFlashChipSpeed() / 1000000)) + " MHz";
-  FormBuilder::addTextField(sta, "flash_chip_size_speed", AF::R, flash.c_str(),
-                            label("Flash (size / speed)"), icon("SdStorage"));
+  sta.add(web::Text("flash_chip_size_speed", flash.c_str()).readOnly()
+              .label("Flash (size / speed)").icon("SdStorage"));
 
   size_t fsTotal = ESPFS.totalBytes();
   size_t fsUsed  = ESPFS.usedBytes();
   size_t fsFree  = fsTotal > fsUsed ? fsTotal - fsUsed : 0;
   String fs = String(fsUsed) + " / " + String(fsTotal) + " bytes (" + String(fsFree) + " free)";
-  FormBuilder::addTextField(sta, "file_system_used_total", AF::R, fs.c_str(),
-                            label("File system (used / total)"), icon("Folder"));
+  sta.add(web::Text("file_system_used_total", fs.c_str()).readOnly()
+              .label("File system (used / total)").icon("Folder"));
 
   // ─── Per-task stack high-water marks ───────────────────────────
   // FreeRTOS stack high-water mark = MINIMUM free bytes ever seen on
@@ -246,14 +244,12 @@ void SystemStatus::buildForm(JsonObject& root,
           pvPortMalloc(n * sizeof(TaskStatus_t)));
       if (tasks) {
         const UBaseType_t got = uxTaskGetSystemState(tasks, n, nullptr);
-        JsonObject tbl = FormBuilder::addTableField(
-            sta, "rtos_tasks", AF::R,
-            col("name",       "Task",        "text"),
-            col("prio",       "Priority",    "number", format("0")),
-            col("stack_free", "Stack free (B)", "number", format("0")),
-            label("FreeRTOS tasks"),
-            icon("Layers"));
-        JsonArray rows = tbl["rtos_tasks"].as<JsonArray>();
+        sta.add(web::Table("rtos_tasks")
+                    .col("name", "Task", "text")
+                    .col("prio", "Priority", "number", "0")
+                    .col("stack_free", "Stack free (B)", "number", "0")
+                    .label("FreeRTOS tasks").icon("Layers"));
+        JsonArray rows = sta.rowsOf("rtos_tasks");
         for (UBaseType_t i = 0; i < got; i++) {
           JsonObject r = rows.createNestedObject();
           r["name"]       = tasks[i].pcTaskName;
@@ -269,8 +265,8 @@ void SystemStatus::buildForm(JsonObject& root,
   // of "who this device is" (firmware composition fingerprint), not
   // resource utilisation. See buildIdentityForm().
 
-  FormBuilder::addActionField(sta, "a_restart",      nullptr, AF::RW, actionRef("system.restart"));
-  FormBuilder::addActionField(sta, "a_factoryReset", nullptr, AF::RW, actionRef("system.factoryReset"));
+  sta.add(web::Action("a_restart").ref("system.restart"));
+  sta.add(web::Action("a_factoryReset").ref("system.factoryReset"));
 }
 
 void SystemStatus::systemStatus(AsyncWebServerRequest* request) {
@@ -382,8 +378,7 @@ void SystemStatus::systemStatusForm(AsyncWebServerRequest* request) {
 }
 
 void SystemStatus::buildIdentityForm(JsonObject& root) {
-  JsonArray ide = FormBuilder::createForm(root, "identity",
-                                           "Device Identity");
+  web::Form ide(root, "identity", "Device Identity");
 
   // Chip model + IDF/Arduino SDK rev. The HW-suffix postfix
   // ("ESP32-S3-N16R8V") joins runtime-detected sizes (flashMB +
@@ -391,8 +386,8 @@ void SystemStatus::buildIdentityForm(JsonObject& root) {
   // AutoUpdate sends as flv= in update-check URLs (case differs —
   // UI is upper, URL is lower).
   String chipSdk = DeviceIdentity::chipModelFull() + " / " + String(ESP.getSdkVersion());
-  FormBuilder::addTextField(ide, "chip_sdk", AF::R, chipSdk.c_str(),
-                            label("Chip / SDK"), icon("Devices"));
+  ide.add(web::Text("chip_sdk", chipSdk.c_str()).readOnly()
+              .label("Chip / SDK").icon("Devices"));
 
   // Memory layout — runtime-detected sizes + compile-time-detected
   // SPI bus modes. Surfaces what fw the device can actually accept
@@ -402,15 +397,15 @@ void SystemStatus::buildIdentityForm(JsonObject& root) {
   {
     String flashRow = String(DeviceIdentity::flashMB()) + " MB " +
                       (DeviceIdentity::flashIsOctal() ? "Octal-SPI" : "Quad-SPI");
-    FormBuilder::addTextField(ide, "flash", AF::R, flashRow.c_str(),
-                              label("Flash"), icon("SdStorage"));
+    ide.add(web::Text("flash", flashRow.c_str()).readOnly()
+                .label("Flash").icon("SdStorage"));
 
     int rmb = DeviceIdentity::psramMB();
     if (rmb > 0) {
       String psramRow = String(rmb) + " MB " +
                         (DeviceIdentity::psramIsOctal() ? "Octal-SPI" : "Quad-SPI");
-      FormBuilder::addTextField(ide, "psram", AF::R, psramRow.c_str(),
-                                label("PSRAM"), icon("Memory"));
+      ide.add(web::Text("psram", psramRow.c_str()).readOnly()
+                  .label("PSRAM").icon("Memory"));
     }
   }
 
@@ -418,17 +413,14 @@ void SystemStatus::buildIdentityForm(JsonObject& root) {
   // sends as `deviceId` to the mothership. Operator-side admin UI
   // will display this exact string when correlating server records
   // with a physical device.
-  FormBuilder::addTextField(ide, "device_id", AF::R,
-                            DeviceIdentity::canonical().c_str(),
-                            label("Device ID"), icon("Fingerprint"));
+  ide.add(web::Text("device_id", DeviceIdentity::canonical().c_str()).readOnly()
+              .label("Device ID").icon("Fingerprint"));
 
-  FormBuilder::addTextField(ide, "project_name", AF::R,
-                            DeviceIdentity::projectName().c_str(),
-                            label("Project"), icon("Apps"));
+  ide.add(web::Text("project_name", DeviceIdentity::projectName().c_str()).readOnly()
+              .label("Project").icon("Apps"));
 
-  FormBuilder::addTextField(ide, "fw_version", AF::R,
-                            DeviceIdentity::version().c_str(),
-                            label("Firmware version"), icon("Update"));
+  ide.add(web::Text("fw_version", DeviceIdentity::version().c_str()).readOnly()
+              .label("Firmware version").icon("Update"));
 
   // Framework version — esp-rack library rev. Sourced from
   // WebManager's frameworkVersion() so it stays in sync with the
@@ -438,37 +430,33 @@ void SystemStatus::buildIdentityForm(JsonObject& root) {
     const char* fwVer = _web->frameworkVersion();
     if (fwVer && *fwVer) {
       String fw = String("esp-rack ") + fwVer;
-      FormBuilder::addTextField(ide, "framework_version", AF::R, fw.c_str(),
-                                label("Framework"), icon("Inventory"));
+      ide.add(web::Text("framework_version", fw.c_str()).readOnly()
+                  .label("Framework").icon("Inventory"));
     }
   }
 
   // Only render HW Revision when the consumer actually declared one
   // via FACTORY_HW_REVISION — otherwise the row is just noise.
   if (DeviceIdentity::hwRevision().length() > 0) {
-    FormBuilder::addTextField(ide, "hw_revision", AF::R,
-                              DeviceIdentity::hwRevision().c_str(),
-                              label("HW Revision"), icon("DeveloperBoard"));
+    ide.add(web::Text("hw_revision", DeviceIdentity::hwRevision().c_str()).readOnly()
+                .label("HW Revision").icon("DeveloperBoard"));
   }
 
-  FormBuilder::addTextField(ide, "mac_address", AF::R,
-                            DeviceIdentity::macColon().c_str(),
-                            label("MAC (WiFi STA)"), icon("DeviceHub"));
+  ide.add(web::Text("mac_address", DeviceIdentity::macColon().c_str()).readOnly()
+              .label("MAC (WiFi STA)").icon("DeviceHub"));
 
   // 32-hex eFuse hardware UID — immutable, fab-burned. Anti-clone
   // anchor; can't be changed in software. Empty/zeros on classic
   // ESP32 (no OPTIONAL_UNIQUE_ID block).
-  FormBuilder::addTextField(ide, "hardware_uid", AF::R,
-                            DeviceIdentity::uidHex32().c_str(),
-                            label("Hardware UID (eFuse)"), icon("Tag"));
+  ide.add(web::Text("hardware_uid", DeviceIdentity::uidHex32().c_str()).readOnly()
+              .label("Hardware UID (eFuse)").icon("Tag"));
 
   // Flash chip 64-bit unique ID. Auxiliary fingerprint — changes if
   // someone swaps the flash chip (eFuse UID stays the same), so a
   // mismatch on the server side is a tamper signal. Zero when the
   // flash chip doesn't support the SFDP unique-ID command.
-  FormBuilder::addTextField(ide, "flash_uid", AF::R,
-                            DeviceIdentity::flashUidHex().c_str(),
-                            label("Flash UID"), icon("SdStorage"));
+  ide.add(web::Text("flash_uid", DeviceIdentity::flashUidHex().c_str()).readOnly()
+              .label("Flash UID").icon("SdStorage"));
 
   // Module composition table — per-module id+version from WebManager's
   // registry. Lives on Identity (not Resources) because it's a piece
@@ -477,11 +465,11 @@ void SystemStatus::buildIdentityForm(JsonObject& root) {
   // null — defensive; SystemStatusModule always passes ctx.web post-
   // Builder, but null-tolerant ctor stays valid.
   if (_web) {
-    JsonObject tbl = FormBuilder::addTableField(ide, "modules", AF::R,
-        col("module",  "Module",  "text"),
-        col("version", "Version", "text"),
-        icon("Extension"));
-    JsonArray rows = tbl["modules"].as<JsonArray>();
+    ide.add(web::Table("modules")
+                .col("module", "Module", "text")
+                .col("version", "Version", "text")
+                .icon("Extension"));
+    JsonArray rows = ide.rowsOf("modules");
     _web->forEachModule([&](const char* id, const char* version) {
       JsonObject row = rows.createNestedObject();
       row["module"]  = id ? id : "";

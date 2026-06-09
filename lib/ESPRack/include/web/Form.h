@@ -408,7 +408,7 @@ class DateTime : public FieldSpec<DateTime> {
 // ── Action (button firing an HTTP call or referencing a manifest action) ──
 class Action : public FieldSpec<Action> {
  public:
-  Action(const char* key, const char* label) : FieldSpec(key), _label(label) {}
+  Action(const char* key, const char* label = nullptr) : FieldSpec(key), _label(label) {}
   Action& url(const char* u)        { return putStr(Opt::Url, u); }
   Action& method(const char* m)     { return putStr(Opt::Method, m); }
   Action& confirm(const char* t)    { return putStr(Opt::Confirm, t); }
