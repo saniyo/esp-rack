@@ -1,5 +1,6 @@
 #include <APSettingsService.h>
 #include <WebManager.h>
+#include <WebFeatureBuilder.h>
 #include <DeviceIdentity.h>
 
 /* ================= Static runtime emitters ================= */
@@ -120,38 +121,22 @@ APSettingsService::APSettingsService(ConfigManager* cfgMgr)
 void APSettingsService::registerManifest(WebManager* web) {
   if (!web) return;
 
-  WebFeatureSpec spec;
-  spec.id         = "ap";
-  spec.title      = "Access Point";
-  spec.component  = "DynamicSettings";
-  spec.menu.label = "Access Point";
-  spec.menu.icon  = "SettingsInputAntenna";
-  spec.menu.order = 150;
-  spec.menu.auth  = WebAuthLevel::Authenticated;
-  spec.menu.parent = "wifi";   // tree-menu demo: nest Access Point under WiFi Connection
-  spec.auth       = WebAuthLevel::Authenticated;
-  spec.restRead   = AP_FORM_PATH;
-  spec.restUpdate = AP_FORM_PATH;
-  // No wsPath — the status tab is plain REST (user explicitly asked for
-  // REST-only; the tab renders as read-only DynamicSettings instead of the
-  // WS-dependent DynamicStatus).
-
-  WebTabSpec statusTab;
-  statusTab.key      = "status";
-  statusTab.title    = "Status";
-  statusTab.restPath = AP_FORM_PATH;
-  statusTab.postable = false;
-  statusTab.live     = false;
-  statusTab.auth     = WebAuthLevel::Authenticated;
-  spec.tabs.push_back(statusTab);
-
-  WebTabSpec settingsTab;
-  settingsTab.key      = "settings";
-  settingsTab.title    = "Settings";
-  settingsTab.restPath = AP_FORM_PATH;
-  settingsTab.postable = true;
-  settingsTab.auth     = WebAuthLevel::Admin;
-  spec.tabs.push_back(settingsTab);
+  // Built with the fluent WebFeature builder. nestUnder("wifi") is the
+  // tree-menu placement directive — "drop Access Point onto the WiFi feature"
+  // — referencing the WiFi feature's id by string. No wsPath: the status tab
+  // is plain REST (renders read-only DynamicSettings, not WS DynamicStatus).
+  auto spec = WebFeature("ap")
+      .title("Access Point")
+      .component(WebComponent::DynamicSettings)
+      .authenticated()
+      .menu(WebMenu("Access Point")
+                .icon(WebIcon::SettingsInputAntenna)
+                .order(150)
+                .nestUnder("wifi"))          // ← nest under the WiFi feature
+      .rest(AP_FORM_PATH)
+      .tab(WebTab("status", "Status").rest(AP_FORM_PATH))
+      .tab(WebTab("settings", "Settings").rest(AP_FORM_PATH).postable().adminOnly())
+      .build();
 
   _feature = web->registerFeature<APSettings>(
       std::move(spec), this,
