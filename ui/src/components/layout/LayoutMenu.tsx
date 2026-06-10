@@ -1,13 +1,32 @@
-import { FC, useContext, useMemo } from 'react';
-import { List } from '@mui/material';
+import { ComponentType, FC, useContext, useMemo, useState } from 'react';
+import { useLocation } from 'react-router-dom';
+import { List, SvgIconProps } from '@mui/material';
 import SettingsIcon from '@mui/icons-material/Settings';
 import LockIcon from '@mui/icons-material/Lock';
+import FiberManualRecordIcon from '@mui/icons-material/FiberManualRecord';
+import SpeedIcon from '@mui/icons-material/Speed';
+import TuneIcon from '@mui/icons-material/Tune';
+import SearchIcon from '@mui/icons-material/Search';
+import NotificationsIcon from '@mui/icons-material/Notifications';
+import HowToRegIcon from '@mui/icons-material/HowToReg';
+import RestoreIcon from '@mui/icons-material/Restore';
+import CodeIcon from '@mui/icons-material/Code';
+import FingerprintIcon from '@mui/icons-material/Fingerprint';
+import SystemUpdateAltIcon from '@mui/icons-material/SystemUpdateAlt';
+import CloudUploadIcon from '@mui/icons-material/CloudUpload';
+import UpdateIcon from '@mui/icons-material/Update';
+import DevicesIcon from '@mui/icons-material/Devices';
+import DnsIcon from '@mui/icons-material/Dns';
+import SettingsApplicationsIcon from '@mui/icons-material/SettingsApplications';
+import HttpIcon from '@mui/icons-material/Http';
+import VpnKeyIcon from '@mui/icons-material/VpnKey';
 
 import { AuthenticatedContext } from '../../contexts/authentication';
 import { FeaturesContext } from '../../contexts/features';
 import { useManifest } from '../../contexts/manifest';
 import { resolveIcon } from '../dynamic-component/utils/iconRegistry';
 import { FeatureEntry } from '../../types';
+import { routeMatches } from '../../utils';
 import LayoutMenuItem, { MenuNode } from './LayoutMenuItem';
 
 // Manifest-driven side-nav — now a recursive TREE.
@@ -31,6 +50,51 @@ import LayoutMenuItem, { MenuNode } from './LayoutMenuItem';
 const routePrefix = (entry: FeatureEntry): string | undefined =>
   entry.route ? entry.route.replace(/\/\*$/, '') : undefined;
 
+// Generic marker for an expandTabs leaf with no icon of its own: a small muted
+// dot. Without this, tab leaves fell back to the PARENT feature's icon, so a
+// feature's tabs all repeated the same glyph (e.g. three identical Wifi icons
+// in a row), which looked odd. A neutral bullet reads cleanly as a sub-item.
+const TabLeafDot: FC<SvgIconProps> = () => (
+  <FiberManualRecordIcon sx={{ fontSize: 10, color: 'text.secondary' }} />
+);
+
+// Semantic fallback icons for expandTabs leaves, keyed by tab.key. A tab with
+// no explicit backend icon gets a meaningful glyph here — and tabs that mean
+// the SAME thing across features share ONE icon (every "status" looks the same,
+// every "settings" the same, …). Explicit WebTab.icon() still wins; an unknown
+// key falls through to the neutral dot.
+const TAB_ICONS: Record<string, ComponentType<SvgIconProps>> = {
+  status: SpeedIcon,                // live state / overview
+  settings: TuneIcon,               // config (matches Light's Settings tab)
+  scan: SearchIcon,                 // network scan
+  subs: NotificationsIcon,          // subscriptions
+  enrollment: HowToRegIcon,         // certificate enrolment
+  recovery: RestoreIcon,            // certificate recovery
+  internals: CodeIcon,              // raw internals / debug
+  identity: FingerprintIcon,        // device identity
+  ota: SystemUpdateAltIcon,         // OTA firmware update
+  upload: CloudUploadIcon,          // firmware upload
+  autoUpdate: UpdateIcon,           // scheduled auto-update
+  clients: DevicesIcon,             // connected WebSocket clients
+  mdns: DnsIcon,                    // mDNS service discovery
+  configmgr: SettingsApplicationsIcon, // config manager
+  endpoints: HttpIcon,              // HTTP endpoints
+  jwt: VpnKeyIcon,                  // JWT secret / signing key
+};
+
+// The single root→leaf chain of node ids whose route is currently active.
+// Seeds (and re-seeds on navigation) the accordion open path so the branch
+// containing the current page is the one expanded. Children are checked before
+// the node's own route so the deepest (most specific) match wins.
+const activePath = (nodes: MenuNode[], pathname: string): string[] => {
+  for (const n of nodes) {
+    const sub = activePath(n.children, pathname);
+    if (sub.length) return [n.id, ...sub];
+    if (n.to && routeMatches(n.to, pathname)) return [n.id];
+  }
+  return [];
+};
+
 const LayoutMenu: FC = () => {
   const { manifest } = useManifest();
   const { me } = useContext(AuthenticatedContext);
@@ -52,9 +116,11 @@ const LayoutMenu: FC = () => {
           children.push({
             id: `${f.id}/${t.key}`,
             label: t.title ?? t.key,
-            // Per-tab icon if the backend declared one; else fall back to the
-            // parent feature's icon so the leaf is never icon-less.
-            icon: resolveIcon(t.icon) ?? icon,
+            // Icon priority: explicit backend WebTab.icon() → semantic icon by
+            // tab.key (so every "status"/"settings"/… shares one glyph) → a
+            // neutral dot for anything unmapped. Never the parent's icon (which
+            // made a feature's tabs all repeat the same glyph, looking odd).
+            icon: resolveIcon(t.icon) ?? TAB_ICONS[t.key] ?? TabLeafDot,
             to: `${to}/${t.key}`,
             disabled,
             order: 0,
@@ -94,10 +160,19 @@ const LayoutMenu: FC = () => {
     return rootNodes;
   }, [manifest, me.admin]);
 
+  // ── Accordion open-state: ONE shared path for the whole tree (see
+  // LayoutMenuItem). Opening any branch collapses the previously open one. ──
+  // Seeded ONCE, on mount, to the branch of the page you land on (deep-link /
+  // refresh orientation). After that the tree is driven purely by the chevrons:
+  // navigating by clicking a row does NOT auto-expand — the menu shows only what
+  // the user explicitly opened, so a click never "expands everything".
+  const { pathname } = useLocation();
+  const [openPath, setOpenPath] = useState<string[]>(() => activePath(roots, pathname));
+
   return (
     <List disablePadding component="nav">
       {roots.map((n) => (
-        <LayoutMenuItem key={n.id} node={n} />
+        <LayoutMenuItem key={n.id} node={n} openPath={openPath} setOpenPath={setOpenPath} />
       ))}
       {/* Standalone Security page (user CRUD) — not in the manifest; still
           appended explicitly, admin-gated, as before. */}
@@ -112,6 +187,8 @@ const LayoutMenu: FC = () => {
             order: 9999,
             children: [],
           }}
+          openPath={openPath}
+          setOpenPath={setOpenPath}
         />
       )}
     </List>

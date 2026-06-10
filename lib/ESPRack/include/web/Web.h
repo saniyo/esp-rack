@@ -14,7 +14,7 @@
 //
 //  Authoring reads the same fluent way for the manifest and the forms:
 //      auto spec = WebFeature("light")
-//          .menu(WebMenu("Light").icon(WebIcon::Lightbulb).expandTabs())
+//          .menu(WebMenu("Light").icon(WebIcon::Lightbulb))  // tabs expand by default
 //          .tab(WebTab("status", "Status").live())
 //          .build();
 //      web::Form form(root, "status", "Status");

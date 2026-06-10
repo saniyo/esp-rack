@@ -1,4 +1,4 @@
-import React, { FC, useState, useEffect } from "react";
+import React, { FC } from "react";
 import { Link, useLocation } from "react-router-dom";
 import {
   ListItem,
@@ -11,7 +11,6 @@ import {
   List,
 } from "@mui/material";
 import ExpandMore from "@mui/icons-material/ExpandMore";
-import ExpandLess from "@mui/icons-material/ExpandLess";
 
 import { routeMatches } from "../../utils";
 
@@ -29,26 +28,33 @@ export interface MenuNode {
   disabled?: boolean;
   order: number;
   // True for an expandTabs leaf (a component's own internal tab). Rendered on
-  // a grey background to distinguish from nested feature components (white).
+  // a grey panel to distinguish it from nested feature components (white).
   isTab?: boolean;
   children: MenuNode[];
 }
 
-// Is the current route this node or anywhere in its subtree? Drives
-// auto-expanding the path down to the active page.
-const subtreeActive = (node: MenuNode, pathname: string): boolean =>
-  (!!node.to && routeMatches(node.to, pathname)) ||
-  node.children.some((c) => subtreeActive(c, pathname));
-
 interface Props {
   node: MenuNode;
   depth?: number;
-  // Ancestor ids on the path to this node. A plain string[] (not Set) so
-  // the spread below downlevels cleanly without --downlevelIteration.
+  // Ancestor ids on the path to this node. A plain string[] (not Set) so the
+  // spread below downlevels cleanly without --downlevelIteration.
   ancestors?: string[];
+  // ACCORDION: the whole tree shares ONE "open path" — the single chain of ids
+  // from a root down to the deepest open node. A node is open iff its id is on
+  // that path; opening a node sets the path to [...itsAncestors, itsId], which
+  // collapses every sibling branch at every level. Owned by LayoutMenu so that
+  // expanding one group auto-closes the previously open one (less clutter).
+  openPath: string[];
+  setOpenPath: (path: string[]) => void;
 }
 
-const LayoutMenuItem: FC<Props> = ({ node, depth = 0, ancestors = [] }) => {
+const LayoutMenuItem: FC<Props> = ({
+  node,
+  depth = 0,
+  ancestors = [],
+  openPath,
+  setOpenPath,
+}) => {
   const { pathname } = useLocation();
 
   // Cycle guard: never recurse into a child that is already one of our
@@ -66,37 +72,38 @@ const LayoutMenuItem: FC<Props> = ({ node, depth = 0, ancestors = [] }) => {
     routeMatches(node.to!, pathname) &&
     !node.children.some((c) => !!c.to && routeMatches(c.to!, pathname));
 
-  const [open, setOpen] = useState<boolean>(() => subtreeActive(node, pathname));
-  useEffect(() => {
-    if (subtreeActive(node, pathname)) setOpen(true); // open down to active page
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pathname]);
+  // Open iff this node sits on the shared open path.
+  const open = openPath.indexOf(node.id) !== -1;
 
   const toggle = (e?: React.MouseEvent) => {
     e?.preventDefault();
     e?.stopPropagation();
-    setOpen((o) => !o);
+    // Accordion: open  => set the path to me (collapses sibling branches);
+    //            close => fall back to my ancestors (drop me + everything below).
+    setOpenPath(open ? ancestors : [...ancestors, node.id]);
   };
 
   const Icon = node.icon;
   const childAnc = [...ancestors, node.id];
-  // Sub-tab leaves (expandTabs) get a subtle grey background so they read as
-  // the component's own internal tabs, distinct from nested feature components
-  // (which stay on the default white). Dropped when active, so the normal
-  // `selected` highlight shows which tab is currently open.
+
+  // Sub-tab leaves (expandTabs) sit on a clearly grey panel so they read as the
+  // component's own internal tabs; nested feature components stay on white.
+  // The ACTIVE tab fills the WHOLE row with a noticeably DARKER neutral grey +
+  // bold (700) label — a big lightness step (grey.300 → grey.500) so the open
+  // tab is unmistakable. background-color eases smoothly on hover/selection.
   const sx = {
     pl: 2 + depth * 2,
     pr: hasKids ? 6 : 2,
-    // Sub-tab leaves form a cohesive GREY panel under the component (always
-    // grey, including the active one), so they clearly read as the
-    // component's own internal tabs vs. nested feature components (white).
-    // The active tab keeps the selected tint layered on top of the grey.
+    transition: "background-color 0.2s ease",
     ...(node.isTab
       ? {
-          bgcolor: "grey.200",
-          "&:hover": { bgcolor: "grey.300" },
-          "&.Mui-selected": { bgcolor: "action.selected" },
-          "&.Mui-selected:hover": { bgcolor: "action.selected" },
+          bgcolor: "grey.300",
+          "&:hover": { bgcolor: "grey.400" },
+          "&.Mui-selected": {
+            bgcolor: "grey.500",
+            "& .MuiListItemText-primary": { fontWeight: 700 },
+          },
+          "&.Mui-selected:hover": { bgcolor: "grey.500" },
         }
       : {}),
   };
@@ -113,7 +120,12 @@ const LayoutMenuItem: FC<Props> = ({ node, depth = 0, ancestors = [] }) => {
               onClick={toggle}
               aria-label={open ? "collapse" : "expand"}
             >
-              {open ? <ExpandLess /> : <ExpandMore />}
+              <ExpandMore
+                sx={{
+                  transition: "transform 0.2s ease",
+                  transform: open ? "rotate(180deg)" : "rotate(0deg)",
+                }}
+              />
             </IconButton>
           ) : undefined
         }
@@ -138,7 +150,14 @@ const LayoutMenuItem: FC<Props> = ({ node, depth = 0, ancestors = [] }) => {
         <Collapse in={open} timeout="auto" unmountOnExit>
           <List disablePadding component="div">
             {kids.map((c) => (
-              <LayoutMenuItem key={c.id} node={c} depth={depth + 1} ancestors={childAnc} />
+              <LayoutMenuItem
+                key={c.id}
+                node={c}
+                depth={depth + 1}
+                ancestors={childAnc}
+                openPath={openPath}
+                setOpenPath={setOpenPath}
+              />
             ))}
           </List>
         </Collapse>

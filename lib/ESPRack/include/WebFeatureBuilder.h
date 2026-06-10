@@ -28,7 +28,7 @@
 //    auto spec = WebFeature("lightState")
 //        .title("Light Service")
 //        .component(WebComponent::DynamicSettings)
-//        .menu(WebMenu("Light").icon(WebIcon::Lightbulb).order(50).expandTabs())
+//        .menu(WebMenu("Light").icon(WebIcon::Lightbulb).order(50))  // tabs expand by default
 //        .rest(LIGHT_SETTINGS_PATH)
 //        .ws(LIGHT_SETTINGS_SOCKET_PATH)
 //        .tab(WebTab("status", "Status").rest(LIGHT_SETTINGS_PATH).live())
@@ -87,7 +87,9 @@ class WebMenu {
   // Tree placement — "drop this onto <parentId>": nest this item UNDER the
   // feature/group whose id == parentId. Omit for a top-level item.
   WebMenu& nestUnder(const char* parentId) { _m.parent = parentId; return *this; }
-  // Also surface this feature's own tabs as leaf children of the tree node.
+  // Surface this feature's own tabs as leaf children of the tree node.
+  // ON BY DEFAULT (WebMenuMeta::expandTabs == true); call expandTabs(false)
+  // to opt OUT and keep this feature's tabs in the top tab-bar only.
   WebMenu& expandTabs(bool v = true)       { _m.expandTabs = v; return *this; }
 
   WebMenuMeta build() const  { return _m; }

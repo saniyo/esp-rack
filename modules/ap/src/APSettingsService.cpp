@@ -121,7 +121,10 @@ void APSettingsService::registerManifest(WebManager* web) {
       .menu(WebMenu("Access Point")
                 .icon(WebIcon::SettingsInputAntenna)
                 .order(150)
-                .nestUnder("wifi"))          // ← nest under the WiFi feature
+                .nestUnder("wifi"))          // ← nest under WiFi. Its own tabs
+                                             //   (Status/Settings) expand as tree
+                                             //   leaves via the global default
+                                             //   (WebMenuMeta::expandTabs = true).
       .rest(AP_FORM_PATH)
       .tab(WebTab("status", "Status").rest(AP_FORM_PATH))
       .tab(WebTab("settings", "Settings").rest(AP_FORM_PATH).postable().adminOnly())

@@ -14,8 +14,7 @@ struct WebMenuMeta {
   int order = 0;
   WebAuthLevel auth = WebAuthLevel::Authenticated;
   bool hidden = false;
-  // ── Tree-menu hierarchy (ADDITIVE: parent=null + expandTabs=false is
-  // the legacy flat top-level item, so existing modules are unchanged) ──
+  // ── Tree-menu hierarchy ──
   // parent: id of the feature/group this item nests UNDER in the sidebar
   // tree. null = top-level. The frontend groups children by this and
   // renders a recursive, collapsible tree. The backend is the single
@@ -24,8 +23,11 @@ struct WebMenuMeta {
   const char* parent = nullptr;
   // expandTabs: when true, this feature's own tabs are ALSO exposed as
   // leaf children in the tree (navigate straight to /<id>/<tabKey>), in
-  // addition to any child features. Opt-in to avoid clutter.
-  bool expandTabs = false;
+  // addition to any child features. ON BY DEFAULT — every multi-tab feature
+  // surfaces its tabs in the menu tree. Opt a feature OUT with
+  // WebMenu(...).expandTabs(false) when its top tab-bar alone is preferred.
+  // (Single-tab features are unaffected — the frontend only expands tabs>1.)
+  bool expandTabs = true;
 };
 
 struct WebTabSpec {
