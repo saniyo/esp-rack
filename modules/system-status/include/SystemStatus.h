@@ -11,10 +11,14 @@
 #include <ESPFS.h>
 
 #define MAX_ESP_STATUS_SIZE 1024
-// C1 (api-v1) bespoke page paths. The flat machine reader IS the canonical
-// system status now (/api/v1/system/status); the Form-DSL readers move under
-// the /form suffix so the two faces never collide. See the C1 PATH TABLE.
-#define SYSTEM_STATUS_SERVICE_PATH   "/api/v1/system/status"
+// C1 (api-v1) bespoke page paths. The flat machine reader lives at
+// /api/v1/system/health — NOT /api/v1/system/status — because
+// AsyncWebServer prefix-matches a registered URI against "<uri>/..."
+// subpaths: an endpoint at .../status would swallow .../status/form and
+// the Resources tab would render the flat payload (observed live).
+// Rule of thumb: a mounted endpoint path must never be a path-prefix of
+// another endpoint; /form faces hang off non-endpoint parents only.
+#define SYSTEM_STATUS_SERVICE_PATH   "/api/v1/system/health"
 #define SYSTEM_STATUS_FORM_PATH      "/api/v1/system/status/form"
 #define SYSTEM_IDENTITY_FORM_PATH    "/api/v1/system/identity/form"
 

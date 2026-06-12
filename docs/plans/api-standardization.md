@@ -109,7 +109,13 @@ Every feature exposes up to TWO faces of the same StatefulService:
 /api/v1/<feature>/form      UI face — Form-DSL envelope (labels/icons/"o" strings)
 ─────────────────────────────────────────────────────────────────
 GET  /api/v1/                            capability/root object
-GET  /api/v1/system/status               flat system health (machine)
+GET  /api/v1/system/health               flat system health (machine)
+     RULE (learned on hardware): a mounted endpoint must NEVER be a
+     path-prefix of another endpoint — AsyncWebServer also matches a
+     registered URI against "<uri>/..." subpaths, so an endpoint at
+     .../status swallowed .../status/form (Resources tab rendered the
+     flat payload). /form faces hang off non-endpoint parents only;
+     hence the flat machine status is "health", not "status".
 GET  /api/v1/system/identity
 GET|POST /api/v1/wifi/state              read/set wifi values (machine)
 GET      /api/v1/wifi/form               wifi Form-DSL (web UI only)

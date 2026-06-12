@@ -9,7 +9,10 @@ export interface SystemInfo {
 
 export const readSystemStatus = (timeout?: number): AxiosPromise<SystemStatus> => {
   const config = timeout ? { timeout } : {};
-  return AXIOS.get<SystemStatus>("system/status", config);
+  // Flat machine health lives at system/health — NOT system/status:
+  // AsyncWebServer prefix-matches mounted URIs, so an endpoint at
+  // .../status would swallow the Resources tab's .../status/form.
+  return AXIOS.get<SystemStatus>("system/health", config);
 };
 
 export const restart = (): AxiosPromise<void> => {
@@ -25,11 +28,12 @@ export const getSystemInfo = (): AxiosPromise<SystemInfo> => {
 };
 
 export const readOTASettings = (): AxiosPromise<OTASettings> => {
-  return AXIOS.get<OTASettings>("ota/form");
+  // Flat values ride the machine face; the /form face is GET-only DSL.
+  return AXIOS.get<OTASettings>("ota/state");
 };
 
 export const updateOTASettings = (otaSettings: OTASettings): AxiosPromise<OTASettings> => {
-  return AXIOS.post<OTASettings>("ota/form", otaSettings);
+  return AXIOS.post<OTASettings>("ota/state", otaSettings);
 };
 
 export const uploadFirmware = (file: File, config?: FileUploadConfig): AxiosPromise<void> => {
