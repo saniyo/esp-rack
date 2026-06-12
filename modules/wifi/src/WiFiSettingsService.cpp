@@ -2,11 +2,40 @@
 #include <WebManager.h>
 #include <web/Form.h>
 #include <DeviceIdentity.h>
+#include <SecretsVault.h>
 
 // File-scope snapshot of the service's dual-AP selection. buildForm / wsRead
 // live on WiFiSettings (no service pointer), so the service writes here and
 // both readers read. Plain uint8_t access is atomic on our targets.
 static volatile uint8_t s_activeAp = 0;
+
+// -------- Credential sanity (gates WiFi.begin) --------
+// The driver hard-rejects passphrases longer than 64 chars (STA.cpp
+// "passphrase too long!" → WL_CONNECT_FAILED) and treats exactly 64 chars
+// as a raw hex PSK. Stored values can violate that even though the UI
+// never offered to: an ENC: vault record read by a build that can't
+// decrypt it (vault toggled off, pre-vault firmware) is 68+ chars of
+// ciphertext. Such a value must never reach the radio — the slot is
+// skipped with one loud log instead of an endless driver-error loop.
+static bool staPassphraseUsable(const String& pwd) {
+  if (SecretsVault::looksEncrypted(pwd)) return false;  // undecrypted residue
+  if (pwd.length() > 64) return false;                  // driver hard limit
+  if (pwd.length() == 64) {                             // raw-PSK form — must be hex
+    for (size_t i = 0; i < 64; ++i) {
+      const char c = pwd[i];
+      const bool hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+                       (c >= 'A' && c <= 'F');
+      if (!hex) return false;
+    }
+  }
+  return true;
+}
+
+// A slot is connectable when its SSID fits 802.11 (1..32 octets) and the
+// passphrase passes the driver gate above.
+static bool staSlotUsable(const String& ssid, const String& pwd) {
+  return ssid.length() > 0 && ssid.length() <= 32 && staPassphraseUsable(pwd);
+}
 
 // -------- Runtime status helpers (stateless) --------
 static const char* connStatusLabel(wl_status_t st) {
@@ -272,6 +301,16 @@ StateUpdateResult WiFiSettings::update(JsonObject& root, WiFiSettings& s) {
     n.hostname = SettingValue::format(FACTORY_WIFI_HOSTNAME);
   }
 
+  // Reject values the radio can never use BEFORE they reach flash: the
+  // driver refuses >64-char passphrases (64 exactly must be raw hex PSK)
+  // and 802.11 caps SSIDs at 32 octets. ERROR keeps the old working
+  // settings intact and surfaces a save failure in the UI instead of a
+  // device that silently stops connecting on the next reboot.
+  if (n.ssid.length() > 32 || n.ssid2.length() > 32 ||
+      !staPassphraseUsable(n.password) || !staPassphraseUsable(n.password2)) {
+    return StateUpdateResult::ERROR;
+  }
+
   if (n == s) return StateUpdateResult::UNCHANGED;
   s = n;
   return StateUpdateResult::CHANGED;
@@ -403,13 +442,13 @@ void WiFiSettingsService::registerManifest(WebManager* web) {
   spec.tabs.push_back(settingsTab);
 
   // REST-only registration: single buffer shared by GET + POST handlers.
-  // Measured wifiForm payload is 2531 B (scan rows stream from a
-  // separate endpoint, NOT this form's `scan` tab). 6 KB = 2.4× the
-  // observed payload — enough headroom for future fields plus a safe
-  // margin inside the ESP32-C3 max-contiguous-alloc window (typically
-  // ~19 KB once WiFi+TLS contexts populate). Was 16 KB which routinely
-  // exceeded that window and silently produced literal "null" bodies
-  // (see mothership fix + HttpEndpoint OOM guard).
+  // Stays EXPLICIT 6144 (not WEBFEATURE_BUFFER_AUTO): the boot-time auto
+  // probe would measure the form with ZERO scan rows, but `networks`
+  // rows are baked into THIS form's GET response after a user scan —
+  // ~20 APs ≈ +3 KB over the probed tree, which the probe+512 sizing
+  // would silently drop. 6144 = base tree (~3 KB pool) + a realistic
+  // scan result set. (Was 16 KB once — exceeded the C3 max-contiguous
+  // window entirely and produced literal "null" bodies.)
   _feature = web->registerFeature<WiFiSettings>(
       std::move(spec), this,
       WiFiSettings::buildForm, WiFiSettings::update,
@@ -490,6 +529,9 @@ void WiFiSettingsService::reconfigureWiFiConnection() {
   _activeAp = (_state.ssid.length() == 0 && _state.ssid2.length() > 0) ? 1 : 0;
   s_activeAp = _activeAp;
   _apAttempts = 0;
+  // Fresh settings → re-arm the one-shot invalid-credentials log so the
+  // operator gets told again if the new values are still unusable.
+  _invalidCredsLogged = false;
 
 #ifdef ESP32
   WiFi.disconnect(false, true);
@@ -500,17 +542,44 @@ void WiFiSettingsService::reconfigureWiFiConnection() {
 }
 
 void WiFiSettingsService::pickActiveCreds(String& outSsid, String& outPass) {
-  if (_activeAp == 1 && _state.ssid2.length() > 0) {
-    outSsid = _state.ssid2; outPass = _state.password2; return;
+  const bool primaryOk   = staSlotUsable(_state.ssid,  _state.password);
+  const bool secondaryOk = staSlotUsable(_state.ssid2, _state.password2);
+
+  // A configured slot that fails the sanity gate is invisible to the
+  // failover counter (begin() is never called on it, so no disconnect
+  // events fire) — say WHY it's being skipped, once per reconfigure,
+  // or the operator just sees a device that quietly won't connect.
+  if (!_invalidCredsLogged) {
+    if (!primaryOk && _state.ssid.length() > 0) {
+      _invalidCredsLogged = true;
+      log_e("[wifi] primary slot credentials unusable (ssid=%u, pwd=%u chars) — skipping; re-enter via UI",
+            (unsigned)_state.ssid.length(), (unsigned)_state.password.length());
+    }
+    if (!secondaryOk && _state.ssid2.length() > 0) {
+      _invalidCredsLogged = true;
+      log_e("[wifi] secondary slot credentials unusable (ssid=%u, pwd=%u chars) — skipping; re-enter via UI",
+            (unsigned)_state.ssid2.length(), (unsigned)_state.password2.length());
+    }
   }
-  if (_activeAp == 0 && _state.ssid.length() > 0) {
-    outSsid = _state.ssid;  outPass = _state.password;  return;
+
+  // Keep the active slot while it's usable; otherwise fall over to the
+  // other usable one and persist the choice so the rest of the loop
+  // (status display, event handlers) stays consistent. Neither usable →
+  // return empty: manageSTA's empty-SSID gate then skips the cycle and
+  // the radio never sees a value the driver would reject.
+  uint8_t pick;
+  if (_activeAp == 1) pick = secondaryOk ? 1 : (primaryOk ? 0 : 2);
+  else                pick = primaryOk ? 0 : (secondaryOk ? 1 : 2);
+
+  if (pick == 2) {
+    outSsid = String(); outPass = String();
+    return;
   }
-  // Selected slot empty — flip to the other and persist the choice so the
-  // rest of the loop (status display, event handlers) stays consistent.
-  _activeAp = (_activeAp == 0) ? 1 : 0;
-  s_activeAp = _activeAp;
-  if (_activeAp == 1) {
+  if (pick != _activeAp) {
+    _activeAp = pick;
+    s_activeAp = _activeAp;
+  }
+  if (pick == 1) {
     outSsid = _state.ssid2; outPass = _state.password2;
   } else {
     outSsid = _state.ssid;  outPass = _state.password;

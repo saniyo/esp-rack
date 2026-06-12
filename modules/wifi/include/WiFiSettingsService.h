@@ -140,6 +140,11 @@ class WiFiSettingsService : public StatefulService<WiFiSettings> {
   uint8_t _activeAp{0};      // 0 = primary, 1 = secondary
   uint8_t _apAttempts{0};    // consecutive disconnects on the current AP
 
+  // One-shot guard for the "stored credentials unusable" log emitted by
+  // pickActiveCreds — fires once per begin()/reconfigure instead of every
+  // 30 s manageSTA cycle. Re-armed whenever settings change.
+  bool _invalidCredsLogged{false};
+
   // POST update handlers run on the async_tcp task; FS writes (saveIfChanged)
   // and WiFi.disconnect() block that task, delaying the response flush and
   // making the Save button look frozen for hundreds of ms. We defer both

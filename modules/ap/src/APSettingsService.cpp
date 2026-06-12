@@ -3,6 +3,18 @@
 #include <WebFeatureBuilder.h>
 #include <web/Form.h>
 #include <DeviceIdentity.h>
+#include <SecretsVault.h>
+
+// softAP accepts 8..63-char passphrases. Below 8 the driver refuses to
+// start the AP at all; above 63 it silently strlcpy-TRUNCATES into
+// wifi_config.ap.password[64] and broadcasts with a password nobody
+// knows. An ENC: vault record read by a build that can't decrypt it is
+// exactly the second case (68+ chars of ciphertext) — and a dead AP on
+// top of dead STA credentials leaves the device unreachable entirely.
+static bool apPassphraseUsable(const String& pwd) {
+  if (SecretsVault::looksEncrypted(pwd)) return false;
+  return pwd.length() >= 8 && pwd.length() <= 63;
+}
 
 /* ================= Static runtime emitters ================= */
 static uint8_t currentAPStatus(uint8_t provisionMode) {
@@ -83,6 +95,14 @@ StateUpdateResult APSettings::update(JsonObject& root, APSettings& s) {
   JsonUtils::readIP(src, "gateway_ip",  n.gatewayIP,  FACTORY_AP_GATEWAY_IP);
   JsonUtils::readIP(src, "subnet_mask", n.subnetMask, FACTORY_AP_SUBNET_MASK);
 
+  // Empty = open AP (explicit operator choice). A non-empty password
+  // must fit softAP's 8..63 window — outside it the driver either
+  // refuses to start (short) or silently truncates (long), both worse
+  // than rejecting the save here while the old settings still work.
+  if (n.password.length() > 0 && !apPassphraseUsable(n.password)) {
+    return StateUpdateResult::ERROR;
+  }
+
   if (n == s) return StateUpdateResult::UNCHANGED;
   s = n;
   return StateUpdateResult::CHANGED;
@@ -130,10 +150,15 @@ void APSettingsService::registerManifest(WebManager* web) {
       .tab(WebTab("settings", "Settings").rest(AP_FORM_PATH).postable().adminOnly())
       .build();
 
+  // REST buffer auto-sized from the real schema at boot (measured 1.0 KB
+  // serialized live; form is all scalars/bounded literals, no runtime
+  // rows). The buffer doubles as the heap guard threshold, so the old
+  // hand-guessed 4096 made this form 503 under C3 heap pressure it never
+  // actually needed.
   _feature = web->registerFeature<APSettings>(
       std::move(spec), this,
       APSettings::buildForm, APSettings::update,
-      4096);
+      WEBFEATURE_BUFFER_AUTO);
 }
 
 void APSettingsService::begin() {
@@ -189,7 +214,27 @@ void APSettingsService::manageAP() {
 void APSettingsService::startAP() {
   log_d("Starting software access point");
   WiFi.softAPConfig(_state.localIP, _state.gatewayIP, _state.subnetMask);
-  WiFi.softAP(_state.ssid.c_str(), _state.password.c_str(), _state.channel, _state.ssidHidden, _state.maxClients);
+
+  // The AP is the rescue path for a device whose STA credentials are
+  // broken, so it must come up even when the stored password is unusable
+  // (ENC: residue, out-of-range length from an older build). Empty stays
+  // empty — that's the operator's explicit "open AP" choice — but an
+  // unusable non-empty value falls back to the factory default, and if a
+  // consumer build misdefines even that, the AP runs open rather than
+  // not at all. RAM-only: the stored setting is left as-is.
+  String pass = _state.password;
+  if (pass.length() > 0 && !apPassphraseUsable(pass)) {
+    String fallback = FACTORY_AP_PASSWORD;
+    if (apPassphraseUsable(fallback)) {
+      log_e("[ap] stored AP password unusable (%u chars) — using factory default; re-enter via UI",
+            (unsigned)_state.password.length());
+      pass = fallback;
+    } else {
+      log_e("[ap] stored AND factory AP passwords unusable — starting OPEN provisioning AP");
+      pass = "";
+    }
+  }
+  WiFi.softAP(_state.ssid.c_str(), pass.c_str(), _state.channel, _state.ssidHidden, _state.maxClients);
   if (!_dnsServer) {
     IPAddress apIp = WiFi.softAPIP();
     log_i("[ap] starting captive portal on %s", apIp.toString().c_str());

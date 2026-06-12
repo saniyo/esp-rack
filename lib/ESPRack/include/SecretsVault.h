@@ -48,12 +48,40 @@
 
 namespace SecretsVault {
 
-#if FT_ENABLED(FT_SECRETS_VAULT)
-
+// Record-shape constants live OUTSIDE the feature guard: looksEncrypted()
+// must recognise vault records even in builds where the vault itself is
+// compiled out (see the disabled-mode stubs below).
 static constexpr size_t kSvIvBytes  = 16;
-static constexpr size_t kSvKeyBytes = 16;  // AES-128
 static constexpr const char* kSvPrefix = "ENC:";
 static constexpr size_t kSvPrefixLen  = 4;
+
+// Shape-only test: does this string LOOK like a vault record — "ENC:" +
+// hex IV + N×16-byte hex blocks? No key material involved, so it works
+// identically whether the vault is compiled in or out. Stricter than
+// isEncrypted(): the entire tail must be hex with block-aligned length,
+// which legitimate user-entered credentials can't collide with. Used by
+// the ConfigManager load path (and the disabled-mode decrypt stub) to
+// detect residue written by a vault-enabled build so the literal
+// ciphertext is never handed to a service as a live credential.
+inline bool looksEncrypted(const String& s) {
+  // Minimum record: prefix + IV (32 hex) + one cipher block (32 hex).
+  if (s.length() < kSvPrefixLen + (kSvIvBytes * 2) + 32) return false;
+  if (strncmp(s.c_str(), kSvPrefix, kSvPrefixLen) != 0) return false;
+  const size_t hexLen = s.length() - kSvPrefixLen;
+  if ((hexLen % 32) != 0) return false;  // IV + blocks are each 32 hex chars
+  const char* p = s.c_str() + kSvPrefixLen;
+  for (size_t i = 0; i < hexLen; ++i) {
+    const char c = p[i];
+    const bool hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+                     (c >= 'A' && c <= 'F');
+    if (!hex) return false;
+  }
+  return true;
+}
+
+#if FT_ENABLED(FT_SECRETS_VAULT)
+
+static constexpr size_t kSvKeyBytes = 16;  // AES-128
 static constexpr const char* kSvKdfDomain = "ESP-SES-secrets-v1";
 
 namespace detail {
@@ -281,6 +309,20 @@ inline String decrypt(const String& maybe) {
   }
 
   size_t plainLen = cipherLen - pad;
+
+  // Wrong-key decrypts slip past the PKCS7 check ~0.4% of the time (the
+  // random final byte happens to be 0x01). Every secret this vault holds
+  // is text — passwords, tokens, PEM blocks (those add \n / \r / \t) —
+  // so any other control byte in the output means key-mismatch garbage:
+  // report "decrypt failed" instead of handing binary noise to a service.
+  for (size_t i = 0; i < plainLen; ++i) {
+    const uint8_t c = out[i];
+    if (c < 0x20 && c != '\n' && c != '\r' && c != '\t') {
+      free(out);
+      return String();
+    }
+  }
+
   String result;
   result.reserve(plainLen);
   for (size_t i = 0; i < plainLen; ++i) result += (char)out[i];
@@ -291,15 +333,28 @@ inline String decrypt(const String& maybe) {
 #else  // !FT_ENABLED(FT_SECRETS_VAULT)
 
 // ---- Disabled-mode stubs ------------------------------------------------
-// No mbedtls / esp_mac symbols pulled in; encrypt and decrypt are pure
-// pass-through. Existing ENC:<hex> records on disk pass through to the
-// caller as-is — services treat the literal "ENC:..." string as the
-// password, which is wrong on purpose: it forces the operator to notice
-// the broken credential and re-enter it after disabling encryption.
+// No mbedtls / esp_mac symbols pulled in; encrypt is pure pass-through.
+// decrypt() passes plaintext through but CLEARS anything shaped like an
+// ENC:<hex> record left by a vault-enabled build. The literal blob must
+// never reach a service as a live credential: it is 68+ chars of
+// ciphertext, which the WiFi driver rejects with an endless
+// "passphrase too long!" connect loop (STA) or silently truncates to a
+// password nobody knows (softAP) — either way the device strands itself.
+// An empty value instead reads as "credential unset": STA skips the
+// slot, the provisioning AP falls back to its factory password, and the
+// operator re-enters credentials once via the UI.
 inline bool   keyAvailable()                  { return false; }
 inline bool   isEncrypted(const String&)      { return false; }
 inline String encrypt(const String& plain)    { return plain; }
-inline String decrypt(const String& maybe)    { return maybe; }
+inline String decrypt(const String& maybe) {
+  if (!looksEncrypted(maybe)) return maybe;
+  static bool warned = false;
+  if (!warned) {
+    warned = true;
+    log_w("[secrets] vault compiled out but ENC: record found — value cleared; re-enter credential via UI");
+  }
+  return String();
+}
 
 #endif  // FT_ENABLED(FT_SECRETS_VAULT)
 

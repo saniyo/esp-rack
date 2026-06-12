@@ -480,17 +480,34 @@ bool ConfigManager::decryptSecretsInPlace(JsonObject root, const std::vector<Str
     // decrypt() returns "" on hard failure (corrupted ciphertext / key
     // mismatch from device swap). Surface that as an empty value to
     // the service: WiFi will fail to connect, MQTT will refuse auth,
-    // operator notices and retypes the credential.
+    // operator notices and retypes the credential. The ENC: record on
+    // disk stays untouched (cleared in RAM only) so flashing the
+    // firmware that owns the key back onto this flash still recovers
+    // the original secret.
+    if (dec.isEmpty()) {
+      log_w("[CFG] secret '%s' failed to decrypt (foreign device key or corrupt record) — cleared; re-enter via UI",
+            k.c_str());
+    }
     root[k] = dec;
   }
   return foundPlaintext;
 #else
-  // Encryption compiled out — every value loaded from disk is treated
-  // as plaintext. ENC:<hex> records left over from a previous encrypted
-  // build will pass through unchanged to the service (which will see
-  // the literal ciphertext as the password and fail). Operator must
-  // re-enter credentials after toggling the feature off.
-  (void)root; (void)keys;
+  // Encryption compiled out — values load as plaintext, with ONE
+  // exception: ENC:<hex> residue written by a vault-enabled build. The
+  // literal blob must never reach a service as a live credential — the
+  // WiFi driver rejects >64-char passphrases in an endless connect loop
+  // and softAP silently truncates to a password nobody knows, either of
+  // which strands the device. Clear it in RAM only: the record stays on
+  // disk so a vault-enabled firmware flashed back later still recovers
+  // the secret. Operator re-enters credentials to use this build.
+  for (const String& k : keys) {
+    if (k.isEmpty() || !root.containsKey(k)) continue;
+    String v = root[k].as<String>();
+    if (SecretsVault::looksEncrypted(v)) {
+      log_w("[CFG] secret '%s' is vault-encrypted but FT_SECRETS_VAULT=0 — cleared; re-enter via UI", k.c_str());
+      root[k] = "";
+    }
+  }
   return false;
 #endif
 }

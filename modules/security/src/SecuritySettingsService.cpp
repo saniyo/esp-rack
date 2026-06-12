@@ -37,6 +37,13 @@ StateUpdateResult SecuritySettings::update(JsonObject& root, SecuritySettings& s
     if (!s.isEmpty() && s != settings.jwtSecret) {
       settings.jwtSecret = s;
       changed = true;
+    } else if (s.isEmpty() && settings.jwtSecret.isEmpty()) {
+      // Key present but empty AND no secret in memory — the load path
+      // cleared an undecryptable ENC: record (foreign device key or
+      // vault compiled out). Never sign JWTs with "" — seed a fresh
+      // random secret; sessions re-authenticate once.
+      settings.jwtSecret = SettingValue::format(FACTORY_JWT_SECRET);
+      changed = true;
     }
   } else if (settings.jwtSecret.isEmpty()) {
     // Cold boot, no file, no payload → seed a random secret.
@@ -157,6 +164,11 @@ void SecuritySettingsService::registerManifest(WebManager* web) {
     spec.auth          = WebAuthLevel::Authenticated;
     spec.restRead      = SECURITY_SETTINGS_PATH;
     spec.restUpdate    = SECURITY_SETTINGS_PATH;
+    // Stays EXPLICIT 2048 (not WEBFEATURE_BUFFER_AUTO): the boot probe
+    // would only measure the users[] present in the config file, but the
+    // operator ADDS users at runtime (~160 B of JSON each) and AUTO+512
+    // would silently drop the new rows from the response. 2048 covers
+    // the measured 343 B base + ~10 users.
     _fullFeature = web->registerFeature<SecuritySettings>(
         std::move(spec), this,
         SecuritySettings::read, SecuritySettings::update,
@@ -177,10 +189,12 @@ void SecuritySettingsService::registerManifest(WebManager* web) {
     spec.auth          = WebAuthLevel::Admin;
     spec.restRead      = SECURITY_JWT_FORM_PATH;
     spec.restUpdate    = SECURITY_JWT_FORM_PATH;
+    // Auto-sized: single Secret field + one static message, no runtime
+    // growth — the probe lands well under the old hand-guessed 1024.
     _jwtFeature = web->registerFeature<SecuritySettings>(
         std::move(spec), this,
         SecuritySettings::buildJwtForm, SecuritySettings::update,
-        1024);
+        WEBFEATURE_BUFFER_AUTO);
   }
 
   // Wire the JWT form as a tab under the compound `system` feature.
