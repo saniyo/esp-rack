@@ -3,7 +3,7 @@
 #define ESPRACK_VERSION_H
 
 // Library version for esp-rack itself. Bumped manually with each release
-// — semver semantics (MAJOR.MINOR.PATCH). Surfaced in /rest/uiManifest
+// — semver semantics (MAJOR.MINOR.PATCH). Surfaced in /api/v1/ui/manifest
 // under device.frameworkVersion so the frontend (and AutoUpdater audits)
 // can tell which framework rev is running independently of the
 // consumer-app version that lives in Builder("AppName", "v1.2.3").

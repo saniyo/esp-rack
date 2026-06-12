@@ -14,7 +14,7 @@
 //     without ever transmitting the key — and checks manifest-schema
 //     compatibility (so same-project AND cross-project devices we can render
 //     are recognised). The verified, bounded peer list is cached.
-//   * Serve: GET /rest/peers returns {self, peers[]} for the Devices page.
+//   * Serve: GET /api/v1/mesh/peers returns {self, peers[]} for the Devices page.
 //
 // The cache is read on the AsyncWebServer thread and written on the discovery
 // task → guarded by a mutex held only for the quick swap/serialise (never
@@ -37,7 +37,7 @@ class MeshService {
  public:
   MeshService() = default;
 
-  // Registers the Devices page (component "Devices") + the /rest/peers
+  // Registers the Devices page (component "Devices") + the /api/v1/mesh/peers
   // endpoint on the manifest. Called during onInstall.
   void registerManifest(WebManager* web);
 

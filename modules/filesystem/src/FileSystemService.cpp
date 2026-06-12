@@ -70,7 +70,7 @@ FileSystemService::FileSystemService(AsyncWebServer* server,
   // directly to AsyncWebServer; the manifest's WebPageSpec still
   // lists it (without an internalHandler — caller surfaces 501
   // through proxyDispatch, which is honest: the operator should
-  // hit the local /rest/fs/upload endpoint with a real HTTP client
+  // hit the local /api/v1/fs/upload endpoint with a real HTTP client
   // for multipart, not try to wrap it in an action JSON envelope).
   _server->on(FS_UPLOAD_PATH, HTTP_POST,
               std::bind(&FileSystemService::handleUploadDone, this, _1),
@@ -884,7 +884,7 @@ cleanup:
   vTaskDelete(nullptr);
 }
 
-// POST /rest/fs/archive/prepare  body: {"path": "/flash/foo"}
+// POST /api/v1/fs/archive/prepare  body: {"path": "/flash/foo"}
 void FileSystemService::handleArchivePrepare(AsyncWebServerRequest* request, JsonVariant& json) {
   using S = ArchiveJob::State;
 
@@ -947,7 +947,7 @@ void FileSystemService::handleArchivePrepare(AsyncWebServerRequest* request, Jso
   sendJson(request, 202, doc);
 }
 
-// GET /rest/fs/archive/status
+// GET /api/v1/fs/archive/status
 void FileSystemService::handleArchiveStatus(AsyncWebServerRequest* request) {
   DynamicJsonDocument doc(192);
   doc["state"] = archiveStateString(_archive.state);
@@ -960,7 +960,7 @@ void FileSystemService::handleArchiveStatus(AsyncWebServerRequest* request) {
   sendJson(request, 200, doc);
 }
 
-// GET /rest/fs/archive/download — streams the prepared TAR
+// GET /api/v1/fs/archive/download — streams the prepared TAR
 void FileSystemService::handleArchiveDownload(AsyncWebServerRequest* request) {
   using S = ArchiveJob::State;
   if (_archive.state != S::Ready) { sendError(request, 409, "archive_not_ready"); return; }
@@ -995,7 +995,7 @@ void FileSystemService::handleArchiveDownload(AsyncWebServerRequest* request) {
   request->send(response);
 }
 
-// POST /rest/fs/archive/cancel
+// POST /api/v1/fs/archive/cancel
 void FileSystemService::handleArchiveCancel(AsyncWebServerRequest* request, JsonVariant& /*json*/) {
   using S = ArchiveJob::State;
   if (_archive.state == S::Walking) {
@@ -1096,7 +1096,7 @@ static void hashTask(void* arg) {
   vTaskDelete(nullptr);
 }
 
-// POST /rest/fs/hash/start  body: {"path": "/sd/music/01.flac"}
+// POST /api/v1/fs/hash/start  body: {"path": "/sd/music/01.flac"}
 void FileSystemService::handleHashStart(AsyncWebServerRequest* request, JsonVariant& json) {
   using S = HashJob::State;
   if (_hash.state == S::Running) { sendError(request, 409, "hash_busy"); return; }
@@ -1142,7 +1142,7 @@ void FileSystemService::handleHashStart(AsyncWebServerRequest* request, JsonVari
   sendJson(request, 202, doc);
 }
 
-// GET /rest/fs/hash/status
+// GET /api/v1/fs/hash/status
 void FileSystemService::handleHashStatus(AsyncWebServerRequest* request) {
   DynamicJsonDocument doc(384);
   doc["state"] = hashStateString(_hash.state);
@@ -1165,7 +1165,7 @@ void FileSystemService::handleHashStatus(AsyncWebServerRequest* request) {
   sendJson(request, 200, doc);
 }
 
-// POST /rest/fs/hash/cancel
+// POST /api/v1/fs/hash/cancel
 void FileSystemService::handleHashCancel(AsyncWebServerRequest* request, JsonVariant& /*json*/) {
   if (_hash.state == HashJob::State::Running) {
     _hash.cancelRequested = true;

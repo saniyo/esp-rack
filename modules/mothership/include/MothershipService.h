@@ -29,9 +29,8 @@
 #include <freertos/task.h>
 #include <deque>
 
-#define MOTHERSHIP_FILE      "/config/mothership.json"
-#define MOTHERSHIP_FORM_PATH "/rest/mothership"
-#define MOTHERSHIP_WS_PATH   "/ws/mothership"
+#define MOTHERSHIP_FILE    "/config/mothership.json"
+#define MOTHERSHIP_WS_PATH "/ws/mothership"
 
 // Build-time defaults — operator overrides via UI at runtime. Two
 // named profiles get seeded on first boot ("Home" pointing at

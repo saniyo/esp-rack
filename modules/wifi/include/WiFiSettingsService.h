@@ -32,12 +32,11 @@
 // so firmware updates keep working without re-entering Wi-Fi credentials.
 #define WIFI_SETTINGS_FILE "/config/wifiSettings.json"
 
-// Unified REST form — one endpoint returns {status,scan,settings} envelope;
-// each DynamicFeature tab extracts its own section via tab.key.
-#define WIFI_FORM_PATH "/rest/wifiForm"
-
-// Scan trigger action — user-pressed only, never auto-kicks.
-#define WIFI_SCAN_KICK_PATH "/rest/wifiScan"
+// REST/scan paths are no longer authored here (C1, api-v1): the registry
+// derives the typed-feature form/state endpoints from the feature id
+// (/api/v1/wifi/form, /api/v1/wifi/state) and the scan action mounts at the
+// derived /api/v1/actions/wifi.scan. The old WIFI_FORM_PATH / WIFI_SCAN_KICK_PATH
+// #defines are gone.
 
 #define WIFI_RECONNECTION_DELAY (30UL * 1000UL)
 
@@ -93,7 +92,10 @@ class WiFiSettings {
     JsonUtils::writeIP(root, "dns_ip_2", s.dnsIP2);
   }
 
-  // --- REST form (Status tab + Scan tab + Settings tab) ---
+  // --- Form builder (Status tab + Scan tab + Settings tab) ---
+  // Served at /api/v1/wifi/form (GET). Registered as the formReader in
+  // registerFeature<WiFiSettings>; registry derives the path from the
+  // feature id (C1, api-v1).
   static void buildForm(WiFiSettings& s, JsonObject& root);
 
   // --- Unified POST handler — accepts either the raw settings dict or
@@ -105,7 +107,7 @@ class WiFiSettingsService : public StatefulService<WiFiSettings> {
  public:
   explicit WiFiSettingsService(ConfigManager* cfgMgr);
 
-  // Declares the feature in /rest/uiManifest and mounts the form + scan action.
+  // Declares the feature in the UI manifest and mounts the form + scan action.
   void registerManifest(WebManager* web);
 
   void begin();

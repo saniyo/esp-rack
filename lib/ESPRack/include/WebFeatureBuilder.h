@@ -139,6 +139,8 @@ class WebAction {
 
   WebAction& icon(const char* i)    { _a.icon = i; return *this; }
   WebAction& color(const char* c)   { _a.color = c; return *this; }
+  // DEPRECATED (C1): the action path is always derived as
+  // /api/v1/actions/<id>; restPath is ignored. Kept for compile-compat.
   WebAction& rest(const char* path) { _a.restPath = path; return *this; }
   WebAction& method(const char* m)  { _a.method = m; return *this; }
   WebAction& confirm(const char* text) { _a.confirm = text; return *this; }
@@ -189,6 +191,11 @@ class WebFeature {
   WebFeature& authenticated()      { _spec.auth = WebAuthLevel::Authenticated; return *this; }
   WebFeature& adminOnly()          { _spec.auth = WebAuthLevel::Admin; return *this; }
 
+  // DEPRECATED (C1): WebFeatureEntry now DERIVES typed-feature paths from the
+  // id (/api/v1/<id>/form, /api/v1/<id>/state) and ignores restRead/restUpdate.
+  // These setters remain so existing builder chains compile, but the paths
+  // they set are no longer mounted. Drop the .rest()/.readOnly() calls from
+  // feature builders over time.
   // GET + POST share one path (the common FormBuilder case).
   WebFeature& rest(const char* path) {
     _spec.restRead = path;

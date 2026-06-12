@@ -22,7 +22,7 @@
 #include <WebActionEntry.h>
 #include <WebInfoEntry.h>
 
-#define UI_MANIFEST_PATH "/rest/uiManifest"
+#define UI_MANIFEST_PATH "/api/v1/ui/manifest"
 // Manifest assembly streams JSON on the fly via ManifestBuilder (a
 // stateful section-by-section generator owned as a WebManager member
 // in BSS). One builder serves one request at a time, gated by a
@@ -30,7 +30,7 @@
 // Zero per-request heap allocation; no allocator can throw bad_alloc.
 class WebManager;
 
-// Section-by-section JSON builder for /rest/uiManifest. Lives as a
+// Section-by-section JSON builder for /api/v1/ui/manifest. Lives as a
 // WebManager member (BSS), not a per-request heap allocation. Reset
 // at the start of each manifest fetch via reset(mgr, authed); the
 // AwsResponseFiller in WebManager::serveManifest drives fillNext()
@@ -77,8 +77,8 @@ class ManifestBuilder {
   // with action_results metadata, cert-manager with actions + tabs,
   // system shell with three contributed tabs) serialize to >1 KB.
   // Trying 1 KB silently truncated those entries' JSON mid-key,
-  // produced malformed manifest, and the SPA fell back to legacy
-  // /rest/features (rendered only "Security"). 2 KB matches empirical
+  // produced malformed manifest, and the SPA fell back to the legacy
+  // features list (rendered only "Security"). 2 KB matches empirical
   // worst case + headroom.
   char _itemBuf[2048];
 
@@ -100,7 +100,7 @@ class WebManager {
              const char* deviceName,
              const char* deviceVersion);
 
-  // Mount /rest/uiManifest and call registerEndpoints() on every registered entry.
+  // Mount the UI manifest endpoint and call registerEndpoints() on every registered entry.
   // Call once from ESPReact::begin() AFTER all services have registered.
   void begin();
 
@@ -199,7 +199,7 @@ class WebManager {
 
   // Module-version registry. App.begin() iterates installed modules,
   // calls describe() on each, and pushes (id, version) pairs here so
-  // /rest/uiManifest.modules[] surfaces the wrapper rev independent
+  // manifest.modules[] surfaces the wrapper rev independent
   // of any per-feature WebFeatureSpec.version. Pointers are NOT
   // copied — caller must guarantee stable lifetime (typical: string
   // literals embedded in module source, or the descriptor's id/version
@@ -288,7 +288,7 @@ class WebManager {
       out_status = 400;
       return false;
     }
-    // Special case: /rest/uiManifest. The browser-facing handler
+    // Special case: the UI manifest path. The browser-facing handler
     // streams the body via AsyncResponseStream to keep heap flat,
     // but rest.proxy expects a JsonObject. We rebuild the manifest
     // in-memory here — it costs a few KB of transient heap (caller
@@ -351,7 +351,7 @@ class WebManager {
   // (a) the mothership rest.proxy path which has already cleared the
   // mTLS gate on /api/v1/checkin, or (b) the device's MothershipService
   // computing a CRC of its own manifest to send as manifest_rev.
-  // Local-browser /rest/uiManifest still goes through serveManifest
+  // Local-browser UI manifest fetch still goes through serveManifest
   // (which honors JWT auth).
   void buildManifestObject(JsonObject root);
 
@@ -372,7 +372,7 @@ class WebManager {
   // rebuild + rewrite + update sig. Match → return without touching
   // flash.
   //
-  // /rest/uiManifest then streams the appropriate file via
+  // The manifest endpoint then streams the appropriate file via
   // AsyncFileResponse — zero per-request heap, immune to the
   // bad_alloc / std::terminate cascade we hit when ManifestBuilder
   // fires under heap pressure. Called from begin() right after
@@ -429,14 +429,14 @@ class WebManager {
 
   // Content signature of the current manifest (computeManifestSig),
   // cached at boot by writeManifestCacheToFs(). Doubles as the ETag base
-  // for /rest/uiManifest conditional GETs — it changes only when the
+  // for UI-manifest conditional GETs — it changes only when the
   // manifest content changes (a firmware update), so the browser can
   // revalidate with a cheap 304 instead of re-streaming the ~15 KB body
   // on every page load. 0 = not yet computed → ETag path skipped.
   uint32_t _manifestSig{0};
 
   // Singleton manifest builder — BSS-resident, NOT allocated per
-  // request. Mutex guards concurrent /rest/uiManifest fetches; a
+  // request. Mutex guards concurrent UI-manifest fetches; a
   // request that arrives while another is still streaming gets 503.
   // For our typical IoT workload (one operator at a time) the mutex
   // is essentially never contended; if a browser parallel-fetches

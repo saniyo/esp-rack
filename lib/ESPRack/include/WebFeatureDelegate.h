@@ -35,7 +35,11 @@ class WebFeatureEntry : public IWebFeatureEntry {
         _wsUpdater(wsUpdater),
         _wsManager(wsManager),
         _restBufferSize(restBufferSize),
-        _wsBufferSize(wsBufferSize) {}
+        _wsBufferSize(wsBufferSize),
+        // This ctor took a SEPARATE ws/flat reader: it backs the machine
+        // /state GET (C1). std::function isn't comparable, so we record the
+        // distinction with a flag instead of comparing _wsReader==_restReader.
+        _hasDistinctStateReader(true) {}
 
   WebFeatureEntry(WebFeatureSpec spec,
                   StatefulService<T>* service,
@@ -43,7 +47,12 @@ class WebFeatureEntry : public IWebFeatureEntry {
                   JsonStateUpdater<T> updater,
                   WsManager* wsManager,
                   size_t bufferSize = DEFAULT_BUFFER_SIZE)
-      : WebFeatureEntry(std::move(spec), service, reader, updater, reader, updater, wsManager, bufferSize, bufferSize) {}
+      : WebFeatureEntry(std::move(spec), service, reader, updater, reader, updater, wsManager, bufferSize, bufferSize) {
+    // Single reader serves both faces: the /state GET falls back to the form
+    // reader (interim — documented until the module gains a distinct flat
+    // reader). Undo the true the delegating ctor set above.
+    _hasDistinctStateReader = false;
+  }
 
   const char* id() const override { return _spec.id ? _spec.id : ""; }
   Kind kind() const override { return Kind::Feature; }
@@ -53,25 +62,40 @@ class WebFeatureEntry : public IWebFeatureEntry {
 
     // Auto-size the REST buffer from the real schema tree if the feature
     // opted in (WEBFEATURE_BUFFER_AUTO). Once, here at boot (heap fresh) —
-    // never per request.
+    // never per request. The probe always reads the FORM tree; the state
+    // endpoint inherits the same buffer size (C1).
     if (_restBufferSize == WEBFEATURE_BUFFER_AUTO) {
       _restBufferSize = measureRestBuffer();
     }
 
+    // Derive the C1 mount paths from the feature id — modules no longer set
+    // restRead/restUpdate (those fields are now ignored, see WebFeatureSpec).
+    //   form  GET      -> /api/v1/<id>/form   (Form-DSL envelope, UI face)
+    //   state GET+POST -> /api/v1/<id>/state  (flat machine values)
+    // Stored as members so the HttpEndpoint ctors (const String&) reference
+    // stable storage for the entry's lifetime.
+    derivePaths();
+
     auto predicate = webAuthLevelToPredicate(_spec.auth);
 
-    if (_spec.restRead && _spec.restUpdate && std::strcmp(_spec.restRead, _spec.restUpdate) == 0) {
-      _endpoint.reset(new HttpEndpoint<T>(_restReader, _restUpdater, _service, server,
-                                          _spec.restRead, sm, predicate, _restBufferSize));
-    } else {
-      if (_spec.restRead) {
-        _getEndpoint.reset(new HttpGetEndpoint<T>(_restReader, _service, server,
-                                                  _spec.restRead, sm, predicate, _restBufferSize));
-      }
-      if (_spec.restUpdate) {
-        _postEndpoint.reset(new HttpPostEndpoint<T>(_restReader, _restUpdater, _service, server,
-                                                    _spec.restUpdate, sm, predicate, _restBufferSize));
-      }
+    if (!_formPath.isEmpty()) {
+      // FORM face — GET only, served by the form reader (the restReader the
+      // module passed today). The UI saves through the state POST below, so
+      // the form endpoint never needs an updater.
+      _getEndpoint.reset(new HttpGetEndpoint<T>(_restReader, _service, server,
+                                                _formPath, sm, predicate, _restBufferSize));
+    }
+
+    if (!_statePath.isEmpty()) {
+      // STATE face — GET+POST. GET uses the DISTINCT flat reader when the
+      // feature was registered with a separate ws/flat reader; otherwise it
+      // falls back to the form reader (interim, until the module grows one).
+      // POST uses the existing updater (already consumes flat dicts and
+      // {settings:{...}} envelopes).
+      const JsonStateReader<T>& stateReader =
+          _hasDistinctStateReader ? _wsReader : _restReader;
+      _endpoint.reset(new HttpEndpoint<T>(stateReader, _restUpdater, _service, server,
+                                          _statePath, sm, predicate, _restBufferSize));
     }
 
     // Heap-allocate the Binding so its address never changes. Its ctor registers
@@ -117,10 +141,22 @@ class WebFeatureEntry : public IWebFeatureEntry {
       if (_spec.menu.role) menu["role"] = true;
     }
 
-    if (_spec.restRead || _spec.restUpdate) {
+    // C1: paths are DERIVED from the id, not read from spec.restRead/Update.
+    // rest.read   = form path  (UI face)
+    // rest.update = state path (machine POST target)
+    // rest.state  = state path (NEW — machine GET/POST of flat values)
+    // toJson can run before registerEndpoints (manifest pre-bake at boot),
+    // so derive on demand into locals rather than relying on _formPath being
+    // populated yet.
+    if (_spec.id && *_spec.id) {
+      char formBuf[112];
+      char stateBuf[112];
+      snprintf(formBuf, sizeof(formBuf), "%s/%s/form", API_V1_PREFIX, _spec.id);
+      snprintf(stateBuf, sizeof(stateBuf), "%s/%s/state", API_V1_PREFIX, _spec.id);
       JsonObject rest = obj.createNestedObject("rest");
-      if (_spec.restRead) rest["read"] = _spec.restRead;
-      if (_spec.restUpdate) rest["update"] = _spec.restUpdate;
+      rest["read"]   = formBuf;
+      rest["update"] = stateBuf;
+      rest["state"]  = stateBuf;
     }
     if (_spec.wsPath) obj["ws"] = _spec.wsPath;
 
@@ -130,7 +166,15 @@ class WebFeatureEntry : public IWebFeatureEntry {
       if (t.key) jt["key"] = t.key;
       if (t.title) jt["title"] = t.title;
       if (t.icon) jt["icon"] = t.icon;
-      if (t.restPath) jt["restPath"] = t.restPath;
+      // A tab with no explicit restPath addresses this feature's own form
+      // (C1): emit the derived form path so modules drop redundant tab paths.
+      if (t.restPath) {
+        jt["restPath"] = t.restPath;
+      } else if (_spec.id && *_spec.id) {
+        char formBuf[112];
+        snprintf(formBuf, sizeof(formBuf), "%s/%s/form", API_V1_PREFIX, _spec.id);
+        jt["restPath"] = formBuf;
+      }
       jt["postable"] = t.postable;
       jt["live"] = t.live;
       jt["auth"] = webAuthLevelToStr(t.auth);
@@ -143,7 +187,12 @@ class WebFeatureEntry : public IWebFeatureEntry {
       if (a.title) ja["title"] = a.title;
       if (a.icon) ja["icon"] = a.icon;
       if (a.color) ja["color"] = a.color;
-      if (a.restPath) ja["restPath"] = a.restPath;
+      // C1: emit the DERIVED action path, never spec.restPath.
+      if (a.id) {
+        char actBuf[112];
+        fillActionPath(actBuf, sizeof(actBuf), a.id);
+        ja["restPath"] = actBuf;
+      }
       if (a.method) ja["method"] = a.method;
       ja["auth"] = webAuthLevelToStr(a.auth);
       if (a.confirm) ja["confirm"] = a.confirm;
@@ -156,43 +205,49 @@ class WebFeatureEntry : public IWebFeatureEntry {
     if (_wsBinding) _wsBinding->broadcastCurrentState(origin);
   }
 
-  // Phase 2 — in-process rest.proxy entry point. Matches the
-  // request's (method, path) pair against this feature's
-  // restRead / restUpdate. On match: GET re-uses _restReader to
-  // emit the form JSON; POST runs _restUpdater under the service's
-  // transaction guard and then re-reads to surface the new state
-  // back to the caller. Auth bypassed — caller is mothership-action
-  // which already cleared the mTLS check-in gate.
+  // Phase 2 — in-process rest.proxy entry point. Matches the request's
+  // (method, path) pair against this feature's DERIVED C1 paths:
+  //   GET  /api/v1/<id>/form   -> form reader (UI envelope)
+  //   GET  /api/v1/<id>/state  -> flat state reader (machine values)
+  //   POST /api/v1/<id>/state  -> updater, then echo via the state reader
+  // Auth bypassed — caller is mothership-action which already cleared the
+  // mTLS check-in gate.
   bool proxyDispatch(const char* method,
                       const char* path,
                       JsonVariant body,
                       int& out_status,
                       JsonVariant out_body) override {
-    if (!path || !_service) return false;
+    if (!path || !_service || !_spec.id || !*_spec.id) return false;
+
+    char formBuf[112];
+    char stateBuf[112];
+    snprintf(formBuf, sizeof(formBuf), "%s/%s/form", API_V1_PREFIX, _spec.id);
+    snprintf(stateBuf, sizeof(stateBuf), "%s/%s/state", API_V1_PREFIX, _spec.id);
 
     const bool is_get  = method && strcmp(method, "GET") == 0;
     const bool is_post = method && (strcmp(method, "POST") == 0
                                       || strcmp(method, "PUT") == 0);
 
-    // Match against the feature's primary read/update endpoints.
-    const bool match_read   = _spec.restRead
-                              && strcmp(_spec.restRead, path) == 0;
-    const bool match_update = _spec.restUpdate
-                              && strcmp(_spec.restUpdate, path) == 0;
+    const bool match_form  = strcmp(formBuf, path) == 0;
+    const bool match_state = strcmp(stateBuf, path) == 0;
 
-    if (!match_read && !match_update) return false;
+    if (!match_form && !match_state) return false;
 
-    // GET path — read state into out_body.
+    // The flat machine reader backs /state; the form reader backs /form.
+    const JsonStateReader<T>& stateReader =
+        _hasDistinctStateReader ? _wsReader : _restReader;
+
+    // GET path — read into out_body with the face-appropriate reader.
     if (is_get) {
       out_status = 200;
       JsonObject root = out_body.to<JsonObject>();
-      _service->read(root, _restReader);
+      _service->read(root, match_form ? _restReader : stateReader);
       return true;
     }
 
-    // POST / PUT path — drive an update through the service's
-    // transactional API, then surface the resulting state.
-    if (is_post && match_update) {
+    // POST / PUT path — only /state accepts writes. Drive an update through
+    // the service's transactional API, then surface the resulting state.
+    if (is_post && match_state) {
       JsonObject in_obj = body.as<JsonObject>();
       StateUpdateResult outcome =
           _service->update(in_obj, _restUpdater, "rest.proxy");
@@ -204,11 +259,11 @@ class WebFeatureEntry : public IWebFeatureEntry {
       }
       out_status = 200;
       JsonObject root = out_body.to<JsonObject>();
-      _service->read(root, _restReader);
+      _service->read(root, stateReader);
       return true;
     }
 
-    // Method/path combo didn't match a known pair — return 405 so
+    // Method/path combo didn't match a known pair — return 405 so the
     // operator's UI surfaces something better than a generic 404.
     out_status = 405;
     JsonObject err = out_body.to<JsonObject>();
@@ -260,6 +315,15 @@ class WebFeatureEntry : public IWebFeatureEntry {
     return sized;
   }
 
+  // Compose the C1 form/state paths from the feature id into the String
+  // members the HttpEndpoint ctors reference. No id -> both stay empty and
+  // nothing mounts (a malconfigured feature simply contributes no routes).
+  void derivePaths() {
+    if (!_spec.id || !*_spec.id) return;
+    _formPath  = String(API_V1_PREFIX) + "/" + _spec.id + "/form";
+    _statePath = String(API_V1_PREFIX) + "/" + _spec.id + "/state";
+  }
+
   WebFeatureSpec _spec;
   StatefulService<T>* _service{nullptr};
   JsonStateReader<T> _restReader;
@@ -269,10 +333,19 @@ class WebFeatureEntry : public IWebFeatureEntry {
   WsManager* _wsManager{nullptr};
   size_t _restBufferSize{DEFAULT_BUFFER_SIZE};
   size_t _wsBufferSize{DEFAULT_BUFFER_SIZE};
+  // True when the feature was registered with a SEPARATE ws/flat reader —
+  // that reader backs the machine /state GET. False = single reader, /state
+  // falls back to the form reader (interim). std::function isn't comparable,
+  // so this is set by the ctors rather than derived at use sites.
+  bool _hasDistinctStateReader{false};
 
-  std::unique_ptr<HttpEndpoint<T>> _endpoint;
-  std::unique_ptr<HttpGetEndpoint<T>> _getEndpoint;
-  std::unique_ptr<HttpPostEndpoint<T>> _postEndpoint;
+  // Derived C1 mount paths, populated in registerEndpoints (derivePaths).
+  // Stored so the HttpEndpoint ctors' const String& outlives the call.
+  String _formPath;
+  String _statePath;
+
+  std::unique_ptr<HttpEndpoint<T>> _endpoint;    // state GET+POST
+  std::unique_ptr<HttpGetEndpoint<T>> _getEndpoint;  // form GET
   std::unique_ptr<WsManager::Binding<T>> _wsBinding;
 
   bool _mounted{false};

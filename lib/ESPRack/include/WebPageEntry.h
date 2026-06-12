@@ -130,7 +130,12 @@ class WebPageEntry : public IWebFeatureEntry {
       if (a.title) ja["title"] = a.title;
       if (a.icon) ja["icon"] = a.icon;
       if (a.color) ja["color"] = a.color;
-      if (a.restPath) ja["restPath"] = a.restPath;
+      // C1: emit the DERIVED action path, never spec.restPath.
+      if (a.id) {
+        char actBuf[112];
+        fillActionPath(actBuf, sizeof(actBuf), a.id);
+        ja["restPath"] = actBuf;
+      }
       if (a.method) ja["method"] = a.method;
       ja["auth"] = webAuthLevelToStr(a.auth);
       if (a.confirm) ja["confirm"] = a.confirm;

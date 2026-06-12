@@ -7,15 +7,38 @@
 WsDiagService::WsDiagService(AsyncWebServer* server, SecurityManager* securityManager,
                              WsManager* wsMgr, PresenceService* presence)
     : _server(server), _sm(securityManager), _ws(wsMgr), _presence(presence) {
-  if (!_server || !_sm) return;
-  _server->on(WS_DIAG_FORM_PATH,
-              HTTP_GET,
-              _sm->wrapRequest(std::bind(&WsDiagService::socketsForm, this, std::placeholders::_1),
-                               AuthenticationPredicates::IS_ADMIN));
+  // Route binding moved into registerManifest (WebPageSpec) so the
+  // endpoint flows through WebManager like every other bespoke page.
+  (void)_server; (void)_sm;
 }
 
 void WsDiagService::registerManifest(WebManager* web) {
   if (!web) return;
+  using namespace std::placeholders;
+
+  // Register the form-read endpoint via WebManager so rest.proxy can
+  // reach WS_DIAG_FORM_PATH (/api/v1/system/sockets/form) without
+  // HTTP loopback.
+  WebPageSpec page;
+  page.id        = "wsDiag";
+  page.title     = "Clients";
+  page.component = "";   // no top-level page route; contributes a tab below
+  page.auth      = WebAuthLevel::Admin;
+  {
+    WebEndpointMeta e;
+    e.method  = "GET"; e.path = WS_DIAG_FORM_PATH; e.role = "form";
+    e.auth    = WebAuthLevel::Admin;
+    e.handler = std::bind(&WsDiagService::socketsForm, this, _1);
+    e.internalHandler =
+      [this](JsonVariant /*in*/, JsonVariant out, int& status) {
+        JsonObject o = out.to<JsonObject>();
+        buildForm(o);
+        status = 200;
+      };
+    page.endpoints.push_back(std::move(e));
+  }
+  web->registerPage(std::move(page));
+
   // Tab renamed sockets→clients; this view now only carries per-client
   // tables (active WS clients + presence-tracked tabs). Aggregate WS
   // health (total clients, avg RTT, keepalive cadence, backpressure

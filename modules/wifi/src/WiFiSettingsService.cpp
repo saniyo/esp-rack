@@ -81,7 +81,7 @@ static const char* encryptionLabel(uint8_t t) {
 #endif
 }
 
-// Human-readable label for the current scan phase — emitted both in REST
+// Human-readable label for the current scan phase — emitted in the form
 // (Scan tab buildForm) and over WS so the user sees progress textually.
 static String scanPhaseLabel(int n) {
   if (n == -2) return String("Idle");
@@ -212,10 +212,10 @@ void WiFiSettings::buildForm(WiFiSettings& s, JsonObject& root) {
   const String phase = scanPhaseLabel(scanN);
   scan.add(web::Text("scan_status", phase.c_str()).readOnly().icon("Refresh"));
 
-  // Scan trigger — posts to /rest/wifiScan. refetchForm tells the frontend
-  // to poll /rest/wifiForm on a short schedule after the action fires so
-  // the networks table above updates automatically as soon as the radio
-  // surfaces results.
+  // Scan trigger — posts to /api/v1/actions/wifi.scan. refetchForm tells
+  // the frontend to poll /api/v1/wifi/form on a short schedule after the
+  // action fires so the networks table above updates automatically as soon
+  // as the radio surfaces results.
   scan.add(web::Action("scan_btn", "Scan WiFi")
                .ref("wifi.scan").icon("Refresh").color("secondary").refetchForm());
 
@@ -384,14 +384,14 @@ void WiFiSettingsService::registerManifest(WebManager* web) {
 
   // Scan trigger action — referenced from the Scan tab's action button via
   // actionRef("wifi.scan"). Registered BEFORE the feature so actionRef
-  // resolves when the manifest is built.
+  // resolves when the manifest is built. Registry mounts it automatically
+  // at /api/v1/actions/wifi.scan; restPath is ignored and omitted.
   {
     WebActionSpec scan;
     scan.id             = "wifi.scan";
     scan.title          = "Scan WiFi";
     scan.icon           = "Refresh";
     scan.color          = "secondary";
-    scan.restPath       = WIFI_SCAN_KICK_PATH;
     scan.method         = "POST";
     scan.auth           = WebAuthLevel::Admin;
     scan.successMessage = "Scanning WiFi networks…";
@@ -408,8 +408,9 @@ void WiFiSettingsService::registerManifest(WebManager* web) {
   spec.menu.order = 140;
   spec.menu.auth  = WebAuthLevel::Authenticated;
   spec.auth       = WebAuthLevel::Authenticated;
-  spec.restRead   = WIFI_FORM_PATH;
-  spec.restUpdate = WIFI_FORM_PATH;
+  // restRead/restUpdate omitted — registry derives /api/v1/wifi/form and
+  // /api/v1/wifi/state from the feature id (C1, api-v1).
+
   // REST-only feature — no WS binding. Status/scan refresh on tab switch
   // or manual page reload, matching the AP feature style and keeping the
   // WebSocket channel quiet for this section entirely.
@@ -417,7 +418,7 @@ void WiFiSettingsService::registerManifest(WebManager* web) {
   WebTabSpec statusTab;
   statusTab.key      = "status";
   statusTab.title    = "WiFi Status";
-  statusTab.restPath = WIFI_FORM_PATH;
+  statusTab.restPath = nullptr;  // own-feature tab — manifest emits derived form path
   statusTab.postable = false;
   statusTab.live     = false;
   statusTab.auth     = WebAuthLevel::Authenticated;
@@ -426,7 +427,7 @@ void WiFiSettingsService::registerManifest(WebManager* web) {
   WebTabSpec scanTab;
   scanTab.key      = "scan";
   scanTab.title    = "Scan Networks";
-  scanTab.restPath = WIFI_FORM_PATH;
+  scanTab.restPath = nullptr;  // own-feature tab — manifest emits derived form path
   scanTab.postable = false;
   scanTab.live     = false;
   scanTab.auth     = WebAuthLevel::Admin;
@@ -435,7 +436,7 @@ void WiFiSettingsService::registerManifest(WebManager* web) {
   WebTabSpec settingsTab;
   settingsTab.key      = "settings";
   settingsTab.title    = "WiFi Settings";
-  settingsTab.restPath = WIFI_FORM_PATH;
+  settingsTab.restPath = nullptr;  // own-feature tab — manifest emits derived form path
   settingsTab.postable = true;
   settingsTab.live     = false;
   settingsTab.auth     = WebAuthLevel::Admin;

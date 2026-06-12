@@ -7,7 +7,7 @@ FeaturesService::FeaturesService(AsyncWebServer* server, WebManager* web) {
   // Phase 7c — mship-ui proxy can't reach paths registered directly
   // on AsyncWebServer (rest.proxy walks WebManager entries only).
   // Register an in-process handler that builds the same JSON so the
-  // operator browser sees /rest/features through the reverse proxy.
+  // operator browser sees /api/v1/features through the reverse proxy.
   if (web) {
     web->registerProxyEndpoint(
         "GET", FEATURES_SERVICE_PATH,

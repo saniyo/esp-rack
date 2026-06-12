@@ -9,15 +9,15 @@ export interface SystemInfo {
 
 export const readSystemStatus = (timeout?: number): AxiosPromise<SystemStatus> => {
   const config = timeout ? { timeout } : {};
-  return AXIOS.get<SystemStatus>("/systemStatus", config);
+  return AXIOS.get<SystemStatus>("system/status", config);
 };
 
 export const restart = (): AxiosPromise<void> => {
-  return AXIOS.post<void>("/restart");
+  return AXIOS.post<void>("actions/system.restart");
 };
 
 export const factoryReset = (): AxiosPromise<void> => {
-  return AXIOS.post<void>("/factoryReset");
+  return AXIOS.post<void>("actions/system.factoryReset");
 };
 
 export const getSystemInfo = (): AxiosPromise<SystemInfo> => {
@@ -25,13 +25,13 @@ export const getSystemInfo = (): AxiosPromise<SystemInfo> => {
 };
 
 export const readOTASettings = (): AxiosPromise<OTASettings> => {
-  return AXIOS.get<OTASettings>("/otaSettings");
+  return AXIOS.get<OTASettings>("ota/form");
 };
 
 export const updateOTASettings = (otaSettings: OTASettings): AxiosPromise<OTASettings> => {
-  return AXIOS.post<OTASettings>("/otaSettings", otaSettings);
+  return AXIOS.post<OTASettings>("ota/form", otaSettings);
 };
 
 export const uploadFirmware = (file: File, config?: FileUploadConfig): AxiosPromise<void> => {
-  return uploadFile("/uploadFirmware", file, config);
+  return uploadFile("/api/v1/system/upload/firmware", file, config);
 };

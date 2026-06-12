@@ -26,7 +26,7 @@ OTASettingsService::OTASettingsService(ConfigManager* cfgMgr) :
   WiFi.onEvent(std::bind(&OTASettingsService::onStationModeGotIP, this, std::placeholders::_1, std::placeholders::_2),
                WiFiEvent_t::ARDUINO_EVENT_WIFI_STA_GOT_IP);
 #endif
-  // POST /rest/ota/settings → update() applies state → this handler
+  // POST /api/v1/ota/state → update() applies state → this handler
   // runs after the response is queued, reconfigures ArduinoOTA, and
   // persists via ConfigManager. OTA lives in the Config Manager tab
   // alongside every other config.
@@ -47,9 +47,9 @@ void OTASettingsService::registerManifest(WebManager* web) {
   spec.id         = "ota";
   spec.title      = "OTA Settings";
   spec.component  = "";  // sub-tab, system feature provides the page
-  spec.auth       = WebAuthLevel::Admin;
-  spec.restRead   = OTA_SETTINGS_FORM_PATH;
-  spec.restUpdate = OTA_SETTINGS_FORM_PATH;
+  spec.auth = WebAuthLevel::Admin;
+  // restRead / restUpdate omitted — registry mounts /api/v1/ota/form
+  // and /api/v1/ota/state automatically.
 
   // Auto-sized: three scalar fields, measured 216 B live, no runtime rows.
   _feature = web->registerFeature<OTASettings>(
@@ -60,7 +60,9 @@ void OTASettingsService::registerManifest(WebManager* web) {
   WebTabSpec tab;
   tab.key = "ota";
   tab.title = "OTA Settings";
-  tab.restPath = OTA_SETTINGS_FORM_PATH;
+  // Contributed to "system" feature — must set restPath explicitly to the
+  // new bespoke form path (own-feature default does not apply here).
+  tab.restPath = "/api/v1/ota/form";
   tab.postable = true;
   tab.auth = WebAuthLevel::Admin;
   tab.order = 60;

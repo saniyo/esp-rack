@@ -111,9 +111,9 @@ void AutoUpdateService::registerManifest(WebManager* web) {
   spec.id         = "autoUpdate";
   spec.title      = "Auto Update";
   spec.component  = "";  // sub-tab, system feature owns the menu slot
-  spec.auth       = WebAuthLevel::Admin;
-  spec.restRead   = AUTO_UPDATE_SERVICE_PATH;
-  spec.restUpdate = AUTO_UPDATE_SERVICE_PATH;
+  spec.auth = WebAuthLevel::Admin;
+  // restRead / restUpdate omitted — registry mounts /api/v1/autoUpdate/form
+  // and /api/v1/autoUpdate/state automatically.
 
   // REST buffer auto-sized (measured 0.6 KB live; fixed-count scalars,
   // status strings bounded <300 B — no runtime rows). Was hand-guessed
@@ -126,7 +126,9 @@ void AutoUpdateService::registerManifest(WebManager* web) {
   WebTabSpec tab;
   tab.key = "autoUpdate";
   tab.title = "Auto Update";
-  tab.restPath = AUTO_UPDATE_FORM_PATH;
+  // Contributed to "system" feature — must set restPath explicitly to the
+  // new bespoke form path (own-feature default does not apply here).
+  tab.restPath = "/api/v1/autoUpdate/form";
   tab.postable = true;
   tab.auth = WebAuthLevel::Admin;
   tab.order = 80;

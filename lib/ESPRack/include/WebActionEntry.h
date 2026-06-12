@@ -104,23 +104,15 @@ class WebActionEntry : public IWebFeatureEntry {
   const WebActionSpec& spec() const { return _spec; }
 
  private:
-  // Fill `buf` with the resolved REST path. Always writes into the
-  // caller-supplied buffer — when `_spec.restPath` is set we copy it
-  // in too, so the caller can rely on the buffer holding the answer
-  // (this matters for ArduinoJson assignment: the `char[N]` overload
-  // copies; the `const char*` overload would Link-store the pointer,
-  // which is dangling if it pointed at this local buffer).
-  // Replaces the previous String-returning version that allocated a
-  // transient Arduino String on every toJson / proxyDispatch call.
+  // Fill `buf` with the resolved action path. C1: ALWAYS derived as
+  // "/api/v1/actions/<id>" — spec.restPath is ignored (kept only for
+  // back-compat of module specs, see WebActionSpec). Writes into the
+  // caller-supplied buffer so it can be handed straight to ArduinoJson's
+  // char[N] (Copy) overload or AsyncWebServer's String ctor without a
+  // dangling const char*. Replaces the previous String-returning version
+  // that allocated a transient Arduino String on every toJson / proxyDispatch.
   void fillResolvedPath(char* buf, size_t buf_sz) const {
-    if (buf_sz == 0) return;
-    if (_spec.restPath && _spec.restPath[0] != '\0') {
-      strncpy(buf, _spec.restPath, buf_sz - 1);
-      buf[buf_sz - 1] = '\0';
-      return;
-    }
-    snprintf(buf, buf_sz, "/rest/action/%s",
-             _spec.id ? _spec.id : "unknown");
+    fillActionPath(buf, buf_sz, _spec.id);
   }
 
   WebActionSpec _spec;

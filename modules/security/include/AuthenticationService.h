@@ -8,8 +8,8 @@
 
 class WebManager;
 
-#define VERIFY_AUTHORIZATION_PATH "/rest/verifyAuthorization"
-#define SIGN_IN_PATH "/rest/signIn"
+#define VERIFY_AUTHORIZATION_PATH "/api/v1/auth/verify"
+#define SIGN_IN_PATH "/api/v1/auth/token"
 
 #define MAX_AUTHENTICATION_SIZE 256
 

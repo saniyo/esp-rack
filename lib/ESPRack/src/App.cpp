@@ -64,7 +64,7 @@ App::App(AsyncWebServer* server, const char* deviceName, const char* deviceVersi
     // WebManager, not the ctor parameters. The caller's pointers
     // (typically Builder::deviceName_.c_str()) become dangling the
     // moment Builder goes out of scope — using them later was the
-    // root cause of (a) garbled `device.name` in /rest/uiManifest
+    // root cause of (a) garbled `device.name` in /api/v1/ui/manifest
     // ("΂@" pattern), (b) corrupted JSON breaking the manifest fetch
     // and emptying the menu, and (c) multi_heap poison-pattern
     // crashes ~minutes into uptime as the freed bytes got reused by
@@ -107,7 +107,7 @@ App::App(AsyncWebServer* server, const char* deviceName, const char* deviceVersi
 
   // Framework-owned UI shell — registered BEFORE Builder runs module
   // onInstall, so that modules calling addTabToFeature("system", ...)
-  // find a parent. The buildFeatures map (exposed via /rest/uiManifest)
+  // find a parent. The buildFeatures map (exposed via /api/v1/ui/manifest)
   // is populated later in App::begin() once modules_ is filled — keys
   // are derived from each installed Module's describe().id, so the
   // manifest reflects "what's installed" rather than a hardcoded
@@ -259,7 +259,7 @@ void App::begin() {
   HeapMonitor::logSnapshot("boot:modules-begun");
 
   // 5. WebManager.begin() iterates registered features and mounts
-  // /rest/uiManifest. Must come AFTER all modules have registered.
+  // /api/v1/ui/manifest. Must come AFTER all modules have registered.
   webManager_.begin();
   HeapMonitor::logSnapshot("boot:webmanager-begun");
 

@@ -20,7 +20,8 @@
 #include <freertos/task.h>
 #include <vector>
 
-#define TEL_FORM_PATH    "/rest/telegramForm"
+// Form/state paths are derived by the registry (C1): /api/v1/telegram/form (GET)
+// and /api/v1/telegram/state (GET+POST). WS path stays explicit (/ws/*).
 #define TEL_WS_PATH      "/ws/telegramStatus"
 #define TEL_FILE         "/config/telegram.json"
 #define TEL_QUEUE_DEPTH  20

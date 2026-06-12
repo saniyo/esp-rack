@@ -27,16 +27,16 @@
 // Manifest envelope schema this build speaks — MUST stay in sync with
 // WebManager's `schemaVersion`. A peer whose schema matches is renderable by
 // our web ("a web version we support"), regardless of its project.
-#define MESH_SCHEMA_VERSION "2"
+#define MESH_SCHEMA_VERSION "3"
 
 namespace {
-const char*    PEERS_PATH              = "/rest/peers";
+const char*    PEERS_PATH              = "/api/v1/mesh/peers";
 const uint32_t MESH_BROWSE_INTERVAL_MS = 20000;  // re-browse cadence
 const uint32_t MESH_QUERY_TIMEOUT_MS   = 3000;   // per mdns_query_ptr
 const size_t   MESH_MAX_PEERS          = 32;     // bounded cache
-// 503 guard for /rest/peers — must cover the 4096 response doc plus a
-// little slack, no more. The menu polls this path every 10 s, so an
-// over-strict guard (was 6144) turned routine C3 heap levels (~9 KB
+// 503 guard for /api/v1/mesh/peers — must cover the 4096 response doc
+// plus a little slack, no more. The menu polls this path every 10 s, so
+// an over-strict guard (was 6144) turned routine C3 heap levels (~9 KB
 // maxAlloc minus any in-flight form) into a steady drip of 503 toasts.
 const uint32_t MESH_SERVE_MIN_ALLOC    = 4608;
 
@@ -66,8 +66,8 @@ void MeshService::registerManifest(WebManager* web) {
   if (!web) return;
 
   // Discovery page — a bespoke React renderer (CUSTOM_RENDERERS["Discovery"])
-  // that fetches /rest/peers. Route derived from id => /discovery. In the mesh
-  // menu this is the top-level umbrella under which the device records nest.
+  // that fetches /api/v1/mesh/peers. Route derived from id => /discovery.
+  // In the mesh menu this is the top-level umbrella under which device records nest.
   WebPageSpec page;
   page.id         = "discovery";
   page.title      = "Discovery";
@@ -78,8 +78,8 @@ void MeshService::registerManifest(WebManager* web) {
   page.menu.auth  = WebAuthLevel::Authenticated;
   page.auth       = WebAuthLevel::Authenticated;
 
-  // GET /rest/peers — discovered + trust-verified peers. The framework
-  // auth-wraps the handler via e.auth.
+  // GET /api/v1/mesh/peers — discovered + trust-verified peers. The
+  // framework auth-wraps the handler via e.auth.
   WebEndpointMeta e;
   e.method  = "GET";
   e.path    = PEERS_PATH;

@@ -133,7 +133,9 @@ void APSettingsService::registerManifest(WebManager* web) {
   // Built with the fluent WebFeature builder. nestUnder("wifi") is the
   // tree-menu placement directive — "drop Access Point onto the WiFi feature"
   // — referencing the WiFi feature's id by string. No wsPath: the status tab
-  // is plain REST (renders read-only DynamicSettings, not WS DynamicStatus).
+  // is a plain form endpoint (renders read-only DynamicSettings, not WS
+  // DynamicStatus). restPath is omitted on own-feature tabs — the manifest
+  // emits the registry-derived /api/v1/ap/form path (C1, api-v1).
   auto spec = WebFeature("ap")
       .title("Access Point")
       .component(WebComponent::DynamicSettings)
@@ -145,9 +147,8 @@ void APSettingsService::registerManifest(WebManager* web) {
                                              //   (Status/Settings) expand as tree
                                              //   leaves via the global default
                                              //   (WebMenuMeta::expandTabs = true).
-      .rest(AP_FORM_PATH)
-      .tab(WebTab("status", "Status").rest(AP_FORM_PATH))
-      .tab(WebTab("settings", "Settings").rest(AP_FORM_PATH).postable().adminOnly())
+      .tab(WebTab("status", "Status"))
+      .tab(WebTab("settings", "Settings").postable().adminOnly())
       .build();
 
   // REST buffer auto-sized from the real schema at boot (measured 1.0 KB

@@ -1,7 +1,7 @@
 {
   "name": "MeshModule",
   "version": "0.1.0",
-  "description": "ESPRack module: LAN device-mesh discovery. Browses _esprack._tcp peers (with an HMAC project-key trust tag + manifest-schema compatibility), exposes /rest/peers, and adds a Devices page. Builds on MdnsModule (the mDNS substrate is part of this feature). Compile-time excludable.",
+  "description": "ESPRack module: LAN device-mesh discovery. Browses _esprack._tcp peers (with an HMAC project-key trust tag + manifest-schema compatibility), exposes /api/v1/mesh/peers, and adds a Devices page. Builds on MdnsModule (the mDNS substrate is part of this feature). Compile-time excludable.",
   "license": "MIT",
   "frameworks": [
     "arduino"

@@ -10,15 +10,38 @@ WebEndpointsService::WebEndpointsService(AsyncWebServer* server,
                                          WebManager* webManager,
                                          WsManager* wsManager)
     : _server(server), _sm(securityManager), _wm(webManager), _ws(wsManager) {
-  if (!_server || !_sm) return;
-  _server->on(WEB_ENDPOINTS_FORM_PATH,
-              HTTP_GET,
-              _sm->wrapRequest(std::bind(&WebEndpointsService::serveForm, this, std::placeholders::_1),
-                               AuthenticationPredicates::IS_ADMIN));
+  // Route binding moved into registerManifest (WebPageSpec) so the
+  // endpoint flows through WebManager like every other bespoke page.
+  (void)_server; (void)_sm;
 }
 
 void WebEndpointsService::registerManifest(WebManager* web) {
   if (!web) return;
+  using namespace std::placeholders;
+
+  // Register the form-read endpoint via WebManager so rest.proxy can
+  // reach WEB_ENDPOINTS_FORM_PATH (/api/v1/system/endpoints/form)
+  // without HTTP loopback.
+  WebPageSpec page;
+  page.id        = "webEndpoints";
+  page.title     = "Endpoints";
+  page.component = "";   // no top-level page route; contributes a tab below
+  page.auth      = WebAuthLevel::Admin;
+  {
+    WebEndpointMeta e;
+    e.method  = "GET"; e.path = WEB_ENDPOINTS_FORM_PATH; e.role = "form";
+    e.auth    = WebAuthLevel::Admin;
+    e.handler = std::bind(&WebEndpointsService::serveForm, this, _1);
+    e.internalHandler =
+      [this](JsonVariant /*in*/, JsonVariant out, int& status) {
+        JsonObject o = out.to<JsonObject>();
+        buildForm(o);
+        status = 200;
+      };
+    page.endpoints.push_back(std::move(e));
+  }
+  web->registerPage(std::move(page));
+
   WebTabSpec tab;
   tab.key      = "endpoints";
   tab.title    = "Endpoints";
@@ -196,7 +219,7 @@ void WebEndpointsService::buildForm(JsonObject& root) {
   }
 
   // Per-entry table — populated inline from IWebFeatureEntry::toJson(),
-  // the same surface that backs /rest/uiManifest.
+  // the same surface that backs /api/v1/ui/manifest.
   JsonObject tbl = FormBuilder::addTableField(ep, "entries", AF::R,
       col("id",     "ID",      "text"),
       col("kind",   "Kind",    "text"),

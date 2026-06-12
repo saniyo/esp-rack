@@ -27,11 +27,11 @@ export const SIGN_IN_SEARCH = 'loginSearch';
 export const getDefaultRoute = (_features: Features) => '/system';
 
 export function verifyAuthorization(): AxiosPromise<void> {
-  return AXIOS.get('/verifyAuthorization');
+  return AXIOS.get('auth/verify');
 }
 
 export function signIn(request: SignInRequest): AxiosPromise<SignInResponse> {
-  return AXIOS.post('/signIn', request);
+  return AXIOS.post('auth/token', request);
 }
 
 /**

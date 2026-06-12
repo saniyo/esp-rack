@@ -205,14 +205,14 @@ void WireguardService::registerManifest(WebManager* web) {
   spec.menu.icon  = "Cast";
   spec.menu.order = 380;
   spec.menu.auth  = WebAuthLevel::Admin;
-  spec.auth       = WebAuthLevel::Admin;
-  spec.restRead   = WG_FORM_PATH;
-  spec.restUpdate = WG_FORM_PATH;
+  spec.auth = WebAuthLevel::Admin;
+  // restRead / restUpdate omitted — registry mounts /api/v1/wireguard/form
+  // (GET form) and /api/v1/wireguard/state (GET+POST state) automatically.
 
   WebTabSpec statusTab;
   statusTab.key      = "status";
   statusTab.title    = "Status";
-  statusTab.restPath = WG_FORM_PATH;
+  // restPath omitted — own-feature tab inherits the derived form path.
   statusTab.postable = false;
   statusTab.live     = true;
   spec.tabs.push_back(statusTab);
@@ -220,7 +220,7 @@ void WireguardService::registerManifest(WebManager* web) {
   WebTabSpec internalsTab;
   internalsTab.key      = "internals";
   internalsTab.title    = "Internals";
-  internalsTab.restPath = WG_FORM_PATH;
+  // restPath omitted — own-feature tab inherits the derived form path.
   internalsTab.postable = false;     // priv_key is AF::R; never accept writes
   internalsTab.auth     = WebAuthLevel::Admin;
   internalsTab.order    = 90;

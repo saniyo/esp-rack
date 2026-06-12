@@ -17,8 +17,6 @@
 #endif
 
 #define AUTO_UPDATE_SETTINGS_FILE "/config/autoUpdateSettings.json"
-#define AUTO_UPDATE_SERVICE_PATH "/rest/autoUpdateSettings"
-#define AUTO_UPDATE_FORM_PATH    AUTO_UPDATE_SERVICE_PATH  // same endpoint serves the form schema
 
 class WebManager;
 

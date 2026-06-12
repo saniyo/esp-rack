@@ -43,10 +43,10 @@ export function endpointAvailable(manifest: UiManifest, url: string): boolean {
     const reg = raw.startsWith('/') ? raw : '/' + raw;
     const regTrimmed = reg.endsWith('/') ? reg.slice(0, -1) : reg;
     if (regTrimmed === probeTrimmed) return true;
-    // Probe URL `/rest/fs/upload` matches registered `/rest/fs` (segment-bound).
+    // Probe URL `/api/v1/fs/upload` matches registered `/api/v1/fs` (segment-bound).
     if (regTrimmed.startsWith(probeTrimmed + '/')) return true;
     // Registered URL is a longer route under our probe (any leaf endpoint
-    // hanging off `/rest/fs` proves the parent prefix exists).
+    // hanging off `/api/v1/fs` proves the parent prefix exists).
     if (probeTrimmed.startsWith(regTrimmed + '/')) return true;
   }
   return false;

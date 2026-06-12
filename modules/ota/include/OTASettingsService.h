@@ -33,8 +33,7 @@
 #define FACTORY_OTA_ENABLED true
 #endif
 
-#define OTA_SETTINGS_FILE         "/config/otaSettings.json"
-#define OTA_SETTINGS_FORM_PATH    "/rest/ota/settings"
+#define OTA_SETTINGS_FILE "/config/otaSettings.json"
 
 class OTASettings {
  public:

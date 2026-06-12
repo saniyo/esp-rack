@@ -73,14 +73,14 @@ void TelegramService::registerManifest(WebManager* web) {
   spec.menu.order = 400;
   spec.menu.auth  = WebAuthLevel::Admin;
   spec.auth       = WebAuthLevel::Admin;
-  spec.restRead   = TEL_FORM_PATH;
-  spec.restUpdate = TEL_FORM_PATH;
+  // restRead/restUpdate omitted: registry derives /api/v1/telegram/form + /api/v1/telegram/state from spec.id.
   spec.wsPath     = TEL_WS_PATH;
 
+  // Own-feature tabs leave restPath null — manifest emits the derived
+  // form path (/api/v1/telegram/form) for them.
   WebTabSpec statusTab;
   statusTab.key      = "status";
   statusTab.title    = "Status";
-  statusTab.restPath = TEL_FORM_PATH;
   statusTab.postable = false;
   statusTab.live     = true;
   statusTab.auth     = WebAuthLevel::Admin;
@@ -89,7 +89,6 @@ void TelegramService::registerManifest(WebManager* web) {
   WebTabSpec subsTab;
   subsTab.key      = "subs";
   subsTab.title    = "Subscriptions";
-  subsTab.restPath = TEL_FORM_PATH;
   subsTab.postable = false;
   subsTab.auth     = WebAuthLevel::Admin;
   subsTab.order    = 15;
@@ -98,7 +97,6 @@ void TelegramService::registerManifest(WebManager* web) {
   WebTabSpec settingsTab;
   settingsTab.key      = "settings";
   settingsTab.title    = "Settings";
-  settingsTab.restPath = TEL_FORM_PATH;
   settingsTab.postable = true;
   settingsTab.auth     = WebAuthLevel::Admin;
   settingsTab.order    = 20;

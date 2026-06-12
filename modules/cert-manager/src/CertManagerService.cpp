@@ -393,15 +393,15 @@ void CertManagerService::registerManifest(WebManager* web) {
   spec.menu.icon  = "VerifiedUser";
   spec.menu.order = 360;
   spec.menu.auth  = WebAuthLevel::Admin;
-  spec.auth       = WebAuthLevel::Admin;
-  spec.restRead   = CERT_MANAGER_FORM_PATH;
-  spec.restUpdate = CERT_MANAGER_FORM_PATH;
-  spec.wsPath     = CERT_MANAGER_WS_PATH;
+  spec.auth   = WebAuthLevel::Admin;
+  // restRead / restUpdate omitted — registry mounts /api/v1/certManager/form
+  // (GET form) and /api/v1/certManager/state (GET+POST state) automatically.
+  spec.wsPath = CERT_MANAGER_WS_PATH;
 
   WebTabSpec statusTab;
   statusTab.key      = "status";
   statusTab.title    = "Status";
-  statusTab.restPath = CERT_MANAGER_FORM_PATH;
+  // restPath omitted — own-feature tab inherits the derived form path.
   statusTab.postable = false;
   statusTab.live     = true;
   spec.tabs.push_back(statusTab);
@@ -409,7 +409,7 @@ void CertManagerService::registerManifest(WebManager* web) {
   WebTabSpec enrollmentTab;
   enrollmentTab.key      = "enrollment";
   enrollmentTab.title    = "Enrollment";
-  enrollmentTab.restPath = CERT_MANAGER_FORM_PATH;
+  // restPath omitted — own-feature tab inherits the derived form path.
   enrollmentTab.postable = true;
   enrollmentTab.auth     = WebAuthLevel::Admin;
   enrollmentTab.order    = 15;
@@ -418,7 +418,7 @@ void CertManagerService::registerManifest(WebManager* web) {
   WebTabSpec settingsTab;
   settingsTab.key      = "settings";
   settingsTab.title    = "Settings";
-  settingsTab.restPath = CERT_MANAGER_FORM_PATH;
+  // restPath omitted — own-feature tab inherits the derived form path.
   settingsTab.postable = true;
   settingsTab.auth     = WebAuthLevel::Admin;
   settingsTab.order    = 18;
@@ -427,7 +427,7 @@ void CertManagerService::registerManifest(WebManager* web) {
   WebTabSpec recoveryTab;
   recoveryTab.key      = "recovery";
   recoveryTab.title    = "Recovery";
-  recoveryTab.restPath = CERT_MANAGER_FORM_PATH;
+  // restPath omitted — own-feature tab inherits the derived form path.
   recoveryTab.postable = false;
   recoveryTab.live     = true;
   recoveryTab.auth     = WebAuthLevel::Admin;
@@ -443,7 +443,7 @@ void CertManagerService::registerManifest(WebManager* web) {
   WebTabSpec internalsTab;
   internalsTab.key      = "internals";
   internalsTab.title    = "Internals";
-  internalsTab.restPath = CERT_MANAGER_FORM_PATH;
+  // restPath omitted — own-feature tab inherits the derived form path.
   internalsTab.postable = false;
   internalsTab.auth     = WebAuthLevel::Admin;
   internalsTab.order    = 30;

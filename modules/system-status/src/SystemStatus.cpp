@@ -318,7 +318,7 @@ void SystemStatus::systemStatus(AsyncWebServerRequest* request) {
 
   // Canonical device identity — same source as cert Subject CN and
   // mothership deviceId payload, so monitoring tooling that scrapes
-  // /rest/systemStatus can correlate this device with its server-
+  // /api/v1/system/status can correlate this device with its server-
   // side record without parsing the cert.
   root["device_id"]    = DeviceIdentity::canonical();
   root["project_name"] = DeviceIdentity::projectName();
@@ -424,7 +424,7 @@ void SystemStatus::buildIdentityForm(JsonObject& root) {
 
   // Framework version — esp-rack library rev. Sourced from
   // WebManager's frameworkVersion() so it stays in sync with the
-  // /rest/uiManifest device.frameworkVersion. Skipped silently when
+  // /api/v1/ui/manifest device.frameworkVersion. Skipped silently when
   // _web is null (defensive — SystemStatusModule always passes it).
   if (_web) {
     const char* fwVer = _web->frameworkVersion();

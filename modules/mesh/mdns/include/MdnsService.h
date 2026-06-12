@@ -16,7 +16,7 @@
 //   browseService() — synchronous MDNS.queryService() snapshot.
 //
 // UI:
-//   /rest/system/mdns                 — form schema for the System >
+//   /api/v1/system/mdns/form          — form schema for the System >
 //                                       mDNS tab (status + browse +
 //                                       manual resolve form)
 //   action `mdns.resolveHost`         — query a hostname, flashes the

@@ -101,7 +101,14 @@ class WebInfoEntry : public IWebFeatureEntry {
       if (t.key) jt["key"] = t.key;
       if (t.title) jt["title"] = t.title;
       if (t.icon) jt["icon"] = t.icon;
-      if (t.restPath) jt["restPath"] = t.restPath;
+      // C1: a tab without an explicit restPath falls back to this info
+      // feature's own GET path (its authored spec.restRead). Contributed
+      // tabs (addTab) point at their own service's page path instead.
+      if (t.restPath) {
+        jt["restPath"] = t.restPath;
+      } else if (_spec.restRead) {
+        jt["restPath"] = _spec.restRead;
+      }
       jt["postable"] = t.postable;
       jt["live"] = t.live;
       jt["auth"] = webAuthLevelToStr(t.auth);

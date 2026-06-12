@@ -262,13 +262,13 @@ void MothershipService::registerManifest(WebManager* web) {
   spec.menu.order = 370;
   spec.menu.auth  = WebAuthLevel::Admin;
   spec.auth       = WebAuthLevel::Admin;
-  spec.restRead   = MOTHERSHIP_FORM_PATH;
-  spec.restUpdate = MOTHERSHIP_FORM_PATH;
+  // restRead / restUpdate omitted — registry mounts /api/v1/mothership/form
+  // (GET form) and /api/v1/mothership/state (GET+POST state) automatically.
 
   WebTabSpec statusTab;
   statusTab.key      = "status";
   statusTab.title    = "Status";
-  statusTab.restPath = MOTHERSHIP_FORM_PATH;
+  // restPath omitted — own-feature tab inherits the derived form path.
   statusTab.postable = false;
   // live=false intentionally — Status fields are flat counters +
   // label; the operator can pull-to-refresh by re-opening the tab.
@@ -280,7 +280,7 @@ void MothershipService::registerManifest(WebManager* web) {
   WebTabSpec settingsTab;
   settingsTab.key      = "settings";
   settingsTab.title    = "Settings";
-  settingsTab.restPath = MOTHERSHIP_FORM_PATH;
+  // restPath omitted — own-feature tab inherits the derived form path.
   settingsTab.postable = true;
   settingsTab.auth     = WebAuthLevel::Admin;
   settingsTab.order    = 20;
@@ -430,7 +430,7 @@ void MothershipService::runCheckinLoop() {
       // setCadence notify pokes the task awake earlier than the
       // computed timeout. Previously this was hard-coded 5000 ms
       // regardless of how far away next_checkin_at_s was, which
-      // tanked /rest/* RTT under cadence_override_period_s=1:
+      // tanked API RTT under cadence_override_period_s=1:
       // after a "no-op" check-in the loop slept 5 s instead of 1 s,
       // making every queued action a ~6 s round-trip.
       uint32_t wait_ms = (_state.next_checkin_at_s - cur_s) * 1000u;
@@ -567,7 +567,7 @@ bool MothershipService::performOneCheckin(bool& outBurst) {
   // chunk capped at 1 KB summary but typically <300 B). Typical
   // serialised body is 260-370 B; ArduinoJson v6 needs ~3x that in
   // pool memory, so 1.5 KB suffices and 3 KB keeps ×1.5 safety.
-  // Large responses (rest.proxy of /rest/uiManifest = 10-15 KB)
+  // Large responses (rest.proxy of /api/v1/ui/manifest = 10-15 KB)
   // are split across multiple check-ins via pushActionResult's
   // chunking; we never need to fit the full payload in one body.
   //
@@ -629,7 +629,7 @@ bool MothershipService::performOneCheckin(bool& outBurst) {
   // installed-module set (firmware rebuild). Calculated lazily on the
   // first check-in after boot, cached afterwards (manifest is static
   // post-boot). Server compares against its cached value and queues
-  // rest.proxy(GET /rest/uiManifest) when they diverge — avoids
+  // rest.proxy(GET /api/v1/ui/manifest) when they diverge — avoids
   // shipping the full manifest on every check-in.
   static uint32_t cached_manifest_rev = 0;
   if (cached_manifest_rev == 0 && _web) {
@@ -1072,7 +1072,7 @@ String MothershipService::actionLog(JsonObjectConst params) {
 //
 // Receives a queued action of shape
 //   {"type":"rest.proxy","reqId":"a3f7",
-//    "params":{"method":"GET","path":"/rest/mqtt","body":{}}}
+//    "params":{"method":"GET","path":"/api/v1/mqtt/form","body":{}}}
 // from the server, walks WebManager's registered entries to find the
 // one that owns (method, path), invokes its in-process handler, and
 // pushes a richer ActionResult onto _resultRing with the downstream

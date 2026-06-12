@@ -43,7 +43,7 @@ type MuiColor =
   | 'inherit';
 
 const toAxiosPath = (absPath: string) =>
-  absPath.startsWith('/rest/') ? absPath.slice(5) : absPath;
+  absPath.startsWith('/api/v1/') ? absPath.slice(7) : absPath;
 
 const isMuiColor = (s?: string): s is MuiColor =>
   !!s && ['primary', 'secondary', 'error', 'warning', 'success', 'info', 'inherit'].includes(s);

@@ -43,8 +43,7 @@
 
 #include <Arduino.h>
 
-#define WG_FILE      "/config/wireguard.json"
-#define WG_FORM_PATH "/rest/wireguard"
+#define WG_FILE "/config/wireguard.json"
 
 class WebManager;
 

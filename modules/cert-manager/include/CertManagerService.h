@@ -29,9 +29,8 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
-#define CERT_MANAGER_FILE      "/config/cert.json"
-#define CERT_MANAGER_FORM_PATH "/rest/certManager"
-#define CERT_MANAGER_WS_PATH   "/ws/certManager"
+#define CERT_MANAGER_FILE    "/config/cert.json"
+#define CERT_MANAGER_WS_PATH "/ws/certManager"
 
 // Factory bootstrap token — one-time shared secret baked into the
 // firmware at build time. Empty by default; set via a build_flag

@@ -8,15 +8,37 @@ ConfigManagerService::ConfigManagerService(AsyncWebServer* server,
                                            SecurityManager* securityManager,
                                            ConfigManager* configManager)
     : _server(server), _sm(securityManager), _cfg(configManager) {
-  if (!_server || !_sm) return;
-  _server->on(CONFIG_MGR_FORM_PATH,
-              HTTP_GET,
-              _sm->wrapRequest(std::bind(&ConfigManagerService::serveForm, this, std::placeholders::_1),
-                               AuthenticationPredicates::IS_ADMIN));
+  // Route binding moved into registerManifest (WebPageSpec) so the
+  // endpoint flows through WebManager like every other bespoke page.
+  (void)_server; (void)_sm;
 }
 
 void ConfigManagerService::registerManifest(WebManager* web) {
   if (!web) return;
+  using namespace std::placeholders;
+
+  // Register the form-read endpoint via WebManager so rest.proxy can
+  // reach CONFIG_MGR_FORM_PATH (/api/v1/system/configmgr/form) without
+  // HTTP loopback.
+  WebPageSpec page;
+  page.id        = "configManagerUi";
+  page.title     = "Config Manager";
+  page.component = "";   // no top-level page route; contributes a tab below
+  page.auth      = WebAuthLevel::Admin;
+  {
+    WebEndpointMeta e;
+    e.method  = "GET"; e.path = CONFIG_MGR_FORM_PATH; e.role = "form";
+    e.auth    = WebAuthLevel::Admin;
+    e.handler = std::bind(&ConfigManagerService::serveForm, this, _1);
+    e.internalHandler =
+      [this](JsonVariant /*in*/, JsonVariant out, int& status) {
+        JsonObject o = out.to<JsonObject>();
+        buildForm(o);
+        status = 200;
+      };
+    page.endpoints.push_back(std::move(e));
+  }
+  web->registerPage(std::move(page));
 
   // Tab attached to the compound "system" feature shell.
   WebTabSpec tab;

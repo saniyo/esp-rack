@@ -62,7 +62,7 @@
 #endif
 
 #ifndef FT_SYSTEM_INFO
-#define FT_SYSTEM_INFO 1       // /rest/systemStatus + System tab roll-up
+#define FT_SYSTEM_INFO 1       // /api/v1/system/status + System tab roll-up
 #endif
 
 // ── Diagnostics pair (DEBUG-only, ship OFF) ─────────────────────────

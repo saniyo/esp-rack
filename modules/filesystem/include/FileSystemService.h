@@ -12,7 +12,7 @@
 
 class WebManager;
 
-#define FS_REST_BASE "/rest/fs"
+#define FS_REST_BASE "/api/v1/fs"
 #define FS_SCHEMA_PATH    FS_REST_BASE "/schema"
 #define FS_VOLUMES_PATH   FS_REST_BASE "/volumes"
 #define FS_LIST_PATH      FS_REST_BASE "/list"
@@ -41,7 +41,7 @@ class FileSystemService {
                     SecurityManager* securityManager);
 
   // Register this service's 28 endpoints with the WebManager so the frontend
-  // can resolve URLs by role from /rest/uiManifest. Route handlers remain
+  // can resolve URLs by role from /api/v1/ui/manifest. Route handlers remain
   // bound by the ctor above — this call only publishes metadata.
   void registerManifest(WebManager* web);
 

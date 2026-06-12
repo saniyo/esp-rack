@@ -54,7 +54,8 @@
 #endif
 
 #define MQTT_FILE         "/config/mqttSettings.json"
-#define MQTT_FORM_PATH    "/rest/mqttForm"
+// Form/state paths are derived by the registry (C1): /api/v1/mqtt/form (GET)
+// and /api/v1/mqtt/state (GET+POST). WS path stays explicit (/ws/*).
 #define MQTT_WS_PATH      "/ws/mqttStatus"
 
 #define MQTT_RECONNECTION_DELAY 5000

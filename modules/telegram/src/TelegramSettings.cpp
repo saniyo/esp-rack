@@ -200,7 +200,7 @@ void TelegramSettings::staRead(TelegramSettings& s, JsonObject& root) {
 // Only runtime fields editable over WS — the manual-send composer
 // text. Bot config (token / chat / topic / enabled / interval /
 // parseMode / silent) is REST-only and goes through the admin auth
-// predicate on /rest/telegramForm. Closing this leak was a primary
+// predicate on /api/v1/telegram/form. Closing this leak was a primary
 // goal of the Telegram refactor: a WS subscriber should never have
 // been able to rewrite credentials.
 StateUpdateResult TelegramSettings::staUpd(JsonObject& in, TelegramSettings& s) {

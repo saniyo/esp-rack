@@ -2,8 +2,8 @@
 #ifndef ESPRACK_UI_DYN_MODULE_H
 #define ESPRACK_UI_DYN_MODULE_H
 
-// UiDynModule — serves /rest/uiManifest, the React app's source of truth
-// for menu / routes / tabs. Wraps the legacy UiDynService.
+// UiDynModule — serves /api/v1/ui/dynamic, the React app's source of truth
+// for menu / routes / tabs. Wraps UiDynService.
 
 #include <Module.h>
 #include "UiDynService.h"
@@ -19,7 +19,7 @@ class UiDynModule : public ESPRack::Module {
     // Phase 7c — register the manifest GET as a proxy endpoint so
     // the mship-ui reverse proxy (Phase 7d ws-bridge) can reach it.
     // Without this the React app stuck on "Connecting to device..."
-    // because /rest/uiDynamicManifest 404'd through the proxy.
+    // because /api/v1/ui/dynamic 404'd through the proxy.
     if (svc_ && ctx.web) svc_->registerProxy(ctx.web);
   }
   void onBegin() override { if (svc_) svc_->begin(); }

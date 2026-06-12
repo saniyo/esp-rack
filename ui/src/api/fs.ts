@@ -1,10 +1,10 @@
 import { AxiosPromise, AxiosRequestConfig } from 'axios';
 import { AXIOS } from './endpoints';
 
-// Paths keyed by role. Defaults mirror the legacy hardcoded routes; when the
+// Paths keyed by role. Defaults mirror the canonical routes; when the
 // UI manifest is loaded, configureFsEndpoints() overwrites any roles the
-// backend publishes. AXIOS baseURL is '/rest/', hence the '/fs/…' prefix here
-// for axios calls and the '/rest/fs/…' absolute form for direct URL strings.
+// backend publishes. AXIOS baseURL is '/api/v1/', hence the '/api/v1/fs/…'
+// absolute form for direct URL strings.
 type FsRole =
   | 'schema' | 'volumes' | 'list' | 'stat'
   | 'download' | 'upload'
@@ -15,26 +15,26 @@ type FsRole =
   | 'hashStart' | 'hashStatus' | 'hashCancel';
 
 const FS_PATHS: Record<FsRole, string> = {
-  schema: '/rest/fs/schema',
-  volumes: '/rest/fs/volumes',
-  list: '/rest/fs/list',
-  stat: '/rest/fs/stat',
-  download: '/rest/fs/download',
-  upload: '/rest/fs/upload',
-  mkdir: '/rest/fs/mkdir',
-  delete: '/rest/fs/delete',
-  rename: '/rest/fs/rename',
-  format: '/rest/fs/format',
-  formatStatus: '/rest/fs/format/status',
-  unmount: '/rest/fs/unmount',
-  mount: '/rest/fs/mount',
-  archivePrepare: '/rest/fs/archive/prepare',
-  archiveStatus: '/rest/fs/archive/status',
-  archiveDownload: '/rest/fs/archive/download',
-  archiveCancel: '/rest/fs/archive/cancel',
-  hashStart: '/rest/fs/hash/start',
-  hashStatus: '/rest/fs/hash/status',
-  hashCancel: '/rest/fs/hash/cancel',
+  schema: '/api/v1/fs/schema',
+  volumes: '/api/v1/fs/volumes',
+  list: '/api/v1/fs/list',
+  stat: '/api/v1/fs/stat',
+  download: '/api/v1/fs/download',
+  upload: '/api/v1/fs/upload',
+  mkdir: '/api/v1/fs/mkdir',
+  delete: '/api/v1/fs/delete',
+  rename: '/api/v1/fs/rename',
+  format: '/api/v1/fs/format',
+  formatStatus: '/api/v1/fs/format/status',
+  unmount: '/api/v1/fs/unmount',
+  mount: '/api/v1/fs/mount',
+  archivePrepare: '/api/v1/fs/archive/prepare',
+  archiveStatus: '/api/v1/fs/archive/status',
+  archiveDownload: '/api/v1/fs/archive/download',
+  archiveCancel: '/api/v1/fs/archive/cancel',
+  hashStart: '/api/v1/fs/hash/start',
+  hashStatus: '/api/v1/fs/hash/status',
+  hashCancel: '/api/v1/fs/hash/cancel',
 };
 
 export interface ManifestFsEndpoint {
@@ -52,9 +52,9 @@ export function configureFsEndpoints(endpoints: ManifestFsEndpoint[] | undefined
   });
 }
 
-// AXIOS uses baseURL='/rest/'; strip the '/rest' prefix before passing to axios.
+// AXIOS uses baseURL='/api/v1/'; strip the '/api/v1' prefix before passing to axios.
 const toAxios = (absPath: string) =>
-  absPath.startsWith('/rest/') ? absPath.slice(5) : absPath;
+  absPath.startsWith('/api/v1/') ? absPath.slice(7) : absPath;
 
 export interface FsVolume {
   name: string;

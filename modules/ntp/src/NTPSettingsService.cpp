@@ -44,14 +44,16 @@ void NTPSettingsService::registerManifest(WebManager* web) {
   spec.menu.order = 200;
   spec.menu.auth  = WebAuthLevel::Authenticated;
   spec.auth       = WebAuthLevel::Authenticated;
-  spec.restRead   = NTP_FORM_PATH;
-  spec.restUpdate = NTP_FORM_PATH;
+  // restRead/restUpdate are no longer set: the registry derives the typed
+  // feature's mount paths from spec.id — /api/v1/ntp/form (GET) and
+  // /api/v1/ntp/state (GET+POST). WS path stays explicit (/ws/*).
   spec.wsPath     = NTP_WS_PATH;
 
+  // Own-feature tabs leave restPath null — toJson emits the derived form
+  // path (/api/v1/ntp/form) for them.
   WebTabSpec statusTab;
   statusTab.key      = "status";
   statusTab.title    = "Status";
-  statusTab.restPath = NTP_FORM_PATH;
   statusTab.postable = false;
   statusTab.live     = true;
   statusTab.auth     = WebAuthLevel::Authenticated;
@@ -60,7 +62,6 @@ void NTPSettingsService::registerManifest(WebManager* web) {
   WebTabSpec settingsTab;
   settingsTab.key      = "settings";
   settingsTab.title    = "Settings";
-  settingsTab.restPath = NTP_FORM_PATH;
   settingsTab.postable = true;
   settingsTab.auth     = WebAuthLevel::Admin;
   spec.tabs.push_back(settingsTab);

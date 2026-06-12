@@ -35,8 +35,10 @@ class WebManager;
 #endif
 
 #define SECURITY_SETTINGS_FILE       "/config/securitySettings.json"
-#define SECURITY_SETTINGS_PATH       "/rest/securitySettings"
-#define SECURITY_JWT_FORM_PATH       "/rest/system/jwt/form"
+// /api/v1/<id>/state and /api/v1/<id>/form are auto-derived by the registry;
+// these constants are kept only for the proxy endpoint registrations.
+#define SECURITY_SETTINGS_PROXY_PATH "/api/v1/security/state"
+#define SECURITY_JWT_PROXY_PATH      "/api/v1/system/jwt/form"
 
 #if FT_ENABLED(FT_SECURITY)
 
@@ -108,11 +110,12 @@ class SecuritySettingsService : public StatefulService<SecuritySettings>, public
 
  private:
   ConfigDelegate<SecuritySettings>     _cfg;
-  // Two features — same StatefulService, different paths/auth/readers.
-  // /rest/securitySettings (full state, used by /security React Users
-  // page) and /rest/system/jwt/form (JWT-only DynamicFeature form
-  // under the System tab). WebManager owns both endpoint bindings,
-  // dispatches proxy reach, and applies the right auth predicate.
+  // Two features — same StatefulService, different auth/readers.
+  // "security" feature: /api/v1/security/state (full state, used by
+  // /security React Users page). "securityJwt" feature: auto-derived
+  // /api/v1/securityJwt/form (JWT-only DynamicFeature form under the
+  // System tab). WebManager owns both endpoint bindings, dispatches
+  // proxy reach, and applies the right auth predicate.
   WebFeatureEntry<SecuritySettings>*   _fullFeature{nullptr};
   WebFeatureEntry<SecuritySettings>*   _jwtFeature{nullptr};
   ArduinoJsonJWT                       _jwtHandler;

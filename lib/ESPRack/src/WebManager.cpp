@@ -118,7 +118,7 @@ void ManifestBuilder::advancePhase() {
 
 void ManifestBuilder::fillPhaseBuffer() {
   switch (_phase) {
-    case Phase::HEADER:              setLiteral("{\"schemaVersion\":2"); return;
+    case Phase::HEADER:              setLiteral("{\"schemaVersion\":3"); return;
     case Phase::DEVICE_OPEN:         setLiteral(",\"device\":"); return;
     case Phase::BUILDFEATURES_OPEN:  setLiteral(",\"buildFeatures\":"); return;
     case Phase::AUTH_FALSE_END:      setLiteral(",\"authenticated\":false}"); return;
@@ -208,7 +208,7 @@ void WebManager::begin() {
       [this](AsyncWebServerRequest* request) { this->serveManifest(request); };
   _server->on(UI_MANIFEST_PATH, HTTP_GET, handler);
 
-  // Pre-bake the manifest to LittleFS so /rest/uiManifest is a pure
+  // Pre-bake the manifest to LittleFS so the UI-manifest endpoint is a pure
   // file stream from this point on. Signature gate inside ensures we
   // only rewrite on firmware changes — no flash wear on every boot.
   // Heap is at boot peak here (~70-90 KB max_alloc), so the one-shot
@@ -232,12 +232,12 @@ void WebManager::begin() {
 // headroom; if a single entry ever exceeded this we'd see truncation
 // of THAT entry only, never of unrelated entries downstream.
 // Single-shot manifest builder for the rest.proxy path. Browser-facing
-// /rest/uiManifest stays on AsyncResponseStream — this is the in-process
+// UI-manifest fetch stays on AsyncResponseStream — this is the in-process
 // alternative that fills a pre-allocated JsonObject so Mothership can
 // snapshot the device's UI schema without an HTTPS round trip on each
 // poll.
 void WebManager::buildManifestObject(JsonObject root) {
-  root["schemaVersion"] = 2;
+  root["schemaVersion"] = 3;
 
   JsonObject device = root.createNestedObject("device");
   device["name"]    = _deviceName;
@@ -310,7 +310,16 @@ uint32_t WebManager::computeManifestSig(ManifestBuilder& builder) const {
   // triggered" at boot). One shared builder keeps peak stack identical to the
   // original id-only path. No heap, no flash write here.
   builder.reset(*this, /*authed=*/true);
+  // Cache-signature salt — fold a generation tag into the CRC ahead of the
+  // manifest bytes so a framework-level path/schema migration forces every
+  // device to rebuild its flash cache on the first boot after the update,
+  // even in the (impossible-in-practice) event the new content CRCs to the
+  // same value as the old. Bump on any cross-cutting manifest format change.
+  // 0x0A_01_00_03 = api-v1 (C1), manifest schemaVersion 3.
+  static constexpr uint32_t kManifestSigSalt = 0x0A010003u;
   uint32_t crc = 0xFFFFFFFF;
+  crc = esp_rom_crc32_le(crc, reinterpret_cast<const uint8_t*>(&kManifestSigSalt),
+                         sizeof(kManifestSigSalt));
   uint8_t buf[256];
   for (size_t n = builder.fillNext(buf, sizeof(buf)); n;
        n = builder.fillNext(buf, sizeof(buf))) {

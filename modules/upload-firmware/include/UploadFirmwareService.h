@@ -16,8 +16,8 @@
 #include <SecurityManager.h>
 #include <RestartService.h>
 
-#define UPLOAD_FIRMWARE_PATH      "/rest/uploadFirmware"
-#define UPLOAD_FIRMWARE_FORM_PATH "/rest/upload/form"
+#define UPLOAD_FIRMWARE_PATH      "/api/v1/system/upload/firmware"
+#define UPLOAD_FIRMWARE_FORM_PATH "/api/v1/system/upload/form"
 
 class WebManager;
 

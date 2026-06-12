@@ -15,7 +15,6 @@
 #include <FS.h>
 
 #define FS_CONFIG_DIRECTORY "/config"
-#define FACTORY_RESET_SERVICE_PATH "/rest/factoryReset"
 
 class WebManager;
 
@@ -26,7 +25,8 @@ class FactoryResetService {
   FactoryResetService(AsyncWebServer* server, FS* fs, SecurityManager* securityManager);
 
   // Publish the factory-reset endpoint via WebManager as action
-  // `system.factoryReset`. Legacy URL is preserved.
+  // `system.factoryReset`. Registry mounts it at
+  // /api/v1/actions/system.factoryReset automatically.
   void registerManifest(WebManager* web);
 
   void factoryReset();

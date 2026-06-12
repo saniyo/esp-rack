@@ -7,7 +7,7 @@ export interface ManifestContextValue {
   loaded: boolean;
   error?: string;
   findFeature: (id: string) => FeatureEntry | undefined;
-  // Re-fetch /rest/uiManifest. Used by Authentication.signIn() after
+  // Re-fetch /api/v1/ui/manifest. Used by Authentication.signIn() after
   // the JWT lands so the stub manifest (anonymous response containing
   // brand only) gets swapped for the full authenticated map.
   reload: () => Promise<void>;

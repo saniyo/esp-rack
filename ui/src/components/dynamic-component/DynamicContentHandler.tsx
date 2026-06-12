@@ -208,7 +208,7 @@ const DynamicContentHandler: FC<DynamicContentHandlerProps> = ({
         return <TrendChart key={fieldKey} {...commonProps} />;
       case 'files': {
         const { optionMap: om } = parseFieldOptions(field.label, field.o);
-        const base = ((om as any).base?.value as string) || '/rest/fs';
+        const base = ((om as any).base?.value as string) || '/api/v1/fs';
         if (!endpointAvailable(manifest, base)) {
           return (
             <EndpointMissing

@@ -1,12 +1,35 @@
 #ifndef WebFeatureSpec_h
 #define WebFeatureSpec_h
 
+#include <cstddef>
+#include <cstdio>
 #include <functional>
 #include <vector>
 
 #include <ArduinoJson.h>
 #include <ESPAsyncWebServer.h>
 #include <WebAuth.h>
+
+// Canonical API prefix for the whole device HTTP surface (C1, api-v1).
+// Every machine/UI endpoint the registry derives lives under this — the
+// typed-feature form/state split (/api/v1/<id>/form, /api/v1/<id>/state),
+// actions (/api/v1/actions/<id>), and the bespoke page paths the modules
+// author. The old "/rest" prefix is gone entirely (pre-release clean cut,
+// no aliases). Bespoke handlers that build their own paths should compose
+// them from this constant so a future bump is a single edit.
+static constexpr const char* API_V1_PREFIX = "/api/v1";
+
+// Derive an action's canonical mount path (C1): always
+// "/api/v1/actions/<id>" — dotted ids stay dotted (e.g.
+// /api/v1/actions/wifi.scan). spec.restPath is intentionally ignored.
+// Writes into the caller's buffer so callers can hand it straight to
+// ArduinoJson's char[N] (Copy) overload or AsyncWebServer's String ctor
+// without a dangling const char*. Shared by WebActionEntry (mount + proxy)
+// and the manifest emitters in WebFeatureEntry / WebPageEntry.
+inline void fillActionPath(char* buf, size_t buf_sz, const char* id) {
+  if (buf_sz == 0) return;
+  snprintf(buf, buf_sz, "%s/actions/%s", API_V1_PREFIX, id && *id ? id : "unknown");
+}
 
 struct WebMenuMeta {
   const char* label = nullptr;
@@ -39,6 +62,12 @@ struct WebTabSpec {
   const char* key = nullptr;
   const char* title = nullptr;
   const char* icon = nullptr;   // optional MUI icon for the menu sub-tab leaf (expandTabs)
+  // Endpoint the tab reads/writes. For a typed feature's OWN tabs leave this
+  // null — toJson then emits the feature's derived form path
+  // (/api/v1/<id>/form), so modules stop hand-writing redundant tab paths.
+  // Tabs CONTRIBUTED to a compound feature via addTabToFeature (served by a
+  // different service) still set this explicitly to that service's page path
+  // (the new /api/v1/... bespoke paths — see the C1 PATH TABLE).
   const char* restPath = nullptr;
   bool postable = false;  // tab can POST updates to restPath
   bool live = false;      // tab subscribes to feature.wsPath for push updates
@@ -57,7 +86,12 @@ struct WebActionSpec {
   const char* title = nullptr;
   const char* icon = nullptr;
   const char* color = nullptr;     // MUI color variant
-  const char* restPath = nullptr;  // if null, auto: "/rest/action/<id>"
+  // DEPRECATED (C1): the action mount path is ALWAYS derived as
+  // "/api/v1/actions/<id>" (dotted ids stay dotted, e.g.
+  // /api/v1/actions/wifi.scan). This field is no longer consulted for
+  // mounting, the manifest, or rest.proxy matching — kept only so module
+  // specs that still set it compile. Remove once all modules drop it.
+  const char* restPath = nullptr;
   const char* method = "POST";     // HTTP method
   WebAuthLevel auth = WebAuthLevel::Admin;
   std::function<void(AsyncWebServerRequest*)> handler;
@@ -133,6 +167,12 @@ struct WebFeatureSpec {
   WebMenuMeta menu;
   WebAuthLevel auth = WebAuthLevel::Authenticated;
   const char* routeTemplate = nullptr;
+  // DEPRECATED for typed features (C1): WebFeatureEntry now DERIVES its mount
+  // paths from `id` — form at /api/v1/<id>/form, state at /api/v1/<id>/state —
+  // and ignores these two fields. Kept so existing module specs that still set
+  // restRead/restUpdate compile unchanged; remove from those specs over time.
+  // (WebInfoEntry — the metadata/info-feature path — STILL honours restRead as
+  // its single GET mount point; see WebInfoEntry.h.)
   const char* restRead = nullptr;
   const char* restUpdate = nullptr;
   const char* wsPath = nullptr;

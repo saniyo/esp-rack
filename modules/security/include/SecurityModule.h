@@ -3,8 +3,8 @@
 #define ESPRACK_SECURITY_MODULE_H
 
 // SecurityModule — provides the real PBKDF2-backed SecurityManager
-// implementation, plus the /rest/signIn AuthenticationService for the
-// React login flow. Replaces the framework's default
+// implementation, plus the /api/v1/auth/token AuthenticationService
+// for the React login flow. Replaces the framework's default
 // NullSecurityManager via App::setSecurityManager + WebManager::
 // setSecurityManager (both swapped early so subsequent modules that
 // register auth-protected endpoints capture the real pointer).
@@ -54,7 +54,7 @@ class SecurityModule : public ESPRack::Module {
     // Pass WebManager so the service also registers signIn as a
     // proxy endpoint — Phase 7c mship-ui reverse proxy can then
     // authenticate the operator through the bulk-upload-fronted UI
-    // without /rest/signIn 404'ing from rest.proxy.
+    // without /api/v1/auth/token 404'ing from rest.proxy.
     auth_.reset(new AuthenticationService(ctx.server, svc_.get(), ctx.web));
 #endif
   }

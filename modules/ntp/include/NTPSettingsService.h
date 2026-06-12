@@ -54,7 +54,9 @@
 #endif
 
 #define NTP_FILE        "/config/ntpSettings.json"
-#define NTP_FORM_PATH   "/rest/ntpForm"
+// Endpoint paths are derived by the registry now (C1): the typed feature
+// mounts /api/v1/ntp/form (GET) and /api/v1/ntp/state (GET+POST) from
+// spec.id — no per-module form-path #define. WS is unchanged (/ws/*).
 #define NTP_WS_PATH     "/ws/ntpStatus"
 
 class WebManager;

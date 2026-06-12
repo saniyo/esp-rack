@@ -8,7 +8,7 @@
 #include <SecurityManager.h>
 #include <WsManager.h>
 
-#define WS_DIAG_FORM_PATH   "/rest/system/sockets"
+#define WS_DIAG_FORM_PATH   "/api/v1/system/sockets/form"
 #define WS_DIAG_BUFFER_SIZE 8192
 
 class WebManager;

@@ -14,15 +14,15 @@ import { useRest } from '../../utils';
 import { useWs } from '../../utils/useWs';
 import { DynamicFormContext, DynamicFormCtx } from './DynamicFormContext';
 
-// AXIOS baseURL is '/rest/'. Manifest publishes absolute paths; strip the
-// '/rest' prefix before handing to axios so we don't end up with a
+// AXIOS baseURL is '/api/v1/'. Manifest publishes absolute paths; strip the
+// '/api/v1' prefix before handing to axios so we don't end up with a
 // double-prefixed URL that the server rewrites into the SPA fallback.
 const toAxiosPath = (absPath: string) =>
-  absPath.startsWith('/rest/') ? absPath.slice(5) : absPath;
+  absPath.startsWith('/api/v1/') ? absPath.slice(7) : absPath;
 
 // Per-tab panel. Owns its own REST fetch keyed by tab.restPath — crucial
 // for features whose tabs live on different endpoints (e.g. 'system' with
-// /rest/system/status + /rest/ota + /rest/upload).
+// /api/v1/system/status/form + /api/v1/ota/form + /api/v1/system/upload/form).
 interface DynamicTabPanelProps {
   tab: TabSpec;
   ws?: {

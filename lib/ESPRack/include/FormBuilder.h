@@ -161,7 +161,7 @@ inline RowFillTag rowFill(const char* spec) { return RowFillTag{spec}; }
 // but action POSTs empty body, so backend sees stale _state" gap.
 // Example: addActionField(..., actionRef("mqtt.attachTopic"),
 //                         withFields("topic=selected_topic"))
-//   click "Attach" → POST /rest/.../attach?topic=<selectedTopic>.
+//   click "Attach" → POST /api/v1/actions/mqtt.attachTopic?topic=<selectedTopic>.
 struct WithFieldsTag { const char* spec; };
 inline WithFieldsTag withFields(const char* spec) { return WithFieldsTag{spec}; }
 

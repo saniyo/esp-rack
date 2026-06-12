@@ -52,7 +52,8 @@
 #endif
 
 #define AP_FILE       "/config/apSettings.json"
-#define AP_FORM_PATH  "/rest/apForm"
+// AP_FORM_PATH removed (C1, api-v1): registry derives /api/v1/ap/form from
+// the feature id; own-feature tab restPath is nullptr in registerManifest.
 
 #define AP_MODE_ALWAYS 0
 #define AP_MODE_DISCONNECTED 1
@@ -121,7 +122,10 @@ class APSettings {
     root["subnet_mask"] = s.subnetMask.toString();
   }
 
-  /* ----- REST form (status + settings) ----- */
+  /* ----- Form builder (status + settings tabs) ----- */
+  // Served at /api/v1/ap/form (GET). Registered as the formReader in
+  // registerFeature<APSettings>; registry derives the path from the
+  // feature id (C1, api-v1).
   static void buildForm(APSettings& s, JsonObject& root);
 
   /* ----- Unified update ----- */

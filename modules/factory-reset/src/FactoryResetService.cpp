@@ -6,7 +6,7 @@ using namespace std::placeholders;
 
 // Ctor kept signature-compatible with the pre-migration layout. The HTTP
 // mount now happens through WebManager::registerAction (see registerManifest)
-// so the action also shows up in the manifest.
+// so the action appears in the manifest at /api/v1/actions/system.factoryReset.
 FactoryResetService::FactoryResetService(AsyncWebServer* /*server*/, FS* fs,
                                          SecurityManager* /*securityManager*/)
     : fs(fs) {}
@@ -18,7 +18,7 @@ void FactoryResetService::registerManifest(WebManager* web) {
   spec.title = "Factory Reset";
   spec.icon = "SettingsBackupRestore";
   spec.color = "error";
-  spec.restPath = FACTORY_RESET_SERVICE_PATH;
+  // restPath not set — registry mounts at /api/v1/actions/system.factoryReset.
   spec.method = "POST";
   spec.auth = WebAuthLevel::Admin;
   spec.confirm = "Are you sure you want to reset the device to its factory defaults?";

@@ -10,7 +10,7 @@ class SecurityManager;
 class WebManager;
 
 #ifndef UI_DYN_SERVICE_PATH
-#define UI_DYN_SERVICE_PATH "/rest/uiDynamicManifest"
+#define UI_DYN_SERVICE_PATH "/api/v1/ui/dynamic"
 #endif
 
 #ifndef MAX_UI_DYN_SIZE
@@ -19,7 +19,7 @@ class WebManager;
 
 class UiDynService {
  public:
-  static constexpr uint16_t kSchemaVersion = 1;
+  static constexpr uint16_t kSchemaVersion = 3;
   static constexpr size_t kMaxControls = 16;
 
   enum class HttpMethod : uint8_t { Get, Post, None };

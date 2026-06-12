@@ -3,7 +3,7 @@ import axios, { AxiosPromise, CancelToken } from 'axios';
 import { getClientKey } from '../utils/clientKey';
 
 export const WS_BASE_URL = '/ws/';
-export const API_BASE_URL = '/rest/';
+export const API_BASE_URL = '/api/v1/';
 export const ACCESS_TOKEN = 'access_token';
 export const WEB_SOCKET_ROOT = calculateWebSocketRoot(WS_BASE_URL);
 

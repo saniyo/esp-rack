@@ -206,14 +206,14 @@ void MqttSettingsService::registerManifest(WebManager* web) {
   spec.menu.order = 350;
   spec.menu.auth  = WebAuthLevel::Authenticated;
   spec.auth       = WebAuthLevel::Authenticated;
-  spec.restRead   = MQTT_FORM_PATH;
-  spec.restUpdate = MQTT_FORM_PATH;
+  // restRead/restUpdate omitted: registry derives /api/v1/mqtt/form + /api/v1/mqtt/state from spec.id.
   spec.wsPath     = MQTT_WS_PATH;
 
+  // Own-feature tabs leave restPath null — manifest emits the derived
+  // form path (/api/v1/mqtt/form) for them.
   WebTabSpec statusTab;
   statusTab.key      = "status";
   statusTab.title    = "Status";
-  statusTab.restPath = MQTT_FORM_PATH;
   statusTab.postable = false;
   statusTab.live     = true;
   statusTab.auth     = WebAuthLevel::Authenticated;
@@ -222,7 +222,6 @@ void MqttSettingsService::registerManifest(WebManager* web) {
   WebTabSpec subsTab;
   subsTab.key      = "subs";
   subsTab.title    = "Subscriptions";
-  subsTab.restPath = MQTT_FORM_PATH;
   subsTab.postable = false;
   subsTab.auth     = WebAuthLevel::Authenticated;
   subsTab.order    = 15;
@@ -231,7 +230,6 @@ void MqttSettingsService::registerManifest(WebManager* web) {
   WebTabSpec settingsTab;
   settingsTab.key      = "settings";
   settingsTab.title    = "Settings";
-  settingsTab.restPath = MQTT_FORM_PATH;
   settingsTab.postable = true;
   settingsTab.auth     = WebAuthLevel::Admin;
   settingsTab.order    = 20;

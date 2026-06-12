@@ -52,10 +52,10 @@ void UiDynService::begin() {
 void UiDynService::registerProxy(WebManager* web) {
   if (!web) return;
   // Captures `this` — the manifest is rebuilt on every call so any
-  // control registered AFTER this point is reflected. Proxy lambda
-  // bypasses the JWT predicate the AsyncWebServer route enforces;
-  // the trust anchor for the proxy path is the mship-ui operator
-  // login on mothership, not a device-side JWT.
+  // control registered AFTER this point is reflected (/api/v1/ui/dynamic).
+  // Proxy lambda bypasses the JWT predicate the AsyncWebServer route
+  // enforces; the trust anchor for the proxy path is the mship-ui
+  // operator login on mothership, not a device-side JWT.
   web->registerProxyEndpoint(
       "GET", _path,
       [this](JsonVariant /*body*/, JsonVariant out, int& out_status) {

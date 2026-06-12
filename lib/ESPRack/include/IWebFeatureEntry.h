@@ -19,7 +19,7 @@ class IWebFeatureEntry {
   // Bind server routes. Called from WebManager::begin() after all entries are registered.
   virtual void registerEndpoints(AsyncWebServer* server, SecurityManager* sm) = 0;
 
-  // Serialise this entry into a JsonObject for /rest/uiManifest.
+  // Serialise this entry into a JsonObject for /api/v1/ui/manifest.
   virtual void toJson(JsonObject& obj) const = 0;
 
   // Append a tab to this entry's tab list. Returns true if accepted.

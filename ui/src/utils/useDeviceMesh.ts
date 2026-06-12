@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { AXIOS } from '../api/endpoints';
 
-// A single LAN peer as reported by the mesh module's GET /rest/peers.
+// A single LAN peer as reported by the mesh module's GET /api/v1/mesh/peers.
 export interface Peer {
   device_id: string;
   project: string;
@@ -29,7 +29,7 @@ export interface DeviceMesh {
   peers: Peer[];
 }
 
-// useDeviceMesh — polls GET /rest/peers (the mesh module's discovered,
+// useDeviceMesh — polls GET /api/v1/mesh/peers (the mesh module's discovered,
 // trust-verified peer list + this device's own info). Returns empty/null
 // GRACEFULLY when the mesh module isn't installed (the endpoint 404s), so
 // the menu degrades to the classic single-device layout. One shared fetch
@@ -47,7 +47,7 @@ export function useDeviceMesh(pollMs = 30000): DeviceMesh {
 
     const load = () => {
       if (document.hidden) return; // don't poll a backgrounded tab
-      AXIOS.get('peers')
+      AXIOS.get('mesh/peers')
         .then((r) => {
           if (!alive) return;
           setData({

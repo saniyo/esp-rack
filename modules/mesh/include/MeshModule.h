@@ -31,7 +31,7 @@ class MeshModule : public ESPRack::Module {
   void onInstall(ESPRack::ModuleContext& ctx) override {
     app_ = ctx.app;
     svc_.reset(new MeshService());
-    svc_->registerManifest(ctx.web);   // Devices page + /rest/peers
+    svc_->registerManifest(ctx.web);   // Devices page + /api/v1/mesh/peers
   }
 
   void onBegin() override {

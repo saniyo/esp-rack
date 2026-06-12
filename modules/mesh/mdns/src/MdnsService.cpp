@@ -8,7 +8,7 @@
 #include "mdns.h"  // raw IDF query API — see browseService() leak note
 
 
-#define MDNS_FORM_PATH "/rest/system/mdns"
+#define MDNS_FORM_PATH "/api/v1/system/mdns/form"
 
 namespace {
 // Strip everything that's not a-z 0-9 - and lowercase. mDNS hostnames
@@ -44,9 +44,10 @@ MdnsService::MdnsService(AsyncWebServer* server) : _server(server) {}
 void MdnsService::registerManifest(WebManager* web) {
   if (!web) return;
 
-  // REST endpoint — form schema for the System > mDNS tab. The path
-  // matches what tab.restPath declares below, so the dynamic UI
-  // fetches the same JSON shape on tab-open.
+  // Raw endpoint — form schema for the System > mDNS tab. This tab is
+  // contributed to another feature ("system"), so tab.restPath is set
+  // explicitly to the bespoke page path (/api/v1/system/mdns/form), and
+  // the same path is mounted on AsyncWebServer below.
   WebTabSpec tab;
   tab.key       = "mdns";
   tab.title     = "mDNS";

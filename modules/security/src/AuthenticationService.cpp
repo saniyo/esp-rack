@@ -20,7 +20,7 @@ AuthenticationService::AuthenticationService(AsyncWebServer* server,
   // operator without traversing AsyncWebServer (proxyDispatch walks
   // WebManager registry, not the server's route table). Register the
   // same signIn flow as a proxy endpoint so the operator's React app
-  // can mint a JWT through the reverse-proxy path.
+  // can mint a JWT through the reverse-proxy path (/api/v1/auth/token).
   if (web) {
     web->registerProxyEndpoint(
         "POST", SIGN_IN_PATH,
@@ -28,7 +28,7 @@ AuthenticationService::AuthenticationService(AsyncWebServer* server,
           out_status = this->authenticateAndMintToken(body, out);
           return true;
         });
-    // Phase 7c — verifyAuthorization via proxy. The operator already
+    // Phase 7c — /api/v1/auth/verify via proxy. The operator already
     // proved identity at mship login, so we treat the proxy as a
     // trusted caller and always answer 200 (matches the "auth bypass"
     // policy that rest.proxy follows for other endpoints). Without

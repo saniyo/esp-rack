@@ -145,18 +145,14 @@ SecuritySettingsService::SecuritySettingsService(ConfigManager* cfgMgr) :
 void SecuritySettingsService::registerManifest(WebManager* web) {
   if (!web) return;
 
-  // Full-state feature — /rest/securitySettings carries the entire
-  // {jwt_secret, users[]} shape consumed by the standalone /security
-  // React page (Users CRUD). No menu entry, no manifest route: the
-  // React app owns the /security route directly via AuthenticatedRouting,
-  // and DynamicFeature on an auto-derived /security/* would shadow it.
-  // `routeTemplate = ""` explicitly suppresses route emission in
-  // WebFeatureEntry::toJson — React's manifestRoutes filter drops the
-  // entry because `!entry.route` is true for the empty string.
-  // Auth is Authenticated rather than Admin because the React page
-  // does an admin-level check itself before showing edit affordances;
-  // legacy /security clients (older devices on the same network) rely
-  // on this lower bar.
+  // Full-state feature — registry auto-mounts /api/v1/security/state
+  // (GET/POST) and /api/v1/security/form (GET). The standalone /security
+  // React page (Users CRUD) uses the state endpoint directly.
+  // `routeTemplate = ""` suppresses route emission in WebFeatureEntry::
+  // toJson — React's manifestRoutes filter drops the entry because
+  // `!entry.route` is true for the empty string. Auth is Authenticated
+  // rather than Admin because the React page does an admin-level check
+  // itself before showing edit affordances.
   {
     WebFeatureSpec spec;
     spec.id            = "security";
@@ -164,8 +160,8 @@ void SecuritySettingsService::registerManifest(WebManager* web) {
     spec.component     = "";  // bespoke React page, not DynamicFeature
     spec.routeTemplate = "";  // suppress /security/* manifest route
     spec.auth          = WebAuthLevel::Authenticated;
-    spec.restRead      = SECURITY_SETTINGS_PATH;
-    spec.restUpdate    = SECURITY_SETTINGS_PATH;
+    // restRead/restUpdate not assigned — registry ignores them and
+    // derives /api/v1/security/form and /api/v1/security/state itself.
     // Stays EXPLICIT 2048 (not WEBFEATURE_BUFFER_AUTO): the boot probe
     // would only measure the users[] present in the config file, but the
     // operator ADDS users at runtime (~160 B of JSON each) and AUTO+512
@@ -182,6 +178,7 @@ void SecuritySettingsService::registerManifest(WebManager* web) {
   // routeTemplate = "" so it doesn't ALSO emit a top-level /securityJwt
   // route (system feature already owns the tab pane). Admin-only since
   // rotating the JWT secret invalidates every issued token.
+  // Registry auto-mounts /api/v1/securityJwt/form (GET) for this feature.
   {
     WebFeatureSpec spec;
     spec.id            = "securityJwt";
@@ -189,8 +186,7 @@ void SecuritySettingsService::registerManifest(WebManager* web) {
     spec.component     = "";  // sub-tab of `system`
     spec.routeTemplate = "";  // no top-level route, system owns the page
     spec.auth          = WebAuthLevel::Admin;
-    spec.restRead      = SECURITY_JWT_FORM_PATH;
-    spec.restUpdate    = SECURITY_JWT_FORM_PATH;
+    // restRead/restUpdate not assigned — registry derives paths itself.
     // Auto-sized: single Secret field + one static message, no runtime
     // growth — the probe lands well under the old hand-guessed 1024.
     _jwtFeature = web->registerFeature<SecuritySettings>(
@@ -200,10 +196,13 @@ void SecuritySettingsService::registerManifest(WebManager* web) {
   }
 
   // Wire the JWT form as a tab under the compound `system` feature.
+  // restPath is the registry-derived form path for this bespoke page
+  // contributed to another feature (plan §3.1: own-feature tabs omit
+  // restPath; tabs contributed to OTHER features set it explicitly).
   WebTabSpec tab;
   tab.key      = "jwt";
   tab.title    = "JWT Secret";
-  tab.restPath = SECURITY_JWT_FORM_PATH;
+  tab.restPath = "/api/v1/securityJwt/form";
   tab.postable = true;
   tab.auth     = WebAuthLevel::Admin;
   tab.order    = 50;
