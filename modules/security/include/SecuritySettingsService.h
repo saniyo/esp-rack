@@ -35,10 +35,10 @@ class WebManager;
 #endif
 
 #define SECURITY_SETTINGS_FILE       "/config/securitySettings.json"
-// /api/v1/<id>/state and /api/v1/<id>/form are auto-derived by the registry;
-// these constants are kept only for the proxy endpoint registrations.
-#define SECURITY_SETTINGS_PROXY_PATH "/api/v1/security/state"
-#define SECURITY_JWT_PROXY_PATH      "/api/v1/system/jwt/form"
+// No REST path constants here: both features ("security", "securityJwt")
+// are typed — the registry derives /api/v1/<id>/form|state, and the
+// typed-feature proxyDispatch matches the same derived paths, so no
+// separate proxy registration (and no path string) is needed.
 
 #if FT_ENABLED(FT_SECURITY)
 

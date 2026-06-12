@@ -195,14 +195,13 @@ void SecuritySettingsService::registerManifest(WebManager* web) {
         WEBFEATURE_BUFFER_AUTO);
   }
 
-  // Wire the JWT form as a tab under the compound `system` feature.
-  // restPath is the registry-derived form path for this bespoke page
-  // contributed to another feature (plan §3.1: own-feature tabs omit
-  // restPath; tabs contributed to OTHER features set it explicitly).
+  // Wire the JWT form as a tab under the compound `system` feature —
+  // referenced by typed-feature id; the manifest emitter resolves the
+  // derived /api/v1/securityJwt/form path.
   WebTabSpec tab;
   tab.key      = "jwt";
   tab.title    = "JWT Secret";
-  tab.restPath = "/api/v1/securityJwt/form";
+  tab.formOf   = "securityJwt";
   tab.postable = true;
   tab.auth     = WebAuthLevel::Admin;
   tab.order    = 50;

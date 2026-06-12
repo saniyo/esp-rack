@@ -166,9 +166,14 @@ class WebFeatureEntry : public IWebFeatureEntry {
       if (t.key) jt["key"] = t.key;
       if (t.title) jt["title"] = t.title;
       if (t.icon) jt["icon"] = t.icon;
-      // A tab with no explicit restPath addresses this feature's own form
-      // (C1): emit the derived form path so modules drop redundant tab paths.
-      if (t.restPath) {
+      // C1 precedence: formOf (another typed feature's derived form) →
+      // explicit restPath (bespoke page) → this feature's own derived
+      // form path, so modules never hand-write derivable tab paths.
+      if (t.formOf && *t.formOf) {
+        char formBuf[112];
+        snprintf(formBuf, sizeof(formBuf), "%s/%s/form", API_V1_PREFIX, t.formOf);
+        jt["restPath"] = formBuf;
+      } else if (t.restPath) {
         jt["restPath"] = t.restPath;
       } else if (_spec.id && *_spec.id) {
         char formBuf[112];

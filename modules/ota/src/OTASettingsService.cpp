@@ -60,9 +60,9 @@ void OTASettingsService::registerManifest(WebManager* web) {
   WebTabSpec tab;
   tab.key = "ota";
   tab.title = "OTA Settings";
-  // Contributed to "system" feature — must set restPath explicitly to the
-  // new bespoke form path (own-feature default does not apply here).
-  tab.restPath = "/api/v1/ota/form";
+  // Contributed to "system" — reference our typed feature by id; the
+  // manifest emitter resolves the derived /api/v1/ota/form path.
+  tab.formOf = "ota";
   tab.postable = true;
   tab.auth = WebAuthLevel::Admin;
   tab.order = 60;

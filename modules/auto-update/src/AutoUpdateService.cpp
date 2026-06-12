@@ -126,9 +126,10 @@ void AutoUpdateService::registerManifest(WebManager* web) {
   WebTabSpec tab;
   tab.key = "autoUpdate";
   tab.title = "Auto Update";
-  // Contributed to "system" feature — must set restPath explicitly to the
-  // new bespoke form path (own-feature default does not apply here).
-  tab.restPath = "/api/v1/autoUpdate/form";
+  // Contributed to "system" — reference our typed feature by id; the
+  // manifest emitter resolves the derived /api/v1/autoUpdate/form so a
+  // feature-id rename can never silently desync this tab.
+  tab.formOf = "autoUpdate";
   tab.postable = true;
   tab.auth = WebAuthLevel::Admin;
   tab.order = 80;

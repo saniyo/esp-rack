@@ -64,11 +64,17 @@ struct WebTabSpec {
   const char* icon = nullptr;   // optional MUI icon for the menu sub-tab leaf (expandTabs)
   // Endpoint the tab reads/writes. For a typed feature's OWN tabs leave this
   // null — toJson then emits the feature's derived form path
-  // (/api/v1/<id>/form), so modules stop hand-writing redundant tab paths.
-  // Tabs CONTRIBUTED to a compound feature via addTabToFeature (served by a
-  // different service) still set this explicitly to that service's page path
-  // (the new /api/v1/... bespoke paths — see the C1 PATH TABLE).
+  // (/api/v1/<id>/form). For tabs CONTRIBUTED via addTabToFeature whose
+  // backing service is itself a TYPED feature, set `formOf` below instead
+  // of duplicating the derived path by hand. Only truly bespoke pages
+  // (raw server->on handlers: fs, upload, system/* forms) author restPath
+  // as a string — see the C1 PATH TABLE.
   const char* restPath = nullptr;
+  // Id of a typed feature whose DERIVED form path this tab addresses.
+  // Emitters resolve it to /api/v1/<formOf>/form at manifest build time,
+  // so a feature-id rename can never silently desync a contributed tab.
+  // Takes precedence over restPath when both are set.
+  const char* formOf = nullptr;
   bool postable = false;  // tab can POST updates to restPath
   bool live = false;      // tab subscribes to feature.wsPath for push updates
   WebAuthLevel auth = WebAuthLevel::Authenticated;

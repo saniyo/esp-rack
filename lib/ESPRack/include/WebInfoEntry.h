@@ -101,10 +101,15 @@ class WebInfoEntry : public IWebFeatureEntry {
       if (t.key) jt["key"] = t.key;
       if (t.title) jt["title"] = t.title;
       if (t.icon) jt["icon"] = t.icon;
-      // C1: a tab without an explicit restPath falls back to this info
-      // feature's own GET path (its authored spec.restRead). Contributed
-      // tabs (addTab) point at their own service's page path instead.
-      if (t.restPath) {
+      // C1: formOf (typed-feature reference) wins — resolved to that
+      // feature's DERIVED form path so an id rename can never desync a
+      // contributed tab. Then explicit restPath (bespoke pages); then
+      // this info feature's own authored GET path as the final fallback.
+      if (t.formOf && *t.formOf) {
+        char formBuf[112];
+        snprintf(formBuf, sizeof(formBuf), "%s/%s/form", API_V1_PREFIX, t.formOf);
+        jt["restPath"] = formBuf;
+      } else if (t.restPath) {
         jt["restPath"] = t.restPath;
       } else if (_spec.restRead) {
         jt["restPath"] = _spec.restRead;
