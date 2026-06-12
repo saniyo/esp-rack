@@ -1,0 +1,14 @@
+# Spectral ruleset for the generated device OpenAPI (api-standardization C4).
+# The document is machine-generated (scripts/gen_openapi.py) - lint guards
+# the GENERATOR's output contract, not hand-edits.
+#   npx -y @stoplight/spectral-cli lint api/openapi.json -r api/.spectral.yaml
+extends: ["spectral:oas"]
+rules:
+  # Generated operations intentionally carry no operationId/description on
+  # every single op - summaries + tags are the contract; silence the noise
+  # but keep structural validation (refs, schemas, responses) at full power.
+  operation-operationId: off
+  operation-description: off
+  info-contact: off
+  info-license: off
+  oas3-api-servers: warn
