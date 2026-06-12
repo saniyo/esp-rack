@@ -1,6 +1,8 @@
 #include "HeapMonitor.h"
 
 #include <Arduino.h>
+
+#if FT_ENABLED(FT_HEAP_MONITOR)
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
@@ -134,3 +136,26 @@ void HeapMonitor::dumpTasks(const char* tag) {
 }
 
 }  // namespace ESPRack
+
+#else  // !FT_ENABLED(FT_HEAP_MONITOR)
+
+namespace ESPRack {
+
+// Monitor compiled out — only snapshot() survives, answering the
+// System-tab "Heap @ idle" row with a live, ring-free reading. No BSS
+// ring, no FreeRTOS trace pull-in, no per-minute tick.
+HeapSnapshot HeapMonitor::snapshot() {
+  HeapSnapshot s = {};
+  s.latest.uptime_s      = (uint32_t)(millis() / 1000);
+  s.latest.free_bytes    = ESP.getFreeHeap();
+  s.latest.max_alloc     = ESP.getMaxAllocHeap();
+  s.latest.min_free_ever = ESP.getMinFreeHeap();
+  s.boot = s.latest;
+  s.max_alloc_slope_bpm = 0;
+  s.sample_count = 0;
+  return s;
+}
+
+}  // namespace ESPRack
+
+#endif  // FT_ENABLED(FT_HEAP_MONITOR)

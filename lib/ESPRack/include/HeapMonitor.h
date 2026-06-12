@@ -19,9 +19,16 @@
 //
 // Zero heap impact — the entire ring lives in BSS. The tick handler
 // makes no allocations.
+//
+// DEBUG-GATED (FT_HEAP_MONITOR, default 0). The fragmentation hunt this
+// was built for is closed, so shipping builds compile the ring + all
+// logging out to no-ops; `snapshot()` alone stays live (it backs an
+// operator-facing System-tab row, not debug). Re-enable with
+// `-D FT_HEAP_MONITOR=1` in features.ini for the next heap investigation.
 
 #include <stdint.h>
 #include <stddef.h>
+#include <Features.h>
 
 namespace ESPRack {
 
@@ -46,13 +53,10 @@ struct HeapSnapshot {
 
 class HeapMonitor {
  public:
+#if FT_ENABLED(FT_HEAP_MONITOR)
   // Per-minute tick. Cheap; just reads ESP heap APIs and stores into
   // the ring. Called from App::loop on a 60 s throttle.
   static void tick();
-
-  // Snapshot for callers (System tab UI render, /checkin body, etc.).
-  // O(N) but N=60 max — fits comfortably in a render path.
-  static HeapSnapshot snapshot();
 
   // Direct access to the ring for JSON sparkline emission. Caller
   // gets newest-first order (idx 0 = latest). Returns true and fills
@@ -74,6 +78,23 @@ class HeapMonitor {
   // CONFIG_FREERTOS_USE_TRACE_FACILITY (on by default for ESP-IDF
   // Arduino).
   static void dumpTasks(const char* tag);
+#else
+  // ── FT_HEAP_MONITOR=0: instrumentation compiled out ─────────────────
+  // Every entry point is a no-op so the ~20 logSnapshot/tick call sites
+  // across App / WireGuard / Mothership keep compiling untouched, the
+  // ring leaves BSS, and the optimizer drops the unused tag strings.
+  static inline void tick() {}
+  static inline bool sampleAt(uint8_t, HeapSample&) { return false; }
+  static inline uint8_t sampleCount() { return 0; }
+  static inline void logSnapshot(const char*) {}
+  static inline void dumpTasks(const char*) {}
+#endif
+
+  // Snapshot for callers (System tab UI render, /checkin body, etc.).
+  // Live in BOTH modes — it backs an operator-facing row, not debug.
+  // FT_HEAP_MONITOR=1 → newest ring sample + hour slope (O(N), N≤60);
+  // =0 → a synthesised live reading (sample_count=0, slope=0).
+  static HeapSnapshot snapshot();
 };
 
 }  // namespace ESPRack

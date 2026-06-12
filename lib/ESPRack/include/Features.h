@@ -65,6 +65,28 @@
 #define FT_SYSTEM_INFO 1       // /rest/systemStatus + System tab roll-up
 #endif
 
+// ── Diagnostics pair (DEBUG-only, ship OFF) ─────────────────────────
+// Both were built for the perf / heap-fragmentation hunt. That work is
+// closed, so unlike every other FT_* above they default OFF — flip to 1
+// in features.ini only while actively investigating a regression.
+//
+// FT_HEAP_MONITOR — HeapMonitor's per-minute max_alloc ring + boot / WG /
+// mship / soak snapshot logging + per-task stack dump. When 0 the 960 B
+// BSS ring and all logSnapshot/tick/dumpTasks call sites compile to
+// no-ops (serial quiet, flash drops the tag strings); the System-tab
+// "Heap @ idle" row still reads live heap via snapshot().
+#ifndef FT_HEAP_MONITOR
+#define FT_HEAP_MONITOR 0
+#endif
+
+// FT_LOOP_PROFILE — App::loop's once-a-minute per-module profiler
+// (dt / dheap / dmax / dstack per module, ~25 log_i lines/min). When 0
+// the instrumentation is compiled out and loop() runs the bare onLoop
+// fan-out with zero per-iteration overhead.
+#ifndef FT_LOOP_PROFILE
+#define FT_LOOP_PROFILE 0
+#endif
+
 // Field-level password encryption (SecretsVault — AES-128-CBC with a
 // chip-derived key). When FT_SECRETS_VAULT=0, the SecretsVault
 // implementation is preprocessed out — mbedtls AES + SHA-256 + eFuse
