@@ -30,8 +30,25 @@ void WebEndpointsService::registerManifest(WebManager* web) {
 }
 
 void WebEndpointsService::serveForm(AsyncWebServerRequest* request) {
+  // Proactive heap guard — same contract as HttpEndpoint's. Without it
+  // this (admin-only, biggest-doc) endpoint kept serving under pressure
+  // and the response head String failed to allocate mid-send: the body
+  // went out with NO status line / headers at all ("Received HTTP/0.9
+  // when not allowed" on the wire, observed live on a C3 at ~9 KB
+  // maxAlloc). A clean 503 the UI can retry beats a protocol-corrupt 200.
+  if (ESP.getMaxAllocHeap() < WEB_ENDPOINTS_BUFFER_SIZE + 1024) {
+    request->send(503, "application/json",
+                  "{\"error\":\"heap_pressure\",\"retryAfter\":2}");
+    return;
+  }
   AsyncJsonResponse* response = new AsyncJsonResponse(false, WEB_ENDPOINTS_BUFFER_SIZE);
   JsonObject root = response->getRoot();
+  if (root.isNull()) {  // doc alloc failed despite the guard — race lost
+    delete response;
+    request->send(503, "application/json",
+                  "{\"error\":\"oom\",\"detail\":\"response buffer alloc failed\"}");
+    return;
+  }
   buildForm(root);
   response->setLength();
   request->send(response);
@@ -56,11 +73,6 @@ String jNested(JsonObjectConst src, const char* objKey, const char* leafKey) {
   JsonVariantConst v = inner[leafKey];
   if (!v.is<const char*>() && !v.is<String>()) return String();
   return v.as<String>();
-}
-
-const char* kindLabel(const char* k) {
-  if (!k || !*k) return "?";
-  return k;
 }
 
 }  // namespace
@@ -109,7 +121,11 @@ void WebEndpointsService::buildForm(JsonObject& root) {
   // source as the Clients tab uses for its rows (WsManager::fillStats),
   // we just project the headline metrics here.
   if (_ws) {
-    StaticJsonDocument<4096> stats;
+    // Heap, not StaticJsonDocument: 4 KB on the stack of the async_tcp
+    // task (8 KB total) left no headroom for FormBuilder frames below —
+    // stack-overflow territory. The serveForm() heap guard already
+    // ensured this allocation fits before we got here.
+    DynamicJsonDocument stats(4096);
     JsonObject statsRoot = stats.to<JsonObject>();
     _ws->fillStats(statsRoot);
 
@@ -191,8 +207,13 @@ void WebEndpointsService::buildForm(JsonObject& root) {
       icon("ListAlt"));
 
   JsonArray rows = tbl["entries"].as<JsonArray>();
+  // ONE scratch doc reused across all entries (clear() resets the pool)
+  // instead of a fresh 2 KB DynamicJsonDocument per entry — ~40 entries
+  // meant ~40 alloc/free cycles inside a single request handler, churning
+  // exactly the heap this response is trying to allocate from.
+  DynamicJsonDocument tmp(2048);
   _wm->forEachEntry([&](const IWebFeatureEntry& e) {
-    DynamicJsonDocument tmp(2048);
+    tmp.clear();
     JsonObject obj = tmp.to<JsonObject>();
     e.toJson(obj);
     // JsonObject → JsonObjectConst: implicit conversion. Avoid the
@@ -203,7 +224,14 @@ void WebEndpointsService::buildForm(JsonObject& root) {
 
     JsonObject row = rows.createNestedObject();
     row["id"]    = j(src, "id");
-    row["kind"]  = kindLabel(j(src, "kind").c_str());
+    // String, NOT the kindLabel(...).c_str() form: ArduinoJson stores a
+    // `const char*` BY POINTER, and that pointer belonged to a temporary
+    // String — by serialization time it was freed heap, which rendered
+    // as "kind":"  ..." garbage on the wire (observed live).
+    // A String value is copied into the document pool instead.
+    String kindStr = j(src, "kind");
+    if (kindStr.isEmpty()) kindStr = "?";
+    row["kind"]  = kindStr;
 
     // Feature: rest.read / rest.update  +  ws  (ws sometimes flat, sometimes nested)
     // Action:  restPath  +  method

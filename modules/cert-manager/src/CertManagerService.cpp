@@ -449,11 +449,18 @@ void CertManagerService::registerManifest(WebManager* web) {
   internalsTab.order    = 30;
   spec.tabs.push_back(internalsTab);
 
+  // REST buffer auto-sized from the real schema tree at boot (measured
+  // 4.7 KB serialized on a live device). The previous hand-guessed 8192
+  // was lethal on the no-PSRAM C3: the proactive guard 503s whenever
+  // maxAlloc < bufferSize, and steady-state maxAlloc there is ~9 KB — any
+  // concurrent in-flight response dropped it below 8192, so THIS form
+  // 503'd 10/10 under a 6-way page-load burst while every response it
+  // would have built actually needed barely 5 KB.
   _feature = web->registerFeature<CertManagerSettings>(
       std::move(spec), this,
       CertManagerSettings::buildForm,  CertManagerSettings::update,
       CertManagerSettings::staRead,    CertManagerSettings::staUpd,
-      8192, 4096);
+      WEBFEATURE_BUFFER_AUTO, 4096);
 }
 
 void CertManagerService::begin() {

@@ -65,11 +65,14 @@ void NTPSettingsService::registerManifest(WebManager* web) {
   settingsTab.auth     = WebAuthLevel::Admin;
   spec.tabs.push_back(settingsTab);
 
+  // REST buffer auto-sized (measured 0.6 KB live; clock strings are
+  // fixed-width strftime output, no runtime rows). WS stays a fixed
+  // 2048 — staRead is a flat scalar payload, not guard-coupled.
   _feature = web->registerFeature<NTPSettings>(
       std::move(spec), this,
       NTPSettings::buildForm, NTPSettings::update,
       NTPSettings::staRead,   NTPSettings::staUpd,
-      2048, 2048);
+      WEBFEATURE_BUFFER_AUTO, 2048);
 }
 
 void NTPSettingsService::begin() {

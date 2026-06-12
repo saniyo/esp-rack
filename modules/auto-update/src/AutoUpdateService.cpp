@@ -115,10 +115,13 @@ void AutoUpdateService::registerManifest(WebManager* web) {
   spec.restRead   = AUTO_UPDATE_SERVICE_PATH;
   spec.restUpdate = AUTO_UPDATE_SERVICE_PATH;
 
+  // REST buffer auto-sized (measured 0.6 KB live; fixed-count scalars,
+  // status strings bounded <300 B — no runtime rows). Was hand-guessed
+  // 4096, which also raised the heap-guard threshold 6x above need.
   _feature = web->registerFeature<AutoUpdateSettings>(
       std::move(spec), this,
       AutoUpdateSettings::buildForm, AutoUpdateSettings::update,
-      4096);
+      WEBFEATURE_BUFFER_AUTO);
 
   WebTabSpec tab;
   tab.key = "autoUpdate";

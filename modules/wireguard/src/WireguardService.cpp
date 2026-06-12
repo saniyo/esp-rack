@@ -226,11 +226,15 @@ void WireguardService::registerManifest(WebManager* web) {
   internalsTab.order    = 90;
   spec.tabs.push_back(internalsTab);
 
+  // REST buffer auto-sized (measured 2.2 KB live; all scalars — fixed
+  // 44-char keys, bounded endpoint/IP strings, counters — present at
+  // probe time, +512 slack covers counter digit growth). WS stays a
+  // fixed 2048: staRead is a ~150 B flat payload, not guard-coupled.
   _feature = web->registerFeature<WireguardSettings>(
       std::move(spec), this,
       WireguardSettings::buildForm,  WireguardSettings::update,
       WireguardSettings::staRead,    WireguardSettings::staUpd,
-      4096, 2048);
+      WEBFEATURE_BUFFER_AUTO, 2048);
 }
 
 void WireguardService::begin() {

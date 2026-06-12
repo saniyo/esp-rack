@@ -157,6 +157,14 @@ void TelegramService::registerManifest(WebManager* web) {
   // can't allocate under extreme pressure, HttpEndpoint's OOM guard
   // returns 503 → useRest surfaces a snackbar error rather than
   // permanently spinning. WS stays 8K (status+log only, no subs).
+  //
+  // Stays EXPLICIT 8192/8192 (not WEBFEATURE_BUFFER_AUTO): the boot
+  // probe would measure an EMPTY chatLog (zero sends at boot) and an
+  // empty _subs table (services subscribe after the probe), sizing the
+  // buffer ~1.5 KB — then the 30-row log (~2.4-4.8 KB) plus subs rows
+  // appearing at runtime would be silently dropped from both the REST
+  // form and the WS pushes. 8192 covers the saturated-log worst case
+  // (~5-6 KB) with margin.
   _feature = web->registerFeature<TelegramSettings>(
       std::move(spec), this,
       fullReader,                 TelegramSettings::upd,

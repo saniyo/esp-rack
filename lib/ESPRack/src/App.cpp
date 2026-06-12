@@ -352,6 +352,37 @@ void App::begin() {
   });
 #endif
 
+  // 7.5 — Per-connection service-latency guard. ESPAsyncWebServer arms
+  // every accepted socket with rxTimeout=3 s (WebServer.cpp ctor) on top
+  // of AsyncTCP's 5 s ack-timeout — tuned for a dual-core ESP32 where
+  // async_tcp owns a full core. On single-core C3/C6 a first-load burst
+  // (icons + manifest + REST forms, ~6 parallel) shares ONE core between
+  // WiFi, lwIP, loopTask and async_tcp; per-connection service latency
+  // can exceed those timers and the server KILLS ITS OWN healthy-but-
+  // queued connections — the "Network Error" / broken-brand-icon symptom
+  // (measured on C3: 17/60 failures at 6-way concurrency, 15/15
+  // sequential). This middleware runs on every request right before
+  // handler dispatch and relaxes both timers so slow-but-progressing
+  // connections survive the burst. 10 s still reaps genuinely dead /
+  // idle keep-alive sockets fast enough to protect the 16-slot lwIP PCB
+  // pool, slow-loris protection is intact (the stock 3 s window keeps
+  // applying until headers complete), and WebSocket / EventSource
+  // upgrades are unaffected (their handlers zero rxTimeout afterwards).
+#ifndef ESPRACK_HTTP_RX_TIMEOUT_S
+#define ESPRACK_HTTP_RX_TIMEOUT_S 10
+#endif
+#ifndef ESPRACK_HTTP_ACK_TIMEOUT_MS
+#define ESPRACK_HTTP_ACK_TIMEOUT_MS 10000
+#endif
+  server_->addMiddleware([](AsyncWebServerRequest* r, ArMiddlewareNext next) {
+    AsyncClient* c = r->client();
+    if (c) {
+      c->setRxTimeout(ESPRACK_HTTP_RX_TIMEOUT_S);
+      c->setAckTimeout(ESPRACK_HTTP_ACK_TIMEOUT_MS);
+    }
+    next();
+  });
+
   // 8. Start AsyncWebServer listening on port 80. Done LAST so every
   // module's registerFeature/registerAction + the static-file fallback
   // are already mounted before the first incoming request arrives.
@@ -366,16 +397,17 @@ void App::begin() {
 void App::loop() {
   if (!begun_) return;
 
-  // Per-module loop profiler. Once every 60 s, snapshot:
-  //   * stack high-water mark for loopTask BEFORE/AFTER each
-  //     m->onLoop() — reveals which module sinks the most stack
-  //   * free heap / max_alloc deltas — reveals which module churns
-  //     heap inside its loop tick
-  //   * elapsed micros — reveals which module spends the most CPU
-  // Off-cycle ticks (every other 60 s pass) skip the instrumentation
-  // entirely so the steady-state cost is one `millis()` compare per
-  // loop iteration. Pure diagnostic — strip the block when the
-  // per-module audit is done.
+  // Module loop fan-out. The per-module profiler and the heap-drift
+  // sampler that bracket it are DEBUG instrumentation (FT_LOOP_PROFILE /
+  // FT_HEAP_MONITOR), built for the perf / fragmentation hunt and
+  // compiled out of shipping builds — leaving just the bare onLoop fan-
+  // out below. Flip the flags in features.ini to bring either back.
+#if FT_ENABLED(FT_LOOP_PROFILE)
+  // Once every 60 s, snapshot per module:
+  //   * loopTask stack high-water BEFORE/AFTER m->onLoop() — who sinks stack
+  //   * free heap / max_alloc deltas — who churns heap inside its tick
+  //   * elapsed micros — who spends the most CPU
+  // Off-cycle passes skip instrumentation entirely (one millis() compare).
   static uint32_t s_lastProfile_ms = 0;
   const uint32_t now_ms = millis();
   const bool profile_this_pass = (now_ms - s_lastProfile_ms) >= 60000;
@@ -410,25 +442,31 @@ void App::loop() {
       if (m) m->onLoop();
     }
   }
+#else
+  for (auto& m : modules_) {
+    if (m) m->onLoop();
+  }
+#endif  // FT_LOOP_PROFILE
   wsManager_.processAllQueues();
 
+#if FT_ENABLED(FT_HEAP_MONITOR)
   // Heap drift sampler — 60 s cadence, zero-alloc. Captures the slow
-  // fragmentation slope that predicts TLS-handshake failure long
-  // before the failure actually happens. See HeapMonitor.h for the
-  // certified-uptime rationale.
+  // fragmentation slope that predicts TLS-handshake failure long before
+  // the failure happens. See HeapMonitor.h for the uptime rationale.
   static uint32_t s_lastHeapTick_ms = 0;
   static uint8_t  s_ticksSinceLog  = 0;
-  if (now_ms - s_lastHeapTick_ms >= 60000) {
-    s_lastHeapTick_ms = now_ms;
+  const uint32_t hb_now = millis();
+  if (hb_now - s_lastHeapTick_ms >= 60000) {
+    s_lastHeapTick_ms = hb_now;
     HeapMonitor::tick();
-    // Periodic visibility: print every 5 ticks (≈5 min). Cheap on
-    // serial bandwidth, but enough resolution to spot a drift over
-    // the hours-to-days timescale that matters for certified uptime.
+    // Periodic visibility: print every 5 ticks (≈5 min) — enough to spot
+    // drift over the hours-to-days timescale that matters for uptime.
     if (++s_ticksSinceLog >= 5) {
       s_ticksSinceLog = 0;
       HeapMonitor::logSnapshot("soak");
     }
   }
+#endif  // FT_HEAP_MONITOR
 }
 
 void App::shutdown() {

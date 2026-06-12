@@ -33,7 +33,11 @@ const char*    PEERS_PATH              = "/rest/peers";
 const uint32_t MESH_BROWSE_INTERVAL_MS = 20000;  // re-browse cadence
 const uint32_t MESH_QUERY_TIMEOUT_MS   = 3000;   // per mdns_query_ptr
 const size_t   MESH_MAX_PEERS          = 32;     // bounded cache
-const uint32_t MESH_SERVE_MIN_ALLOC    = 6144;   // 503 guard for /rest/peers
+// 503 guard for /rest/peers — must cover the 4096 response doc plus a
+// little slack, no more. The menu polls this path every 10 s, so an
+// over-strict guard (was 6144) turned routine C3 heap levels (~9 KB
+// maxAlloc minus any in-flight form) into a steady drip of 503 toasts.
+const uint32_t MESH_SERVE_MIN_ALLOC    = 4608;
 
 // HMAC-SHA256(key, msg) truncated to `outBytes`, lowercase hex.
 String hmacHex(const String& key, const String& msg, size_t outBytes) {
@@ -60,15 +64,16 @@ String hmacHex(const String& key, const String& msg, size_t outBytes) {
 void MeshService::registerManifest(WebManager* web) {
   if (!web) return;
 
-  // Devices page — a bespoke React renderer (CUSTOM_RENDERERS["Devices"])
-  // that fetches /rest/peers. Route derived from id => /devices.
+  // Discovery page — a bespoke React renderer (CUSTOM_RENDERERS["Discovery"])
+  // that fetches /rest/peers. Route derived from id => /discovery. In the mesh
+  // menu this is the top-level umbrella under which the device records nest.
   WebPageSpec page;
-  page.id         = "devices";
-  page.title      = "Devices";
-  page.component  = "Devices";
-  page.menu.label = "Devices";
-  page.menu.icon  = "Hub";
-  page.menu.order = 5;            // near the top of the side-nav
+  page.id         = "discovery";
+  page.title      = "Discovery";
+  page.component  = "Discovery";
+  page.menu.label = "Discovery";
+  page.menu.icon  = "DeviceHub";
+  page.menu.order = 1;            // top of the side-nav
   page.menu.auth  = WebAuthLevel::Authenticated;
   page.auth       = WebAuthLevel::Authenticated;
 
@@ -96,10 +101,22 @@ void MeshService::begin(IMdnsResolver* mdns) {
   _sig       = hmacHex(_psk, _canonical, 16);
   _mutex     = xSemaphoreCreateMutex();
 
-  // Persistent discovery task: created once at boot (heap still fresh) and
-  // never freed — principle-compliant. Moving the stack to static BSS is the
-  // P4 hardening step.
-  xTaskCreate(&MeshService::taskTramp, "mesh-disc", 5120, this, 1, &_task);
+  // Persistent discovery task. Static stack — the buffer lives in BSS, not
+  // heap, so these 5 KB never sit as a permanent hole in the middle of the
+  // heap (same P4 pattern as Mothership/Telegram). On the no-PSRAM C3 the
+  // post-warmup max_alloc hovers near ~9 KB; a 5 KB heap-resident stack
+  // right in that window was measurably starving the 6-8 KB REST response
+  // buffers into 503s.
+  if (_task == nullptr) {
+    constexpr uint32_t kStackWords = 5120 / sizeof(StackType_t);
+    static StackType_t  s_taskStack[kStackWords];
+    static StaticTask_t s_taskBlock;
+    _task = xTaskCreateStatic(&MeshService::taskTramp, "mesh-disc", kStackWords,
+                              this, 1, s_taskStack, &s_taskBlock);
+    if (_task == nullptr) {
+      log_e("[mesh] xTaskCreateStatic failed");
+    }
+  }
 
   log_i("[mesh] up id=%s sig=%s key=%s", _canonical.c_str(), _sig.c_str(),
         (_psk == "esprack-mesh-dev") ? "DEFAULT(dev)" : "custom");

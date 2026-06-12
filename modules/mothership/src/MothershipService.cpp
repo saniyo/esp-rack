@@ -293,23 +293,17 @@ void MothershipService::registerManifest(WebManager* web) {
   // no separate WS variant because there's no WS subscription
   // (status tab is live=false). 16 KB REST buffer covers all three
   // sections comfortably.
-  // bufferSize chosen against the actual GET payload (~1.3 KB) with
-  // 3× headroom. Was 16384, which on ESP32-C3 with WiFi+TLS sessions
-  // active routinely exceeds the largest contiguous heap block (max
-  // free alloc hovers around 19 KB after AsyncWebServer + lwIP + TLS
-  // contexts populate). AsyncJsonResponse's underlying ArduinoJson
-  // DynamicJsonDocument silently leaves the document uninitialised
-  // when its internal malloc fails, and the subsequent setLength()
-  // serialises the null variant as the literal string "null". The
-  // POST handler then returned 200 with body "null" — useRest's
-  // setData(null) on the client wiped formData and parked every tab
-  // on FormLoader's "Loading…" spinner. 4 KB sits comfortably inside
-  // any plausible max-alloc window and matches what cert-manager
-  // (8 KB) and similar feature endpoints use.
+  // REST buffer auto-sized from the real schema at boot (measured 1.3 KB
+  // serialized live; scalars only — status/settings fields, bounded
+  // last_error ≤~65 chars, no runtime rows). History: 16384 routinely
+  // exceeded the C3 max-contiguous window and produced literal "null"
+  // bodies (DynamicJsonDocument silently uninitialised on malloc fail);
+  // the hand-trimmed 4096 fixed that but still over-raised the heap
+  // guard ~3x above need. The probe+512 sizing keeps both honest.
   _feature = web->registerFeature<MothershipSettings>(
       std::move(spec), this,
       MothershipSettings::buildForm,  MothershipSettings::update,
-      4096);
+      WEBFEATURE_BUFFER_AUTO);
 }
 
 void MothershipService::begin() {

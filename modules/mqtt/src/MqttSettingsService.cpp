@@ -312,11 +312,16 @@ void MqttSettingsService::registerManifest(WebManager* web) {
                   attRows.size(), (unsigned)s.attachedTopics.size());
   };
 
+  // REST buffer auto-sized from the real schema at boot (measured 2.8 KB
+  // serialized live; the old hand-guessed 8192 made the proactive guard
+  // 503 this form whenever C3's ~9 KB maxAlloc had any neighbour in
+  // flight). Runtime topic VALUES beyond the probed size ride the WS
+  // delta channel (staRead), so the REST tree stays schema-bounded.
   _feature = web->registerFeature<MqttSettings>(
       std::move(spec), this,
       fullReader,              MqttSettings::update,     // REST
       MqttSettings::staRead,   MqttSettings::staUpd,     // WS
-      8192, 4096);
+      WEBFEATURE_BUFFER_AUTO, 4096);
 }
 
 /* ---------- begin ---------- */

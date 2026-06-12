@@ -4,6 +4,7 @@
 #include <FormBuilder.h>
 #include <WebManager.h>
 #include <DeviceIdentity.h>
+#include "mdns.h"  // raw IDF query API — see browseService() leak note
 
 
 #define MDNS_FORM_PATH "/rest/system/mdns"
@@ -123,7 +124,12 @@ void MdnsService::registerManifest(WebManager* web) {
       return;
     }
     _browseTaskRunning = true;
-    xTaskCreate([](void* arg) {
+    // Heap stack is fine for this rarely-used transient task (freed by
+    // vTaskDelete) — but creation CAN fail on a fragmented no-PSRAM
+    // heap, and the flag is only cleared inside the task body. Without
+    // the pdPASS check a failed create left _browseTaskRunning stuck
+    // true forever: every later Refresh click 409'd until reboot.
+    BaseType_t created = xTaskCreate([](void* arg) {
       auto* self = static_cast<MdnsService*>(arg);
       std::vector<ServiceEntry> all;
       auto extend = [&](const String& svc, const String& proto) {
@@ -140,6 +146,13 @@ void MdnsService::registerManifest(WebManager* web) {
                     (unsigned)self->_browseCache.size());
       vTaskDelete(NULL);
     }, "mdns-browse", 4096, this, 1, nullptr);
+    if (created != pdPASS) {
+      _browseTaskRunning = false;
+      log_w("[mdns] browse task create failed (heap pressure)");
+      r->send(503, "application/json",
+              "{\"ok\":false,\"error\":\"heap_pressure\",\"retryAfter\":2}");
+      return;
+    }
     r->send(200, "application/json", "{\"ok\":true}");
   };
   web->registerAction(refreshAct);
@@ -283,26 +296,44 @@ MdnsService::browseService(const String& service,
   String pr = proto;
   if (pr.length() > 0 && pr[0] != '_') pr = String("_") + pr;
 
+  // Raw IDF query, NOT MDNS.queryService(): the Arduino wrapper stores
+  // the result list in its private MDNSResponder::results and frees it
+  // only at the START of the NEXT queryService() call — so the LAST
+  // browse of a session left its whole mdns_result_t linked list
+  // (hostnames, addr records, per-instance strings) on the heap until
+  // some future user action. With the raw API the results are local
+  // and freed on every path before returning. Same pattern
+  // MeshService::browseAndUpdate() already uses.
   uint32_t t0 = millis();
-  int n = MDNS.queryService(svc.c_str(), pr.c_str());
-  // arduino-esp32 queryService blocks ~3s synchronously regardless
-  // of the timeout we'd like to apply, so we just take what it gives.
-  (void)timeout_ms;
+  mdns_result_t* results = nullptr;
+  esp_err_t err = mdns_query_ptr(svc.c_str(), pr.c_str(),
+                                 timeout_ms ? timeout_ms : 3000, 32, &results);
+  if (err != ESP_OK) {
+    log_w("[mdns] browseService('%s.%s'): query err=%d",
+          svc.c_str(), pr.c_str(), (int)err);
+    if (results) mdns_query_results_free(results);
+    return out;
+  }
+  int n = 0;
+  for (mdns_result_t* r = results; r; r = r->next) {
+    ServiceEntry e;
+    e.instance = r->instance_name ? r->instance_name
+                                  : (r->hostname ? r->hostname : "");
+    // First IPv4 address record, if any.
+    for (mdns_ip_addr_t* a = r->addr; a; a = a->next) {
+      if (a->addr.type == ESP_IPADDR_TYPE_V4) {
+        e.ip = IPAddress(a->addr.u_addr.ip4.addr);
+        break;
+      }
+    }
+    e.port = r->port;
+    out.push_back(std::move(e));
+    ++n;
+  }
+  if (results) mdns_query_results_free(results);
   log_d("[mdns] browseService('%s.%s'): %d instance(s) in %u ms",
                 svc.c_str(), pr.c_str(), n,
                 (unsigned)(millis() - t0));
-  for (int i = 0; i < n; ++i) {
-    ServiceEntry e;
-    e.instance = MDNS.hostname(i);
-    // arduino-esp32 3.x renamed MDNS.IP(int) to MDNS.address(int).
-    // Older 2.x had IP() — if we ever need to build against both,
-    // an #ifdef guard on ESP_ARDUINO_VERSION would pick.
-    e.ip       = MDNS.address(i);
-    e.port     = MDNS.port(i);
-    // TXT records aren't exposed cleanly by ESPmDNS — leave empty
-    // for now; future enhancement could pull via mdns_txt_item_t.
-    out.push_back(std::move(e));
-  }
   return out;
 }
 

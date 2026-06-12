@@ -51,10 +51,11 @@ void OTASettingsService::registerManifest(WebManager* web) {
   spec.restRead   = OTA_SETTINGS_FORM_PATH;
   spec.restUpdate = OTA_SETTINGS_FORM_PATH;
 
+  // Auto-sized: three scalar fields, measured 216 B live, no runtime rows.
   _feature = web->registerFeature<OTASettings>(
       std::move(spec), this,
       OTASettings::buildForm, OTASettings::update,
-      2048);
+      WEBFEATURE_BUFFER_AUTO);
 
   WebTabSpec tab;
   tab.key = "ota";
