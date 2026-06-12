@@ -11,7 +11,7 @@ import { FeatureEntry } from './types';
 
 import Security from './framework/security/Security';
 import FileSystem from './framework/filesystem/FileSystem';
-import Devices from './framework/devices/Devices';
+import Discovery from './framework/discovery/Discovery';
 import DynamicFeature from './components/dynamic-component/DynamicFeature';
 
 // ── Component registry ────────────────────────────────────────────────
@@ -34,7 +34,7 @@ import DynamicFeature from './components/dynamic-component/DynamicFeature';
 // security manifest contribution.
 const CUSTOM_RENDERERS: Record<string, FC> = {
   FileSystem,
-  Devices,
+  Discovery,
 };
 
 // Render the React node for a manifest entry: bespoke renderer if one

@@ -1,57 +1,26 @@
-import { FC, useCallback, useEffect, useMemo, useState } from 'react';
+import { FC, useMemo } from 'react';
 import {
   Box,
   Button,
   Card,
   CardContent,
   Chip,
-  CircularProgress,
-  IconButton,
   Stack,
   Tooltip,
   Typography,
 } from '@mui/material';
 import OpenInNewIcon from '@mui/icons-material/OpenInNew';
-import RefreshIcon from '@mui/icons-material/Refresh';
 import RouterIcon from '@mui/icons-material/Router';
 import VerifiedUserIcon from '@mui/icons-material/VerifiedUser';
 import WarningIcon from '@mui/icons-material/Warning';
 
 import { SectionContent, useLayoutTitle } from '../../components';
-import { AXIOS } from '../../api/endpoints';
+import { Peer, useDeviceMesh } from '../../utils/useDeviceMesh';
 
-// Devices — the consolidated LAN device directory. Fetches /rest/peers (the
-// trust-verified mDNS peer list this device discovered) and renders the
-// neighbours grouped by same-project vs other (cross-project) devices. Each
-// card links out to that device's own web UI. (Phase 1 "directory"; in-panel
-// rendering of a peer's manifest is the later gateway-proxy phase.)
-
-interface Peer {
-  device_id: string;
-  project: string;
-  fw: string;
-  schema: string;
-  framework: string;
-  ip: string;
-  port: number;
-  trusted: boolean;
-  compatible: boolean;
-  age_ms: number;
-}
-
-interface SelfInfo {
-  device_id: string;
-  project: string;
-  fw: string;
-  schema: string;
-  framework: string;
-  ip: string;
-}
-
-interface PeersResponse {
-  self: SelfInfo;
-  peers: Peer[];
-}
+// Discovery — the consolidated LAN device overview (cards). The menu nests
+// the navigable device records under this same "Discovery" umbrella; this
+// page is the at-a-glance view with trust + compatibility detail. Each card
+// links out to that device's own web UI.
 
 const fmtAge = (ms: number): string => {
   const s = Math.max(0, Math.round(ms / 1000));
@@ -114,74 +83,37 @@ const PeerGrid: FC<{ items: Peer[] }> = ({ items }) => (
   </Box>
 );
 
-const Devices: FC = () => {
-  useLayoutTitle('Devices');
-
-  const [data, setData] = useState<PeersResponse | null>(null);
-  const [error, setError] = useState<string | undefined>();
-  const [loading, setLoading] = useState(false);
-
-  const load = useCallback(() => {
-    setLoading(true);
-    AXIOS.get<PeersResponse>('peers')
-      .then((r) => {
-        setData(r.data);
-        setError(undefined);
-      })
-      .catch((e) => setError(e?.message || 'Failed to load peers'))
-      .finally(() => setLoading(false));
-  }, []);
-
-  useEffect(() => {
-    load();
-    const t = setInterval(load, 10000);
-    return () => clearInterval(t);
-  }, [load]);
+const Discovery: FC = () => {
+  useLayoutTitle('Discovery');
+  const { self, peers } = useDeviceMesh(10000);
 
   const { same, others } = useMemo(() => {
-    const peers = data?.peers ?? [];
-    const selfProject = data?.self.project;
+    const selfProject = self?.project;
     const sort = (a: Peer, b: Peer) =>
       Number(b.trusted) - Number(a.trusted) || a.project.localeCompare(b.project);
     return {
       same: peers.filter((p) => p.project === selfProject).sort(sort),
       others: peers.filter((p) => p.project !== selfProject).sort(sort),
     };
-  }, [data]);
-
-  const total = data?.peers?.length ?? 0;
+  }, [peers, self]);
 
   return (
-    <SectionContent title="Devices" titleGutter>
-      <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 2 }}>
-        <Typography variant="body2" color="text.secondary" sx={{ flexGrow: 1 }}>
-          {data ? `${total} device(s) discovered on the LAN` : 'Scanning the LAN…'}
-        </Typography>
-        {loading && <CircularProgress size={18} />}
-        <Tooltip title="Rescan now">
-          <IconButton onClick={load} size="small">
-            <RefreshIcon />
-          </IconButton>
-        </Tooltip>
-      </Stack>
+    <SectionContent title="Discovery" titleGutter>
+      <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+        {peers.length} device(s) discovered on the LAN
+      </Typography>
 
-      {error && (
-        <Typography color="error" sx={{ mb: 2 }}>
-          {error}
-        </Typography>
-      )}
-
-      {data && (
+      {self && (
         <Card variant="outlined" sx={{ mb: 3, bgcolor: 'action.hover' }}>
           <CardContent>
             <Stack direction="row" spacing={1.5} alignItems="center">
               <RouterIcon color="primary" />
               <Box sx={{ minWidth: 0 }}>
                 <Typography variant="subtitle2" noWrap>
-                  This device · {data.self.project}
+                  This device · {self.project}
                 </Typography>
                 <Typography variant="caption" color="text.secondary" noWrap sx={{ display: 'block' }}>
-                  {data.self.device_id} · {data.self.ip} · fw {data.self.fw} · schema {data.self.schema}
+                  {self.device_id} · {self.ip} · fw {self.fw} · schema {self.schema}
                 </Typography>
               </Box>
             </Stack>
@@ -211,7 +143,7 @@ const Devices: FC = () => {
         </Box>
       )}
 
-      {data && total === 0 && (
+      {peers.length === 0 && (
         <Typography color="text.secondary" sx={{ mt: 2 }}>
           No other ESP-Rack devices found yet. Peers appear here within ~20&nbsp;seconds of
           joining the network.
@@ -221,4 +153,4 @@ const Devices: FC = () => {
   );
 };
 
-export default Devices;
+export default Discovery;

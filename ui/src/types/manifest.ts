@@ -13,6 +13,10 @@ export interface MenuMeta {
   // expandTabs: also surface this feature's own tabs as leaf children in
   // the tree (jump straight to /<id>/<tabKey>), beside any child features.
   expandTabs?: boolean;
+  // role: the device's MAIN-ROLE feature (the consumer app). In the
+  // device-mesh menu, role features render directly under the device record;
+  // everything else goes into the "Device" group. Absent/false = infra.
+  role?: boolean;
 }
 
 export interface TabSpec {

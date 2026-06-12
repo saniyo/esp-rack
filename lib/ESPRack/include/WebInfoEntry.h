@@ -87,6 +87,7 @@ class WebInfoEntry : public IWebFeatureEntry {
       menu["hidden"] = _spec.menu.hidden;
       if (_spec.menu.parent) menu["parent"] = _spec.menu.parent;
       if (_spec.menu.expandTabs) menu["expandTabs"] = true;
+      if (_spec.menu.role) menu["role"] = true;
     }
 
     if (_spec.restRead) {

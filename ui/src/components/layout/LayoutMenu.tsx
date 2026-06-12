@@ -20,6 +20,8 @@ import DnsIcon from '@mui/icons-material/Dns';
 import SettingsApplicationsIcon from '@mui/icons-material/SettingsApplications';
 import HttpIcon from '@mui/icons-material/Http';
 import VpnKeyIcon from '@mui/icons-material/VpnKey';
+import MemoryIcon from '@mui/icons-material/Memory';
+import LanIcon from '@mui/icons-material/Lan';
 
 import { AuthenticatedContext } from '../../contexts/authentication';
 import { FeaturesContext } from '../../contexts/features';
@@ -28,6 +30,7 @@ import { resolveIcon } from '../dynamic-component/utils/iconRegistry';
 import { FeatureEntry } from '../../types';
 import { routeMatches } from '../../utils';
 import LayoutMenuItem, { MenuNode } from './LayoutMenuItem';
+import { Peer, SelfInfo, useDeviceMesh } from '../../utils/useDeviceMesh';
 
 // Manifest-driven side-nav — now a recursive TREE.
 //
@@ -95,12 +98,86 @@ const activePath = (nodes: MenuNode[], pathname: string): string[] => {
   return [];
 };
 
+// Reshape the flat feature tree into the device-mesh layout:
+//   <role feature(s)>   — e.g. Light, at the TOP; the "Device" group (all infra
+//                         features: WiFi, NTP, … System) is nested INSIDE the
+//                         role, so the role is this device's single home.
+//   Discovery           — BELOW; its children are the device ROSTER: this
+//                         device (a chip-icon entry) + the discovered peers
+//                         (each a link, full page load, to its own web),
+//                         sorted by canonical id (stable order everywhere).
+// The device name is NEVER a top-level menu item — the top shows only the role
+// + Discovery; the identity lives INSIDE Discovery.
+// GRACEFUL: with no mesh module there is no "discovery" feature, so the flat
+// tree is returned unchanged (classic single-device menu).
+const buildDeviceTree = (
+  localRoots: MenuNode[],
+  self: SelfInfo | null,
+  peers: Peer[],
+): MenuNode[] => {
+  const discoveryIdx = localRoots.findIndex((n) => n.id === 'discovery');
+  if (discoveryIdx === -1) return localRoots;
+
+  const discovery = localRoots[discoveryIdx];
+  const rest = localRoots.filter((_, i) => i !== discoveryIdx);
+  const roleNodes = rest.filter((n) => n.isRole);
+  const infraNodes = rest.filter((n) => !n.isRole);
+
+  // Everything that isn't the role collapses into one "Device" group.
+  const deviceGroup: MenuNode = {
+    id: '__device',
+    label: 'Device',
+    icon: SettingsIcon,
+    order: 500,
+    children: infraNodes,
+  };
+
+  // Discovery roster: this device + the discovered peers, sorted by canonical
+  // id (stable everywhere).
+  const roster = [
+    ...(self
+      ? [{ id: self.device_id, project: self.project, ip: self.ip, isLocal: true, compatible: true }]
+      : []),
+    ...peers.map((p) => ({
+      id: p.device_id, project: p.project, ip: p.ip, isLocal: false, compatible: p.compatible,
+    })),
+  ].sort((a, b) => a.id.localeCompare(b.id));
+
+  const rosterNodes: MenuNode[] = roster.map((e) =>
+    e.isLocal
+      ? // this device — shown with its ROLE icon (e.g. Light's Lightbulb),
+        // not a generic chip; falls back to the chip if there's no role.
+        { id: '__self', label: e.project || 'Device', icon: roleNodes[0]?.icon ?? MemoryIcon, order: 0, children: [] }
+      : {
+          id: `__peer_${e.id}`,
+          label: e.project || 'Device',
+          icon: LanIcon,
+          to: `http://${e.ip}/`,
+          external: true,        // navigate (full page load) to the peer's web
+          disabled: !e.compatible,
+          order: 0,
+          children: [] as MenuNode[],
+        },
+  );
+  const discoveryNode: MenuNode = { ...discovery, order: 9000, children: rosterNodes };
+
+  // Nest the "Device" group UNDER the role feature: the role is this device's
+  // home — its own tabs + the Device group inside it. (No role feature -> the
+  // Device group stays top-level.) Top level then = [role, Discovery].
+  const [firstRole, ...otherRoles] = roleNodes;
+  const topNodes: MenuNode[] = firstRole
+    ? [{ ...firstRole, children: [...firstRole.children, deviceGroup] }, ...otherRoles]
+    : [deviceGroup];
+
+  return [...topNodes, discoveryNode];
+};
+
 const LayoutMenu: FC = () => {
   const { manifest } = useManifest();
   const { me } = useContext(AuthenticatedContext);
   const { features } = useContext(FeaturesContext);
 
-  const roots = useMemo<MenuNode[]>(() => {
+  const localRoots = useMemo<MenuNode[]>(() => {
     const visible = manifest.features.filter((f) => f.menu?.label && !f.menu?.hidden);
 
     const nodeOf = (f: FeatureEntry): MenuNode => {
@@ -136,6 +213,7 @@ const LayoutMenu: FC = () => {
         to,
         disabled,
         order: f.menu?.order ?? 0,
+        isRole: f.menu?.role,   // device's main-role feature (-> direct child)
         children,
       };
     };
@@ -156,9 +234,27 @@ const LayoutMenu: FC = () => {
       ns.sort((a, b) => a.order - b.order);
       ns.forEach((n) => sortRec(n.children));
     };
+    // Standalone Security page (not a manifest feature) — fold it in as a
+    // top-level infra item so it lands inside the "Device" group like the
+    // other framework features.
+    if (features.security) {
+      rootNodes.push({
+        id: '__security', label: 'Security', icon: LockIcon,
+        to: '/security', disabled: !me.admin, order: 9999, children: [],
+      });
+    }
     sortRec(rootNodes);
     return rootNodes;
-  }, [manifest, me.admin]);
+  }, [manifest, me.admin, features.security]);
+
+  // Discovered LAN peers (empty/graceful when the mesh module isn't installed).
+  const { self, peers } = useDeviceMesh();
+  // Device-mesh layout: role + "Device" infra group at the top, then a
+  // "Discovery" group whose roster is this device + the discovered peers.
+  const roots = useMemo<MenuNode[]>(
+    () => buildDeviceTree(localRoots, self, peers),
+    [localRoots, self, peers],
+  );
 
   // ── Accordion open-state: ONE shared path for the whole tree (see
   // LayoutMenuItem). Opening any branch collapses the previously open one. ──
@@ -174,23 +270,6 @@ const LayoutMenu: FC = () => {
       {roots.map((n) => (
         <LayoutMenuItem key={n.id} node={n} openPath={openPath} setOpenPath={setOpenPath} />
       ))}
-      {/* Standalone Security page (user CRUD) — not in the manifest; still
-          appended explicitly, admin-gated, as before. */}
-      {features.security && (
-        <LayoutMenuItem
-          node={{
-            id: '__security',
-            label: 'Security',
-            icon: LockIcon,
-            to: '/security',
-            disabled: !me.admin,
-            order: 9999,
-            children: [],
-          }}
-          openPath={openPath}
-          setOpenPath={setOpenPath}
-        />
-      )}
     </List>
   );
 };

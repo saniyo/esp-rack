@@ -11,6 +11,7 @@ import {
   List,
 } from "@mui/material";
 import ExpandMore from "@mui/icons-material/ExpandMore";
+import OpenInNewIcon from "@mui/icons-material/OpenInNew";
 
 import { routeMatches } from "../../utils";
 
@@ -30,6 +31,13 @@ export interface MenuNode {
   // True for an expandTabs leaf (a component's own internal tab). Rendered on
   // a grey panel to distinguish it from nested feature components (white).
   isTab?: boolean;
+  // True for the device's MAIN-ROLE feature — renders directly under the
+  // device record in the mesh menu (vs. the "Device" infra group).
+  isRole?: boolean;
+  // True for a REMOTE device record: `to` is a full URL (http://peer-ip/) and
+  // clicking navigates the browser there (full page load), not an SPA route —
+  // each device serves its own web; the menu just links between them.
+  external?: boolean;
   children: MenuNode[];
 }
 
@@ -69,6 +77,7 @@ const LayoutMenuItem: FC<Props> = ({
   // sub-routes (e.g. WiFi on /wifi/status, which has no menu leaf).
   const active =
     navigable &&
+    !node.external &&
     routeMatches(node.to!, pathname) &&
     !node.children.some((c) => !!c.to && routeMatches(c.to!, pathname));
 
@@ -93,7 +102,7 @@ const LayoutMenuItem: FC<Props> = ({
   // tab is unmistakable. background-color eases smoothly on hover/selection.
   const sx = {
     pl: 2 + depth * 2,
-    pr: hasKids ? 6 : 2,
+    pr: hasKids || node.external ? 6 : 2,
     transition: "background-color 0.2s ease",
     ...(node.isTab
       ? {
@@ -113,7 +122,12 @@ const LayoutMenuItem: FC<Props> = ({
       <ListItem
         disablePadding
         secondaryAction={
-          hasKids ? (
+          node.external ? (
+            <OpenInNewIcon
+              fontSize="small"
+              sx={{ color: "text.disabled", pointerEvents: "none", mr: 0.5 }}
+            />
+          ) : hasKids ? (
             <IconButton
               edge="end"
               size="small"
@@ -130,7 +144,15 @@ const LayoutMenuItem: FC<Props> = ({
           ) : undefined
         }
       >
-        {navigable ? (
+        {node.external ? (
+          // Remote device: a native anchor — full page load to the peer's web.
+          <ListItemButton component="a" href={node.to!} disabled={node.disabled} sx={sx}>
+            <ListItemIcon sx={{ minWidth: 36 }}>
+              <Icon />
+            </ListItemIcon>
+            <ListItemText>{node.label}</ListItemText>
+          </ListItemButton>
+        ) : navigable ? (
           <ListItemButton component={Link} to={node.to!} selected={active} disabled={node.disabled} sx={sx}>
             <ListItemIcon sx={{ minWidth: 36 }}>
               <Icon />
