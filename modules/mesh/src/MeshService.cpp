@@ -8,6 +8,7 @@
 
 #include <AsyncJson.h>
 #include <ESPAsyncWebServer.h>
+#include <ProblemJson.h>
 #include <WebManager.h>
 #include <WebFeatureSpec.h>
 #include <DeviceIdentity.h>
@@ -198,8 +199,8 @@ void MeshService::browseAndUpdate() {
 void MeshService::servePeers(AsyncWebServerRequest* request) {
   // Tolerance guard — refuse rather than OOM-panic under heap pressure.
   if (ESP.getMaxAllocHeap() < MESH_SERVE_MIN_ALLOC) {
-    request->send(503, "application/json",
-                  "{\"error\":\"low_memory\",\"retry\":true}");
+    sendProblem(request, 503, "heap_pressure",
+                "Peer roster needs more contiguous heap than is free", 2);
     return;
   }
 

@@ -13,7 +13,10 @@
 #define AUTHORIZATION_HEADER_PREFIX "Bearer "
 #define AUTHORIZATION_HEADER_PREFIX_LEN 7
 
-#define MAX_JWT_SIZE 128
+// Sized for the C0 payload: {username, admin, role, iat, exp} parses into
+// an ArduinoJson pool comfortably under 256 B (was 128 for the two-claim
+// legacy payload).
+#define MAX_JWT_SIZE 256
 
 class User {
  public:

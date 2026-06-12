@@ -1,5 +1,6 @@
 #include <WebManager.h>
 #include <ESPFS.h>
+#include <ProblemJson.h>
 #include <esp_rom_crc.h>
 
 // ── ManifestBuilder method definitions ─────────────────────────────
@@ -477,8 +478,8 @@ void WebManager::serveManifest(AsyncWebServerRequest* request) {
   if (ESP.getMaxAllocHeap() < 4096) {
     log_w("[web.manifest] cache missing AND heap pressure (max_alloc=%u) — 503",
           (unsigned)ESP.getMaxAllocHeap());
-    request->send(503, "application/json",
-                  "{\"error\":\"heap_pressure\",\"retryAfter\":2}");
+    sendProblem(request, 503, "heap_pressure",
+                "Manifest cache missing and heap too tight to rebuild", 2);
     return;
   }
   log_w("[web.manifest] cache file missing — falling back to on-the-fly build");

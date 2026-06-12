@@ -2,6 +2,7 @@
 
 #include <AsyncJson.h>
 #include <FormBuilder.h>
+#include <ProblemJson.h>
 #include <WebManager.h>
 #include <DeviceIdentity.h>
 #include "mdns.h"  // raw IDF query API — see browseService() leak note
@@ -119,8 +120,8 @@ void MdnsService::registerManifest(WebManager* web) {
   refreshAct.successMessage  = "mDNS browse started — refresh tab in a few seconds";
   refreshAct.handler = [this](AsyncWebServerRequest* r) {
     if (_browseTaskRunning) {
-      r->send(409, "application/json",
-              "{\"ok\":false,\"message\":\"Browse already running — wait for current scan to finish\"}");
+      sendProblem(r, 409, "browse_running",
+                  "A browse is already in flight - wait for it to finish");
       return;
     }
     _browseTaskRunning = true;
@@ -149,8 +150,8 @@ void MdnsService::registerManifest(WebManager* web) {
     if (created != pdPASS) {
       _browseTaskRunning = false;
       log_w("[mdns] browse task create failed (heap pressure)");
-      r->send(503, "application/json",
-              "{\"ok\":false,\"error\":\"heap_pressure\",\"retryAfter\":2}");
+      sendProblem(r, 503, "heap_pressure",
+                  "Could not allocate the browse task stack", 2);
       return;
     }
     r->send(200, "application/json", "{\"ok\":true}");

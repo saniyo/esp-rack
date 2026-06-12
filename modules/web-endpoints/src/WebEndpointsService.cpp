@@ -1,6 +1,7 @@
 #include <WebEndpointsService.h>
 
 #include <FormBuilder.h>
+#include <ProblemJson.h>
 #include <WebManager.h>
 #include <WsManager.h>
 
@@ -37,16 +38,16 @@ void WebEndpointsService::serveForm(AsyncWebServerRequest* request) {
   // when not allowed" on the wire, observed live on a C3 at ~9 KB
   // maxAlloc). A clean 503 the UI can retry beats a protocol-corrupt 200.
   if (ESP.getMaxAllocHeap() < WEB_ENDPOINTS_BUFFER_SIZE + 1024) {
-    request->send(503, "application/json",
-                  "{\"error\":\"heap_pressure\",\"retryAfter\":2}");
+    sendProblem(request, 503, "heap_pressure",
+                "Endpoints inventory needs more contiguous heap than is free", 2);
     return;
   }
   AsyncJsonResponse* response = new AsyncJsonResponse(false, WEB_ENDPOINTS_BUFFER_SIZE);
   JsonObject root = response->getRoot();
   if (root.isNull()) {  // doc alloc failed despite the guard — race lost
     delete response;
-    request->send(503, "application/json",
-                  "{\"error\":\"oom\",\"detail\":\"response buffer alloc failed\"}");
+    sendProblem(request, 503, "heap_pressure",
+                "Response buffer allocation failed", 2);
     return;
   }
   buildForm(root);
@@ -227,7 +228,7 @@ void WebEndpointsService::buildForm(JsonObject& root) {
     // String, NOT the kindLabel(...).c_str() form: ArduinoJson stores a
     // `const char*` BY POINTER, and that pointer belonged to a temporary
     // String — by serialization time it was freed heap, which rendered
-    // as "kind":"  ..." garbage on the wire (observed live).
+    // as "kind":"..." garbage on the wire (observed live).
     // A String value is copied into the document pool instead.
     String kindStr = j(src, "kind");
     if (kindStr.isEmpty()) kindStr = "?";

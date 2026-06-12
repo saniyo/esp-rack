@@ -1,8 +1,10 @@
 #include <SecuritySettingsService.h>
 
 #include <PresenceService.h>
+#include <ProblemJson.h>
 #include <web/Form.h>
 #include <WebManager.h>
+#include <time.h>
 
 #if FT_ENABLED(FT_SECURITY)
 
@@ -278,16 +280,56 @@ Authentication SecuritySettingsService::authenticate(const String& username, con
   return Authentication();
 }
 
+// Wall clock is "synced" once NTP pushed us past this (2023-11-14) —
+// before that the RTC still reads epoch-1970 and exp math is meaningless.
+static constexpr time_t kClockSaneAfter = 1700000000;
+
+// Human-session token lifetime (api-standardization C0). Machine tokens
+// (long-lived, role-scoped) arrive in phase C3 with their own issuance
+// path; this constant governs only /signIn-minted tokens.
+static constexpr uint32_t kHumanJwtTtlSec = 24UL * 3600UL;
+
 inline void populateJWTPayload(JsonObject& payload, User* user) {
   payload["username"] = user->username;
+  // `admin` kept alongside `role` — the React app's session decode still
+  // branches on the boolean; role is the forward-facing claim the API
+  // role gates (reader/operator/admin, phase C3) will consume.
   payload["admin"] = user->admin;
+  payload["role"] = user->admin ? "admin" : "user";
+  const time_t now = time(nullptr);
+  if (now > kClockSaneAfter) {
+    payload["iat"] = (uint32_t)now;
+    payload["exp"] = (uint32_t)now + kHumanJwtTtlSec;
+  }
+  // No sane clock at mint time → no exp claim: the token validates like a
+  // legacy one. Better a non-expiring LAN session than a device that
+  // can't log anyone in before NTP syncs.
 }
 
 boolean SecuritySettingsService::validatePayload(JsonObject& parsedPayload, User* user) {
-  DynamicJsonDocument jsonDocument(MAX_JWT_SIZE);
-  JsonObject payload = jsonDocument.to<JsonObject>();
-  populateJWTPayload(payload, user);
-  return payload == parsedPayload;
+  // Semantic validation, NOT byte-equality: tokens now carry per-mint
+  // claims (iat/exp), so reconstruct-and-compare can't work anymore.
+  // Identity and privilege must match the LIVE user record — flipping a
+  // user's admin bit still invalidates their old tokens, same as before.
+  const char* uname = parsedPayload["username"] | (const char*)nullptr;
+  if (!uname || user->username != uname) {
+    return false;
+  }
+  const bool tokenAdmin = parsedPayload["admin"] | false;
+  if (tokenAdmin != user->admin) {
+    return false;
+  }
+  // Expiry: enforced only when the token carries exp AND the wall clock
+  // is sane. Legacy tokens (no exp) stay valid — no forced re-login on
+  // this firmware upgrade; they age out as users re-authenticate.
+  const uint32_t exp = parsedPayload["exp"] | 0UL;
+  if (exp) {
+    const time_t now = time(nullptr);
+    if (now > kClockSaneAfter && (uint32_t)now > exp) {
+      return false;
+    }
+  }
+  return true;
 }
 
 String SecuritySettingsService::generateJWT(User* user) {
@@ -304,6 +346,19 @@ ArRequestFilterFunction SecuritySettingsService::filterRequest(AuthenticationPre
   };
 }
 
+// 401 vs 403 (api-standardization C0): no/invalid token is UNAUTHORIZED;
+// a valid identity that fails the predicate is FORBIDDEN. The old
+// always-401 made the React app bounce a logged-in guest to the login
+// page for endpoints they simply lacked the role for. Bodies are RFC 9457
+// problem+json so machine clients branch on `title`, not on prose.
+static void sendAuthProblem(AsyncWebServerRequest* request, Authentication& authentication) {
+  if (!authentication.authenticated) {
+    sendProblem(request, 401, "unauthorized", "Missing or invalid token");
+  } else {
+    sendProblem(request, 403, "forbidden", "Insufficient role for this endpoint");
+  }
+}
+
 ArRequestHandlerFunction SecuritySettingsService::wrapRequest(ArRequestHandlerFunction onRequest,
                                                               AuthenticationPredicate predicate) {
   return [this, onRequest, predicate](AsyncWebServerRequest* request) {
@@ -313,7 +368,7 @@ ArRequestHandlerFunction SecuritySettingsService::wrapRequest(ArRequestHandlerFu
     if (_presence) _presence->touchFromRequest(request);
     Authentication authentication = authenticateRequest(request);
     if (!predicate(authentication)) {
-      request->send(401);
+      sendAuthProblem(request, authentication);
       return;
     }
     onRequest(request);
@@ -326,7 +381,7 @@ ArJsonRequestHandlerFunction SecuritySettingsService::wrapCallback(ArJsonRequest
     if (_presence) _presence->touchFromRequest(request);
     Authentication authentication = authenticateRequest(request);
     if (!predicate(authentication)) {
-      request->send(401);
+      sendAuthProblem(request, authentication);
       return;
     }
     onRequest(request, json);

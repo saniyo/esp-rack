@@ -6,6 +6,7 @@
 #include <AsyncJson.h>
 #include <ESPAsyncWebServer.h>
 
+#include <ProblemJson.h>
 #include <SecurityManager.h>
 #include <StatefulService.h>
 
@@ -91,8 +92,8 @@ inline bool sendJsonStateResponse(AsyncWebServerRequest* request,
           (unsigned)size, (unsigned)next);
     want = next;
   }
-  request->send(503, "application/json",
-                "{\"error\":\"heap_pressure\",\"retryAfter\":1}");
+  sendProblem(request, 503, "heap_pressure",
+              "No contiguous heap for the response right now", 1);
   return false;
 }
 
