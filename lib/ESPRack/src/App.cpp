@@ -6,6 +6,7 @@
 #include "WebFeatureSpec.h"
 #include "TLSContextService.h"
 #include "DeviceIdentity.h"
+#include "DataApi.h"
 #include "HeapMonitor.h"
 
 #include <freertos/FreeRTOS.h>
@@ -382,6 +383,12 @@ void App::begin() {
     }
     next();
   });
+
+  // 7.6 — C5 data API: /api/v1/data[/<series>[/latest]]. Mounted here
+  // (after module install, so security_ is the real manager; before
+  // server begin) so any series registered during onInstall/onBegin is
+  // already in the registry. Reader-token consumable — GET only.
+  DataApi::instance().mount(server_, security_);
 
   // 8. Start AsyncWebServer listening on port 80. Done LAST so every
   // module's registerFeature/registerAction + the static-file fallback

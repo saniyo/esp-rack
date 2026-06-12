@@ -144,6 +144,28 @@ def build(manifest: dict) -> dict:
         "UI manifest - the machine-readable registry this spec is generated from "
         f"(schemaVersion {manifest.get('schemaVersion')})", "none", "ui")}
 
+    # ---- C5 data API (framework contract; series set is runtime) -----
+    paths[f"{API}/data"] = {"get": op(
+        "Directory of registered data series", "authenticated", "data",
+        "List of {id,title,unit}")}
+    series_params = [
+        {"name": "series", "in": "path", "required": True, "schema": {"type": "string"}},
+        {"name": "limit", "in": "query", "schema": {"type": "integer", "default": 50, "maximum": 100}},
+        {"name": "cursor", "in": "query", "schema": {"type": "integer", "default": 0},
+         "description": "newest-first offset; use the previous page's nextCursor"},
+    ]
+    o = op("Paged series read (newest-first; reader token is sufficient)",
+           "authenticated", "data",
+           "{series, items[], nextCursor?, total}")
+    o["parameters"] = series_params
+    o["responses"]["404"] = {"description": "Unknown series id",
+                             "content": {"application/problem+json": {
+                                 "schema": {"$ref": "#/components/schemas/Problem"}}}}
+    paths[f"{API}/data/{{series}}"] = {"get": o}
+    o2 = op("Newest single item of the series", "authenticated", "data")
+    o2["parameters"] = [series_params[0]]
+    paths[f"{API}/data/{{series}}/latest"] = {"get": o2}
+
     # ---- registry walk ------------------------------------------------
     for f in manifest.get("features", []):
         kind = f.get("kind")
