@@ -25,7 +25,13 @@ class WebActionEntry : public IWebFeatureEntry {
     fillResolvedPath(pathBuf, sizeof(pathBuf));
     const char* path = pathBuf;
 
-    auto predicate = webAuthLevelToPredicate(_spec.auth);
+    // C3 operator floor: actions are mutations by definition, so on top
+    // of the action's own auth level a write-capable role is required —
+    // "reader" machine tokens get 403 here while still GETing freely.
+    auto levelPredicate = webAuthLevelToPredicate(_spec.auth);
+    AuthenticationPredicate predicate = [levelPredicate](Authentication& a) {
+      return levelPredicate(a) && AuthenticationPredicates::IS_OPERATOR(a);
+    };
     auto handler = _spec.handler
         ? _spec.handler
         : std::function<void(AsyncWebServerRequest*)>([](AsyncWebServerRequest* r) { r->send(200); });

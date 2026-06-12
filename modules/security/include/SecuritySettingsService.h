@@ -47,6 +47,22 @@ class SecuritySettings {
   String jwtSecret;
   std::list<User> users;
 
+  // ---- Machine access tokens (C3, api-v1) -------------------------------
+  // The token VALUE is never stored: it is a JWT signed with jwtSecret
+  // carrying {tid, role, iat, exp≈10y} and shown exactly once at mint
+  // time. The device keeps only this registry — the signature proves
+  // authenticity, the registry provides revocation and is the live
+  // authority for the role. Bounded (kMaxApiTokens) so the config file
+  // and the System tab table stay flat-heap friendly.
+  struct ApiToken {
+    String tid;       // 8-hex random id (claim "tid" in the JWT)
+    String name;      // operator-chosen label ("mothership", "grafana"…)
+    String role;      // reader | operator | admin
+    bool   revoked{false};
+  };
+  static constexpr size_t kMaxApiTokens = 8;
+  std::list<ApiToken> apiTokens;
+
   // ---- Reader used by ConfigDelegate (file) AND legacy /rest/securitySettings.
   // The /security React page round-trips this entire shape — `password`
   // round-trips as the PBKDF2 hex hash, `salt` round-trips as the per-user
@@ -63,6 +79,14 @@ class SecuritySettings {
       userRoot["salt"]     = user.salt;
       userRoot["admin"]    = user.admin;
     }
+    JsonArray toks = root.createNestedArray("api_tokens");
+    for (const ApiToken& t : settings.apiTokens) {
+      JsonObject tr = toks.createNestedObject();
+      tr["tid"]     = t.tid;
+      tr["name"]    = t.name;
+      tr["role"]    = t.role;
+      tr["revoked"] = t.revoked;
+    }
   }
 
   // ---- Reader for HTTP wire path (same shape as readConfig — legacy
@@ -74,6 +98,10 @@ class SecuritySettings {
   // ---- One-field form schema for the System → JWT tab.
   // Renders just the jwt_secret input with passwordMask + eye toggle.
   static void buildJwtForm(SecuritySettings& settings, JsonObject& root);
+
+  // ---- Machine-token registry form for the System → API Tokens tab
+  // (table of {tid,name,role,revoked} + create/revoke action fields).
+  static void buildTokensForm(SecuritySettings& settings, JsonObject& root);
 
   // ---- Updater shared by every entry point.
   // Two incoming shapes:
@@ -107,6 +135,15 @@ class SecuritySettingsService : public StatefulService<SecuritySettings>, public
   // X-Client-Key / X-Current-Page headers. Optional — null pointer means
   // no tracking. Call once after PresenceService is constructed.
   void setPresenceService(PresenceService* presence) { _presence = presence; }
+
+  // ---- Machine access tokens (C3) ----------------------------------
+  // Mints a long-lived role-scoped JWT and records {tid,name,role} in
+  // the registry. Returns the token value (caller shows it ONCE) or an
+  // empty String when the registry is full / the role is invalid.
+  String mintMachineToken(const String& name, const String& role);
+  // Marks the registry entry revoked — the token's signature stays
+  // valid but authenticateJWT refuses it from the next request on.
+  bool revokeMachineToken(const String& tid);
 
  private:
   ConfigDelegate<SecuritySettings>     _cfg;

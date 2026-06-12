@@ -163,6 +163,23 @@ class WsManager {
   // =======================================================================
   // Endpoint registration
   // =======================================================================
+
+  // C3 (api-v1): upgrade-time auth gate applied to EVERY ws endpoint.
+  // Before this, the ?access_token= on WS URLs was a frontend convention
+  // only — a raw WebSocket connect to any /ws/* path was served
+  // unauthenticated. SecurityModule wires filterRequest(IS_AUTHENTICATED)
+  // here at install time; endpoints registered EARLIER also get it
+  // because the filter is applied on the handler at registration and
+  // retro-applied to already-mounted sockets below. When no filter is
+  // ever set (FT_SECURITY=0 / Null manager) behaviour stays open —
+  // consistent with the rest of the null-security posture.
+  void setAuthFilter(ArRequestFilterFunction filter) {
+    _authFilter = filter;
+    for (auto& ep : _endpoints) {
+      if (ep && ep->ws) ep->ws->setFilter(_authFilter);
+    }
+  }
+
 template <typename TState>
 void* addEndpoint(const String& path,
                   StatefulService<TState>* svc,
@@ -188,6 +205,8 @@ void* addEndpoint(const String& path,
     if (!epPtr || !c) return;
     this->handleWsEvent(*epPtr, c, t, a, d, l);
   });
+
+  if (_authFilter) ws->setFilter(_authFilter);
 
   _server->addHandler(ws);
 
@@ -470,6 +489,9 @@ void* addEndpoint(const String& path,
 
   // --------- internals ---------
   AsyncWebServer* _server{nullptr};
+
+  // Upgrade-time auth gate (C3) — see setAuthFilter().
+  ArRequestFilterFunction _authFilter{nullptr};
 
   std::vector<std::unique_ptr<EndpointBase>> _endpoints;
   std::map<String, EndpointBase*> _endpointsByPath;

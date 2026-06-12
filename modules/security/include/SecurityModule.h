@@ -48,6 +48,15 @@ class SecurityModule : public ESPRack::Module {
     if (ctx.web) ctx.web->setSecurityManager(svc_.get());
 
     if (ctx.presence) svc_->setPresenceService(ctx.presence);
+
+    // C3 (api-v1): upgrade-time auth gate on every /ws/* endpoint. The
+    // ?access_token= query param was previously a frontend convention
+    // only — raw WebSocket connects were served unauthenticated.
+    if (ctx.ws) {
+      ctx.ws->setAuthFilter(
+          svc_->filterRequest(AuthenticationPredicates::IS_AUTHENTICATED));
+    }
+
     svc_->registerManifest(ctx.web);
 
 #if FT_ENABLED(FT_SECURITY)

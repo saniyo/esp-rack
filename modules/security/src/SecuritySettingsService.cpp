@@ -4,9 +4,19 @@
 #include <ProblemJson.h>
 #include <web/Form.h>
 #include <WebManager.h>
+#include <esp_random.h>  // esp_fill_random for machine-token ids
 #include <time.h>
 
 #if FT_ENABLED(FT_SECURITY)
+
+// Wall clock is "synced" once NTP pushed us past this (2023-11-14) —
+// before that the RTC still reads epoch-1970 and exp math is meaningless.
+static constexpr time_t kClockSaneAfter = 1700000000;
+
+// Human-session token lifetime (api-standardization C0). Machine tokens
+// (C3) are minted with their own ~10-year exp in mintMachineToken; this
+// constant governs only /api/v1/auth/token-minted human sessions.
+static constexpr uint32_t kHumanJwtTtlSec = 24UL * 3600UL;
 
 void SecuritySettings::buildJwtForm(SecuritySettings& settings, JsonObject& root) {
   // Single-tab, single-field form — JWT signing key only. The Users
@@ -120,6 +130,24 @@ StateUpdateResult SecuritySettings::update(JsonObject& root, SecuritySettings& s
     changed = true;
   }
 
+  // Machine-token registry round-trip (C3). Present only on the config
+  // cold-load path — the React pages never POST api_tokens (mint/revoke
+  // go through dedicated admin actions), so absence leaves the in-memory
+  // registry alone, mirroring the users[] contract above.
+  if (src.containsKey("api_tokens") && src["api_tokens"].is<JsonArray>()) {
+    settings.apiTokens.clear();
+    for (JsonVariant tv : src["api_tokens"].as<JsonArray>()) {
+      if (settings.apiTokens.size() >= SecuritySettings::kMaxApiTokens) break;
+      SecuritySettings::ApiToken t;
+      t.tid     = tv["tid"]  | "";
+      t.name    = tv["name"] | "";
+      t.role    = tv["role"] | "reader";
+      t.revoked = tv["revoked"] | false;
+      if (t.tid.length()) settings.apiTokens.push_back(std::move(t));
+    }
+    changed = true;
+  }
+
   return changed ? StateUpdateResult::CHANGED : StateUpdateResult::UNCHANGED;
 }
 
@@ -150,16 +178,17 @@ void SecuritySettingsService::registerManifest(WebManager* web) {
   // React page (Users CRUD) uses the state endpoint directly.
   // `routeTemplate = ""` suppresses route emission in WebFeatureEntry::
   // toJson — React's manifestRoutes filter drops the entry because
-  // `!entry.route` is true for the empty string. Auth is Authenticated
-  // rather than Admin because the React page does an admin-level check
-  // itself before showing edit affordances.
+  // `!entry.route` is true for the empty string. Admin-enforced
+  // SERVER-SIDE (C3): the old Authenticated level relied on the React
+  // page hiding edit affordances, which left the user table + JWT
+  // secret readable/writable by any guest token over raw REST.
   {
     WebFeatureSpec spec;
     spec.id            = "security";
     spec.title         = "Security";
     spec.component     = "";  // bespoke React page, not DynamicFeature
     spec.routeTemplate = "";  // suppress /security/* manifest route
-    spec.auth          = WebAuthLevel::Authenticated;
+    spec.auth          = WebAuthLevel::Admin;
     // restRead/restUpdate not assigned — registry ignores them and
     // derives /api/v1/security/form and /api/v1/security/state itself.
     // Stays EXPLICIT 2048 (not WEBFEATURE_BUFFER_AUTO): the boot probe
@@ -206,6 +235,127 @@ void SecuritySettingsService::registerManifest(WebManager* web) {
   tab.auth     = WebAuthLevel::Admin;
   tab.order    = 50;
   web->addTabToFeature("system", tab);
+
+  // ---- Machine access tokens (C3) ----------------------------------
+  // tokens.create — mints a role-scoped long-lived JWT; the VALUE rides
+  // back in the action's message and is shown exactly once in the
+  // snackbar. Args arrive as query params via the form's withFields.
+  {
+    WebActionSpec act;
+    act.id             = "tokens.create";
+    act.title          = "Create token";
+    act.icon           = "Key";
+    act.color          = "primary";
+    act.auth           = WebAuthLevel::Admin;
+    act.handler = [this](AsyncWebServerRequest* r) {
+      String name = r->hasArg("name") ? r->arg("name") : String("");
+      name.trim();
+      if (name.isEmpty()) name = "token";
+      // Dropdown delivers the option ordinal — map to the role slug.
+      int roleIdx = r->hasArg("role") ? r->arg("role").toInt() : 0;
+      const char* role = (roleIdx == 2) ? "admin"
+                        : (roleIdx == 1) ? "operator" : "reader";
+      String tok = this->mintMachineToken(name, role);
+      if (tok.isEmpty()) {
+        sendProblem(r, 409, "registry_full",
+                    "Token registry is full - revoke and reuse a slot");
+        return;
+      }
+      // Snackbar carries the one-time token value.
+      String body = String("{\"ok\":true,\"message\":\"") + role + " token '" +
+                    name + "' (copy now, shown once): " + tok + "\"}";
+      r->send(200, "application/json", body);
+    };
+    web->registerAction(act);
+  }
+  {
+    WebActionSpec act;
+    act.id             = "tokens.revoke";
+    act.title          = "Revoke token";
+    act.icon           = "Block";
+    act.color          = "warning";
+    act.auth           = WebAuthLevel::Admin;
+    act.successMessage = "Token revoked";
+    act.handler = [this](AsyncWebServerRequest* r) {
+      String tid = r->hasArg("tid") ? r->arg("tid") : String("");
+      tid.trim();
+      if (tid.isEmpty() || !this->revokeMachineToken(tid)) {
+        sendProblem(r, 404, "token_not_found",
+                    "No registry entry with that id");
+        return;
+      }
+      r->send(200, "application/json", "{\"ok\":true}");
+    };
+    web->registerAction(act);
+  }
+
+  // Tokens management form — third typed feature on the same service.
+  // Auto-sized buffer is safe even though tokens are added at runtime:
+  // the adaptive response path grows the doc on overflow.
+  {
+    WebFeatureSpec spec;
+    spec.id            = "apiTokens";
+    spec.title         = "API Tokens";
+    spec.component     = "";  // sub-tab of `system`
+    spec.routeTemplate = "";
+    spec.auth          = WebAuthLevel::Admin;
+    web->registerFeature<SecuritySettings>(
+        std::move(spec), this,
+        SecuritySettings::buildTokensForm, SecuritySettings::update,
+        WEBFEATURE_BUFFER_AUTO);
+  }
+  WebTabSpec tokTab;
+  tokTab.key      = "tokens";
+  tokTab.title    = "API Tokens";
+  tokTab.formOf   = "apiTokens";
+  tokTab.postable = false;
+  tokTab.auth     = WebAuthLevel::Admin;
+  tokTab.order    = 55;
+  web->addTabToFeature("system", tokTab);
+}
+
+void SecuritySettings::buildTokensForm(SecuritySettings& s, JsonObject& root) {
+  web::Form form(root, "tokens", "API Tokens");
+
+  form.add(web::Text("tokens_info",
+                     "Machine tokens are long-lived role-scoped credentials "
+                     "for external servers. The value is shown ONCE at "
+                     "creation - copy it from the snackbar.")
+               .readOnly().icon("Info"));
+
+  // Registry table. Clicking a row fills the revoke field below.
+  form.add(web::Table("tokens_table")
+               .col("tid",     "ID",      "text")
+               .col("name",    "Name",    "text")
+               .col("role",    "Role",    "text")
+               .col("revoked", "Revoked", "text")
+               .icon("Key")
+               .rowFill("revoke_tid=tid"));
+  JsonArray rows = form.rowsOf("tokens_table");
+  for (const SecuritySettings::ApiToken& t : s.apiTokens) {
+    JsonObject row = rows.createNestedObject();
+    row["tid"]     = t.tid;
+    row["name"]    = t.name;
+    row["role"]    = t.role;
+    row["revoked"] = t.revoked ? "yes" : "";
+  }
+
+  form.add(web::Text("token_name", "").label("New token name").icon("Badge"));
+  form.add(web::Dropdown("token_role", 0)
+               .option("reader (GET only)",          0)
+               .option("operator (read + write)",    1)
+               .option("admin (full)",               2)
+               .icon("Security"));
+  form.add(web::Action("t_create", "Create token")
+               .ref("tokens.create")
+               .withFields("name=token_name,role=token_role")
+               .icon("Key").color("primary").refetchForm());
+
+  form.add(web::Text("revoke_tid", "").label("Token ID to revoke").icon("Block"));
+  form.add(web::Action("t_revoke", "Revoke")
+               .ref("tokens.revoke")
+               .withFields("tid=revoke_tid")
+               .icon("Block").color("warning").refetchForm());
 }
 
 void SecuritySettingsService::begin() {
@@ -258,6 +408,32 @@ Authentication SecuritySettingsService::authenticateJWT(String& jwt) {
   _jwtHandler.parseJWT(jwt, payloadDocument);
   if (payloadDocument.is<JsonObject>()) {
     JsonObject parsedPayload = payloadDocument.as<JsonObject>();
+
+    // Machine-token branch (C3): the "tid" claim marks a minted machine
+    // token. The signature already proved authenticity; the REGISTRY is
+    // the live authority — it supplies the role (so an operator can
+    // re-scope without re-minting nothing — role lives in the entry)
+    // and the revocation bit. exp enforced same as human tokens.
+    const char* tid = parsedPayload["tid"] | (const char*)nullptr;
+    if (tid && *tid) {
+      const uint32_t exp = parsedPayload["exp"] | 0UL;
+      if (exp) {
+        const time_t now = time(nullptr);
+        if (now > kClockSaneAfter && (uint32_t)now > exp) {
+          return Authentication();
+        }
+      }
+      for (const SecuritySettings::ApiToken& t : _state.apiTokens) {
+        if (t.tid == tid) {
+          if (t.revoked) return Authentication();
+          User machine(t.name.length() ? t.name : t.tid, "",
+                       t.role == "admin");
+          return Authentication(machine, t.role.c_str());
+        }
+      }
+      return Authentication();  // unknown tid — registry wiped or foreign
+    }
+
     String username = parsedPayload["username"];
     for (User _user : _state.users) {
       if (_user.username == username && validatePayload(parsedPayload, &_user)) {
@@ -266,6 +442,47 @@ Authentication SecuritySettingsService::authenticateJWT(String& jwt) {
     }
   }
   return Authentication();
+}
+
+String SecuritySettingsService::mintMachineToken(const String& name, const String& role) {
+  if (role != "reader" && role != "operator" && role != "admin") return String();
+  if (_state.apiTokens.size() >= SecuritySettings::kMaxApiTokens) return String();
+
+  uint8_t rnd[4];
+  esp_fill_random(rnd, sizeof(rnd));
+  char tid[9];
+  snprintf(tid, sizeof(tid), "%02x%02x%02x%02x", rnd[0], rnd[1], rnd[2], rnd[3]);
+
+  DynamicJsonDocument doc(MAX_JWT_SIZE);
+  JsonObject payload = doc.to<JsonObject>();
+  payload["tid"]  = tid;
+  payload["role"] = role;
+  const time_t now = time(nullptr);
+  if (now > kClockSaneAfter) {
+    payload["iat"] = (uint32_t)now;
+    // ~10 years; the registry's revoked bit is the real kill switch.
+    payload["exp"] = (uint32_t)now + 315360000UL;
+  }
+  String token = _jwtHandler.buildJWT(payload);
+
+  SecuritySettings::ApiToken entry;
+  entry.tid  = tid;
+  entry.name = name;
+  entry.role = role;
+  _state.apiTokens.push_back(std::move(entry));
+  callUpdateHandlers("tokens.create");  // persists via saveIfChanged
+  return token;
+}
+
+bool SecuritySettingsService::revokeMachineToken(const String& tid) {
+  for (SecuritySettings::ApiToken& t : _state.apiTokens) {
+    if (t.tid == tid && !t.revoked) {
+      t.revoked = true;
+      callUpdateHandlers("tokens.revoke");
+      return true;
+    }
+  }
+  return false;
 }
 
 Authentication SecuritySettingsService::authenticate(const String& username, const String& password) {
@@ -277,15 +494,6 @@ Authentication SecuritySettingsService::authenticate(const String& username, con
   }
   return Authentication();
 }
-
-// Wall clock is "synced" once NTP pushed us past this (2023-11-14) —
-// before that the RTC still reads epoch-1970 and exp math is meaningless.
-static constexpr time_t kClockSaneAfter = 1700000000;
-
-// Human-session token lifetime (api-standardization C0). Machine tokens
-// (long-lived, role-scoped) arrive in phase C3 with their own issuance
-// path; this constant governs only /signIn-minted tokens.
-static constexpr uint32_t kHumanJwtTtlSec = 24UL * 3600UL;
 
 inline void populateJWTPayload(JsonObject& payload, User* user) {
   payload["username"] = user->username;

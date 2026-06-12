@@ -43,9 +43,21 @@ class Authentication {
  public:
   User* user;
   boolean authenticated;
+  // C3 (api-v1): the effective role this identity carries. Humans get
+  // "admin"/"user" from their account; machine tokens carry the role
+  // chosen at mint time ("reader"/"operator"/"admin"), resolved against
+  // the device's token registry (the registry is the revocation/role
+  // authority, not the signed claim).
+  String role;
 
  public:
-  Authentication(User& user) : user(new User(user)), authenticated(true) {
+  Authentication(User& user)
+      : user(new User(user)),
+        authenticated(true),
+        role(user.admin ? "admin" : "user") {
+  }
+  Authentication(User& user, const char* explicitRole)
+      : user(new User(user)), authenticated(true), role(explicitRole) {
   }
   Authentication() : user(nullptr), authenticated(false) {
   }
@@ -66,6 +78,13 @@ class AuthenticationPredicates {
   };
   static bool IS_ADMIN(Authentication& authentication) {
     return authentication.authenticated && authentication.user->admin;
+  };
+  // C3: write-capable identities. A "reader" machine token may GET
+  // everything its auth level allows but may not mutate — state POSTs
+  // and actions compose this on top of the endpoint's own predicate
+  // (failures surface as 403 forbidden, not 401).
+  static bool IS_OPERATOR(Authentication& authentication) {
+    return authentication.authenticated && authentication.role != "reader";
   };
 };
 

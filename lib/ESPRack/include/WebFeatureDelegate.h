@@ -87,15 +87,23 @@ class WebFeatureEntry : public IWebFeatureEntry {
     }
 
     if (!_statePath.isEmpty()) {
-      // STATE face — GET+POST. GET uses the DISTINCT flat reader when the
-      // feature was registered with a separate ws/flat reader; otherwise it
-      // falls back to the form reader (interim, until the module grows one).
-      // POST uses the existing updater (already consumes flat dicts and
-      // {settings:{...}} envelopes).
+      // STATE face — GET+POST mounted separately so the write side can
+      // carry the C3 operator floor. GET uses the DISTINCT flat reader
+      // when the feature was registered with a separate ws/flat reader;
+      // otherwise it falls back to the form reader (interim, until the
+      // module grows one). POST uses the existing updater (already
+      // consumes flat dicts and {settings:{...}} envelopes) and ALSO
+      // requires a write-capable role: "reader" machine tokens may GET
+      // everything their auth level allows but never mutate (403).
       const JsonStateReader<T>& stateReader =
           _hasDistinctStateReader ? _wsReader : _restReader;
-      _endpoint.reset(new HttpEndpoint<T>(stateReader, _restUpdater, _service, server,
-                                          _statePath, sm, predicate, _restBufferSize));
+      auto writePredicate = [predicate](Authentication& a) {
+        return predicate(a) && AuthenticationPredicates::IS_OPERATOR(a);
+      };
+      _stateGet.reset(new HttpGetEndpoint<T>(stateReader, _service, server,
+                                             _statePath, sm, predicate, _restBufferSize));
+      _statePost.reset(new HttpPostEndpoint<T>(stateReader, _restUpdater, _service, server,
+                                               _statePath, sm, writePredicate, _restBufferSize));
     }
 
     // Heap-allocate the Binding so its address never changes. Its ctor registers
@@ -349,8 +357,9 @@ class WebFeatureEntry : public IWebFeatureEntry {
   String _formPath;
   String _statePath;
 
-  std::unique_ptr<HttpEndpoint<T>> _endpoint;    // state GET+POST
-  std::unique_ptr<HttpGetEndpoint<T>> _getEndpoint;  // form GET
+  std::unique_ptr<HttpGetEndpoint<T>> _getEndpoint;   // form GET
+  std::unique_ptr<HttpGetEndpoint<T>> _stateGet;      // state GET
+  std::unique_ptr<HttpPostEndpoint<T>> _statePost;    // state POST (operator floor)
   std::unique_ptr<WsManager::Binding<T>> _wsBinding;
 
   bool _mounted{false};
