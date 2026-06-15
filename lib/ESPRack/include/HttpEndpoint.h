@@ -60,16 +60,26 @@ inline bool sendJsonStateResponse(AsyncWebServerRequest* request,
   // Slack kept free above the doc so the response head String + TCP
   // bookkeeping never compete with the tree for the same block.
   static constexpr size_t kSlack    = 1024;
-  static constexpr size_t kMinDoc   = 1024;
+  // Smallest doc we will allocate. This is a FLOOR for tiny configured
+  // sizes — NOT a rejection of features that legitimately need a small
+  // response. The earlier code did `if (size < kMinDoc) break` with
+  // kMinDoc=1024, which 503'd every sub-1 KB form forever (OTA auto-sizes
+  // to ~728 B, the JWT-secret form to ~700 B, etc.). A small form needs a
+  // small doc; we floor up to this and serve, only shedding to 503 when
+  // the heap genuinely can't hold even kMinDoc + kSlack.
+  static constexpr size_t kMinDoc   = 512;
   static constexpr int    kAttempts = 4;
 
+  // Floor the configured size UP (never reject a small feature).
   size_t want = configuredSize ? configuredSize : DEFAULT_BUFFER_SIZE;
+  if (want < kMinDoc) want = kMinDoc;
   for (int attempt = 0; attempt < kAttempts; ++attempt) {
     const size_t ceiling = ESP.getMaxAllocHeap();
-    if (ceiling < kMinDoc + kSlack) break;  // hopeless right now — shed
+    if (ceiling < kMinDoc + kSlack) break;  // genuinely too tight — shed
     size_t size = want;
-    if (size + kSlack > ceiling) size = ceiling - kSlack;  // pressure-clamp
-    if (size < kMinDoc) break;
+    // Under pressure clamp DOWN to what fits; ceiling >= kMinDoc + kSlack
+    // above guarantees the clamped size stays >= kMinDoc.
+    if (size + kSlack > ceiling) size = ceiling - kSlack;
 
     AsyncJsonResponse* response = new AsyncJsonResponse(false, size);
     JsonObject root = response->getRoot().to<JsonObject>();
