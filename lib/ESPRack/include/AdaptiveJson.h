@@ -63,11 +63,19 @@ inline bool sendAdaptiveJson(AsyncWebServerRequest* request,
       request->send(response);
       return true;
     }
-    // Tree didn't fit — grow and rebuild. If we were already pressure-
-    // clamped to the ceiling, growing is impossible: bail to 503.
+    // Tree didn't fit — grow and rebuild. Grow toward the ceiling, but do
+    // NOT bail just because the power-of-2 step overshoots: use the
+    // LARGEST doc the heap can actually serve (ceiling - slack). Without
+    // this, a form whose pool need sits between size and 2*size — e.g.
+    // the endpoints registry table: ~5.8 KB serialized but ~9 KB of
+    // ArduinoJson pool — 503'd even with 13 KB free, because 2*6144
+    // overshot the ceiling by a few bytes. Only give up when we're
+    // already at the ceiling (no further progress possible).
     delete response;
+    const size_t maxDoc = (ceiling > kSlack) ? (ceiling - kSlack) : 0;
+    if (size >= maxDoc) break;             // already maxed for this heap
     size_t next = size * 2;
-    if (next + kSlack > ceiling) break;
+    if (next > maxDoc) next = maxDoc;      // cap to what fits, don't bail
     log_w("[adaptive.json] tree overflowed %u B doc — retrying at %u B",
           (unsigned)size, (unsigned)next);
     want = next;
