@@ -8,6 +8,7 @@
 
 #include <AsyncJson.h>
 #include <ESPAsyncWebServer.h>
+#include <AdaptiveJson.h>
 #include <ProblemJson.h>
 #include <WebManager.h>
 #include <WebFeatureSpec.h>
@@ -34,11 +35,6 @@ const char*    PEERS_PATH              = "/api/v1/mesh/peers";
 const uint32_t MESH_BROWSE_INTERVAL_MS = 20000;  // re-browse cadence
 const uint32_t MESH_QUERY_TIMEOUT_MS   = 3000;   // per mdns_query_ptr
 const size_t   MESH_MAX_PEERS          = 32;     // bounded cache
-// 503 guard for /api/v1/mesh/peers — must cover the 4096 response doc
-// plus a little slack, no more. The menu polls this path every 10 s, so
-// an over-strict guard (was 6144) turned routine C3 heap levels (~9 KB
-// maxAlloc minus any in-flight form) into a steady drip of 503 toasts.
-const uint32_t MESH_SERVE_MIN_ALLOC    = 4608;
 
 // HMAC-SHA256(key, msg) truncated to `outBytes`, lowercase hex.
 String hmacHex(const String& key, const String& msg, size_t outBytes) {
@@ -197,42 +193,34 @@ void MeshService::browseAndUpdate() {
 }
 
 void MeshService::servePeers(AsyncWebServerRequest* request) {
-  // Tolerance guard — refuse rather than OOM-panic under heap pressure.
-  if (ESP.getMaxAllocHeap() < MESH_SERVE_MIN_ALLOC) {
-    sendProblem(request, 503, "heap_pressure",
-                "Peer roster needs more contiguous heap than is free", 2);
-    return;
-  }
+  // Measured payload: ~369 B for self + 0 peers; grows ~130 B per peer.
+  // Start at 512 B; sendAdaptiveJson grows x2 under overflow and owns the
+  // heap-pressure 503 — no hand-rolled guard needed here.
+  sendAdaptiveJson(request, [this](JsonObject& root) {
+    JsonObject self = root.createNestedObject("self");
+    self["device_id"] = _canonical.length() ? _canonical : DeviceIdentity::canonical();
+    self["project"]   = DeviceIdentity::projectName();
+    self["fw"]        = DeviceIdentity::version();
+    self["schema"]    = MESH_SCHEMA_VERSION;
+    self["framework"] = ESPRACK_VERSION_STR;
+    self["ip"]        = WiFi.localIP().toString();
 
-  AsyncJsonResponse* response = new AsyncJsonResponse(false, 4096);
-  JsonObject root = response->getRoot();
-
-  JsonObject self = root.createNestedObject("self");
-  self["device_id"] = _canonical.length() ? _canonical : DeviceIdentity::canonical();
-  self["project"]   = DeviceIdentity::projectName();
-  self["fw"]        = DeviceIdentity::version();
-  self["schema"]    = MESH_SCHEMA_VERSION;
-  self["framework"] = ESPRACK_VERSION_STR;
-  self["ip"]        = WiFi.localIP().toString();
-
-  JsonArray arr = root.createNestedArray("peers");
-  if (_mutex) xSemaphoreTake(_mutex, portMAX_DELAY);
-  uint32_t now = millis();
-  for (const auto& p : _peers) {
-    JsonObject o = arr.createNestedObject();
-    o["device_id"]  = p.deviceId;
-    o["project"]    = p.project;
-    o["fw"]         = p.fw;
-    o["schema"]     = p.schema;
-    o["framework"]  = p.framework;
-    o["ip"]         = p.ip.toString();
-    o["port"]       = p.port;
-    o["trusted"]    = p.trusted;
-    o["compatible"] = p.compatible;
-    o["age_ms"]     = (uint32_t)(now - p.lastSeenMs);
-  }
-  if (_mutex) xSemaphoreGive(_mutex);
-
-  response->setLength();
-  request->send(response);
+    JsonArray arr = root.createNestedArray("peers");
+    if (_mutex) xSemaphoreTake(_mutex, portMAX_DELAY);
+    uint32_t now = millis();
+    for (const auto& p : _peers) {
+      JsonObject o = arr.createNestedObject();
+      o["device_id"]  = p.deviceId;
+      o["project"]    = p.project;
+      o["fw"]         = p.fw;
+      o["schema"]     = p.schema;
+      o["framework"]  = p.framework;
+      o["ip"]         = p.ip.toString();
+      o["port"]       = p.port;
+      o["trusted"]    = p.trusted;
+      o["compatible"] = p.compatible;
+      o["age_ms"]     = (uint32_t)(now - p.lastSeenMs);
+    }
+    if (_mutex) xSemaphoreGive(_mutex);
+  }, 512);
 }

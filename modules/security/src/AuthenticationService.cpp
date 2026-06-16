@@ -1,4 +1,5 @@
 #include <AuthenticationService.h>
+#include <AdaptiveJson.h>
 #include <WebManager.h>
 
 #if FT_ENABLED(FT_SECURITY)
@@ -66,16 +67,21 @@ void AuthenticationService::verifyAuthorization(AsyncWebServerRequest* request) 
 }
 
 void AuthenticationService::signIn(AsyncWebServerRequest* request, JsonVariant& json) {
-  AsyncJsonResponse* response = new AsyncJsonResponse(false, MAX_AUTHENTICATION_SIZE);
-  JsonVariant out = response->getRoot();
-  int status = authenticateAndMintToken(json, out);
-  if (status == 200) {
-    response->setLength();
-    request->send(response);
-  } else {
-    delete response;
-    request->send(status);
-  }
+  // Authenticate before entering the adaptive-JSON path so the fill
+  // lambda is a pure re-runnable computation (JWT mint from an already-
+  // verified user) rather than a side-effectful DB lookup.
+  if (!json.is<JsonObjectConst>()) { request->send(400); return; }
+  String username = json["username"] | "";
+  String password = json["pwd"]      | "";
+  Authentication authentication = _securityManager->authenticate(username, password);
+  if (!authentication.authenticated) { request->send(401); return; }
+
+  // Token response is tiny: {"access_token":"<jwt>"} ≈ 200 B.
+  // Start hint 512 — covers the JWT with a factor-of-2 margin and
+  // avoids a grow retry on the common path.
+  sendAdaptiveJson(request, [this, &authentication](JsonObject& o) {
+    o["access_token"] = _securityManager->generateJWT(authentication.user);
+  }, 512);
 }
 
 #endif // end FT_ENABLED(FT_SECURITY)

@@ -1,5 +1,6 @@
 #include <UploadFirmwareService.h>
 
+#include <AdaptiveJson.h>
 #include <FormBuilder.h>
 #include <WebManager.h>
 
@@ -86,11 +87,9 @@ void UploadFirmwareService::buildForm(JsonObject& root) {
 }
 
 void UploadFirmwareService::uploadForm(AsyncWebServerRequest* request) {
-  AsyncJsonResponse* response = new AsyncJsonResponse(false, 2048);
-  JsonObject root = response->getRoot();
-  buildForm(root);
-  response->setLength();
-  request->send(response);
+  sendAdaptiveJson(request, [](JsonObject& root) {
+    buildForm(root);
+  }, 1024);
 }
 
 void UploadFirmwareService::handleUpload(AsyncWebServerRequest* request,

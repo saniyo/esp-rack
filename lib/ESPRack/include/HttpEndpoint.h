@@ -6,6 +6,7 @@
 #include <AsyncJson.h>
 #include <ESPAsyncWebServer.h>
 
+#include <AdaptiveJson.h>
 #include <ProblemJson.h>
 #include <SecurityManager.h>
 #include <StatefulService.h>
@@ -27,84 +28,21 @@ class WebManager;
 // never a real request.
 static constexpr size_t WEBFEATURE_BUFFER_AUTO = 0;
 
-// ---- Adaptive JSON state response --------------------------------------
-// Builds the service's state tree into an AsyncJsonResponse and sends it.
-// The configured buffer size is a STARTING POINT, not a contract:
-//
-//   * Tree overflows the doc (explicit size set too small, or an
-//     auto-probed schema grew at runtime)  ->  the doc is grown ×2 and
-//     the tree rebuilt, transparently, until it fits or the heap caps
-//     out. ArduinoJson otherwise DROPS the overflowing inserts silently
-//     and the caller ships a truncated form with a 200 — the worst
-//     failure mode of all, because nothing logs and the UI just misses
-//     fields.
-//   * Heap pressure (configured size momentarily larger than the largest
-//     free block) -> the first attempt is CLAMPED DOWN to what the heap
-//     can serve right now; a small tree inside a generously-sized buffer
-//     still goes out instead of 503ing on the configured constant.
-//   * Truly impossible (tree larger than any allocatable doc) -> 503
-//     {"error":"heap_pressure","retryAfter":1}; the UI's axios layer
-//     auto-retries 503s, so transient pressure self-heals client-side.
-//
-// The WIRE transfer needs no contiguous output copy in any of these
-// cases: AsyncJsonResponse serialises the retained doc window-by-window
-// into TCP-sized chunks on every ack (ChunkPrint), so the only thing
-// that must fit contiguously is the tree itself.
-//
+// ---- Typed-feature state response --------------------------------------
+// Thin wrapper over sendAdaptiveJson (AdaptiveJson.h): the configured
+// buffer is just the measured starting point — the doc grows on overflow,
+// shrinks under heap pressure, streams wire-chunked, and 503s only when
+// the heap genuinely can't serve. See AdaptiveJson.h for the full policy.
 // Returns true if a 2xx response was queued, false after the 503.
 template <class T>
 inline bool sendJsonStateResponse(AsyncWebServerRequest* request,
                                   StatefulService<T>* service,
                                   const JsonStateReader<T>& reader,
                                   size_t configuredSize) {
-  // Slack kept free above the doc so the response head String + TCP
-  // bookkeeping never compete with the tree for the same block.
-  static constexpr size_t kSlack    = 1024;
-  // Smallest doc we will allocate. This is a FLOOR for tiny configured
-  // sizes — NOT a rejection of features that legitimately need a small
-  // response. The earlier code did `if (size < kMinDoc) break` with
-  // kMinDoc=1024, which 503'd every sub-1 KB form forever (OTA auto-sizes
-  // to ~728 B, the JWT-secret form to ~700 B, etc.). A small form needs a
-  // small doc; we floor up to this and serve, only shedding to 503 when
-  // the heap genuinely can't hold even kMinDoc + kSlack.
-  static constexpr size_t kMinDoc   = 512;
-  static constexpr int    kAttempts = 4;
-
-  // Floor the configured size UP (never reject a small feature).
-  size_t want = configuredSize ? configuredSize : DEFAULT_BUFFER_SIZE;
-  if (want < kMinDoc) want = kMinDoc;
-  for (int attempt = 0; attempt < kAttempts; ++attempt) {
-    const size_t ceiling = ESP.getMaxAllocHeap();
-    if (ceiling < kMinDoc + kSlack) break;  // genuinely too tight — shed
-    size_t size = want;
-    // Under pressure clamp DOWN to what fits; ceiling >= kMinDoc + kSlack
-    // above guarantees the clamped size stays >= kMinDoc.
-    if (size + kSlack > ceiling) size = ceiling - kSlack;
-
-    AsyncJsonResponse* response = new AsyncJsonResponse(false, size);
-    JsonObject root = response->getRoot().to<JsonObject>();
-    if (root.isNull()) {  // doc alloc lost the race despite the clamp
-      delete response;
-      break;
-    }
-    service->read(root, reader);
-    if (!response->overflowed()) {
-      response->setLength();
-      request->send(response);
-      return true;
-    }
-    // Tree didn't fit this doc — grow and rebuild. If we were already
-    // pressure-clamped to the ceiling, growing is impossible: bail to 503.
-    delete response;
-    size_t next = size * 2;
-    if (next + kSlack > ceiling) break;
-    log_w("[http.json] tree overflowed %u B doc — retrying at %u B",
-          (unsigned)size, (unsigned)next);
-    want = next;
-  }
-  sendProblem(request, 503, "heap_pressure",
-              "No contiguous heap for the response right now", 1);
-  return false;
+  return sendAdaptiveJson(
+      request,
+      [service, reader](JsonObject& root) { service->read(root, reader); },
+      configuredSize ? configuredSize : DEFAULT_BUFFER_SIZE);
 }
 
 template <class T>

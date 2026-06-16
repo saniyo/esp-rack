@@ -1,5 +1,6 @@
 #include "FileSystemService.h"
 
+#include <AdaptiveJson.h>
 #include <FormBuilder.h>
 #include <esp_rom_crc.h>
 #include <mbedtls/version.h>
@@ -305,14 +306,17 @@ void FileSystemService::sendJson(AsyncWebServerRequest* request, int code, const
 
 // --------- GET /schema ----------
 void FileSystemService::handleSchema(AsyncWebServerRequest* request) {
-  DynamicJsonDocument doc(1024);
-  JsonObject root = doc.to<JsonObject>();
-  JsonArray browser = FormBuilder::createForm(root, "browser", "File System");
-  FormBuilder::addFilesField(browser, "path", AF::RW, FS_REST_BASE, "/flash", FS_UPLOAD_PATH);
-  sendJson(request, 200, doc);
+  sendAdaptiveJson(request, [](JsonObject& root) {
+    JsonArray browser = FormBuilder::createForm(root, "browser", "File System");
+    FormBuilder::addFilesField(browser, "path", AF::RW, FS_REST_BASE, "/flash", FS_UPLOAD_PATH);
+  }, 1536);
 }
 
 // --------- GET /volumes ----------
+// Wire shape is a bare JSON array — sendAdaptiveJson forces an object root,
+// which would break the client.  The doc size is already computed dynamically
+// (512 + N*128) and is serialised to a String (no AsyncJsonResponse fixed-slab
+// heap gate), so this handler does not have the oversized-buffer problem.
 void FileSystemService::handleVolumes(AsyncWebServerRequest* request) {
   const auto& backends = _manager->backends();
   DynamicJsonDocument doc(512 + backends.size() * 128);
@@ -337,12 +341,11 @@ void FileSystemService::handleList(AsyncWebServerRequest* request) {
 
   // Root "/" — return empty entries (volumes shown separately)
   if (path == "/") {
-    DynamicJsonDocument doc(128);
-    JsonObject root = doc.to<JsonObject>();
-    root["path"] = "/";
-    root["readOnly"] = true;
-    root.createNestedArray("entries");
-    sendJson(request, 200, doc);
+    sendAdaptiveJson(request, [&path](JsonObject& root) {
+      root["path"] = "/";
+      root["readOnly"] = true;
+      root.createNestedArray("entries");
+    }, 512);
     return;
   }
 
@@ -350,19 +353,20 @@ void FileSystemService::handleList(AsyncWebServerRequest* request) {
   FsResult r = _manager->list(path, entries);
   if (r != FsResult::OK) { sendError(request, httpCodeFor(r), r); return; }
 
-  DynamicJsonDocument doc(512 + entries.size() * 128);
-  JsonObject root = doc.to<JsonObject>();
-  root["path"] = path;
-  root["readOnly"] = _manager->isReadOnlyPath(path);
-  JsonArray arr = root.createNestedArray("entries");
-  for (const auto& e : entries) {
-    JsonObject o = arr.createNestedObject();
-    o["name"] = e.name;
-    o["isDir"] = e.isDir;
-    o["size"] = (double)e.size;
-    o["mtime"] = e.mtime;
-  }
-  sendJson(request, 200, doc);
+  // Start hint: fixed overhead + per-entry measured average (~96 B name+flags+size+mtime).
+  // sendAdaptiveJson grows x2 on overflow up to the live heap ceiling.
+  sendAdaptiveJson(request, [this, &path, &entries](JsonObject& root) {
+    root["path"] = path;
+    root["readOnly"] = _manager->isReadOnlyPath(path);
+    JsonArray arr = root.createNestedArray("entries");
+    for (const auto& e : entries) {
+      JsonObject o = arr.createNestedObject();
+      o["name"] = e.name;
+      o["isDir"] = e.isDir;
+      o["size"] = (double)e.size;
+      o["mtime"] = e.mtime;
+    }
+  }, 512 + entries.size() * 96);
 }
 
 // --------- GET /stat ----------
@@ -373,13 +377,12 @@ void FileSystemService::handleStat(AsyncWebServerRequest* request) {
   FsResult r = _manager->stat(path, e);
   if (r != FsResult::OK) { sendError(request, httpCodeFor(r), r); return; }
 
-  DynamicJsonDocument doc(256);
-  JsonObject root = doc.to<JsonObject>();
-  root["name"] = e.name;
-  root["isDir"] = e.isDir;
-  root["size"] = (double)e.size;
-  root["mtime"] = e.mtime;
-  sendJson(request, 200, doc);
+  sendAdaptiveJson(request, [&e](JsonObject& root) {
+    root["name"] = e.name;
+    root["isDir"] = e.isDir;
+    root["size"] = (double)e.size;
+    root["mtime"] = e.mtime;
+  }, 512);
 }
 
 // --------- GET /download ----------
@@ -639,20 +642,20 @@ void FileSystemService::handleFormatStatus(AsyncWebServerRequest* request) {
   }
   if (!target) { sendError(request, 404, "volume_not_found"); return; }
 
-  DynamicJsonDocument doc(192);
-  uint8_t st = target->formatState();
-  const char* stStr = "idle";
-  switch (st) {
-    case 1: stStr = "counting"; break;
-    case 2: stStr = "running"; break;
-    case 3: stStr = "done"; break;
-    case 4: stStr = "error"; break;
-  }
-  doc["state"] = stStr;
-  doc["percent"] = target->formatProgress();
-  doc["total"] = target->formatTotal();
-  doc["done"] = target->formatDone();
-  sendJson(request, 200, doc);
+  sendAdaptiveJson(request, [target](JsonObject& root) {
+    uint8_t st = target->formatState();
+    const char* stStr = "idle";
+    switch (st) {
+      case 1: stStr = "counting"; break;
+      case 2: stStr = "running"; break;
+      case 3: stStr = "done"; break;
+      case 4: stStr = "error"; break;
+    }
+    root["state"] = stStr;
+    root["percent"] = target->formatProgress();
+    root["total"] = target->formatTotal();
+    root["done"] = target->formatDone();
+  }, 512);
 }
 
 // Body: { "volume": "sd", "confirm": true }
@@ -949,15 +952,15 @@ void FileSystemService::handleArchivePrepare(AsyncWebServerRequest* request, Jso
 
 // GET /api/v1/fs/archive/status
 void FileSystemService::handleArchiveStatus(AsyncWebServerRequest* request) {
-  DynamicJsonDocument doc(192);
-  doc["state"] = archiveStateString(_archive.state);
-  doc["walked"] = _archive.walkedCount;
-  doc["totalBytes"] = _archive.totalBytes;
-  doc["entries"] = (uint32_t)_archive.entries.size();
-  doc["path"] = _archive.path;
-  doc["archiveName"] = _archive.archiveName;
-  if (_archive.state == ArchiveJob::State::Error) doc["error"] = _archive.error;
-  sendJson(request, 200, doc);
+  sendAdaptiveJson(request, [this](JsonObject& root) {
+    root["state"] = archiveStateString(_archive.state);
+    root["walked"] = _archive.walkedCount;
+    root["totalBytes"] = _archive.totalBytes;
+    root["entries"] = (uint32_t)_archive.entries.size();
+    root["path"] = _archive.path;
+    root["archiveName"] = _archive.archiveName;
+    if (_archive.state == ArchiveJob::State::Error) root["error"] = _archive.error;
+  }, 512);
 }
 
 // GET /api/v1/fs/archive/download — streams the prepared TAR
@@ -1144,25 +1147,25 @@ void FileSystemService::handleHashStart(AsyncWebServerRequest* request, JsonVari
 
 // GET /api/v1/fs/hash/status
 void FileSystemService::handleHashStatus(AsyncWebServerRequest* request) {
-  DynamicJsonDocument doc(384);
-  doc["state"] = hashStateString(_hash.state);
-  doc["bytesRead"] = _hash.bytesRead;
-  doc["total"] = _hash.total;
-  uint32_t pct = 0;
-  if (_hash.total > 0) {
-    pct = (uint32_t)((uint64_t)_hash.bytesRead * 100ULL / (uint64_t)_hash.total);
-    if (pct > 100) pct = 100;
-  } else if (_hash.state == HashJob::State::Done) {
-    pct = 100;
-  }
-  doc["percent"] = pct;
-  doc["path"] = _hash.path;
-  if (_hash.state == HashJob::State::Done) {
-    doc["sha256"] = _hash.sha256Hex;
-    doc["crc32"] = _hash.crc32Hex;
-  }
-  if (_hash.state == HashJob::State::Error) doc["error"] = _hash.error;
-  sendJson(request, 200, doc);
+  sendAdaptiveJson(request, [this](JsonObject& root) {
+    root["state"] = hashStateString(_hash.state);
+    root["bytesRead"] = _hash.bytesRead;
+    root["total"] = _hash.total;
+    uint32_t pct = 0;
+    if (_hash.total > 0) {
+      pct = (uint32_t)((uint64_t)_hash.bytesRead * 100ULL / (uint64_t)_hash.total);
+      if (pct > 100) pct = 100;
+    } else if (_hash.state == HashJob::State::Done) {
+      pct = 100;
+    }
+    root["percent"] = pct;
+    root["path"] = _hash.path;
+    if (_hash.state == HashJob::State::Done) {
+      root["sha256"] = _hash.sha256Hex;
+      root["crc32"] = _hash.crc32Hex;
+    }
+    if (_hash.state == HashJob::State::Error) root["error"] = _hash.error;
+  }, 512);
 }
 
 // POST /api/v1/fs/hash/cancel

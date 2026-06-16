@@ -1,6 +1,7 @@
 #include <MdnsService.h>
 
 #include <AsyncJson.h>
+#include <AdaptiveJson.h>
 #include <FormBuilder.h>
 #include <ProblemJson.h>
 #include <WebManager.h>
@@ -415,9 +416,10 @@ void MdnsService::buildForm(JsonObject& root) {
 }
 
 void MdnsService::serveForm(AsyncWebServerRequest* request) {
-  AsyncJsonResponse* response = new AsyncJsonResponse(false, 8192);
-  JsonObject root = response->getRoot();
-  buildForm(root);
-  response->setLength();
-  request->send(response);
+  // Measured payload: ~1412 B (form skeleton + fields + zero cached services).
+  // Each cached ServiceEntry adds ~60 B. Start at 1536 B; sendAdaptiveJson
+  // grows x2 on overflow and owns the heap-pressure 503.
+  sendAdaptiveJson(request, [this](JsonObject& root) {
+    buildForm(root);
+  }, 1536);
 }

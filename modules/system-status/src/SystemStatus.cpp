@@ -1,5 +1,6 @@
 #include <SystemStatus.h>
 
+#include <AdaptiveJson.h>
 #include <FormBuilder.h>   // still used by buildIdentityForm during migration
 #include <web/Form.h>
 #include <WebManager.h>
@@ -270,73 +271,69 @@ void SystemStatus::buildForm(JsonObject& root,
 }
 
 void SystemStatus::systemStatus(AsyncWebServerRequest* request) {
-  // Snapshot heap BEFORE the response buffer alloc. See buildForm()'s
-  // comment block for the full observer-effect rationale — same
-  // principle here: the 1 KB AsyncJsonResponse pool below would
-  // otherwise eat into the very value we're about to report.
+  // Snapshot heap BEFORE sendAdaptiveJson allocates the response doc.
+  // See buildForm()'s comment block for the observer-effect rationale —
+  // same principle: allocation of the response pool would otherwise eat
+  // into the very value we're about to report.
   const uint32_t fh_entry = ESP.getFreeHeap();
   const uint32_t ma_entry = ESP.getMaxAllocHeap();
-  AsyncJsonResponse* response = new AsyncJsonResponse(false, MAX_ESP_STATUS_SIZE);
-  JsonObject root = response->getRoot();
-  root["esp_platform"] = ESP.getChipModel();
-  root["max_alloc_heap"] = ma_entry;
-  root["psram_size"] = ESP.getPsramSize();
-  root["free_psram"] = ESP.getFreePsram();
+  sendAdaptiveJson(request, [fh_entry, ma_entry](JsonObject& root) {
+    root["esp_platform"]    = ESP.getChipModel();
+    root["max_alloc_heap"]  = ma_entry;
+    root["psram_size"]      = ESP.getPsramSize();
+    root["free_psram"]      = ESP.getFreePsram();
+    root["cpu_freq_mhz"]    = ESP.getCpuFreqMHz();
+    root["free_heap"]       = fh_entry;
+    root["sketch_size"]     = ESP.getSketchSize();
+    root["free_sketch_space"] = ESP.getFreeSketchSpace();
+    root["sdk_version"]     = ESP.getSdkVersion();
+    root["flash_chip_size"] = ESP.getFlashChipSize();
+    root["flash_chip_speed"] = ESP.getFlashChipSpeed();
 
-  root["cpu_freq_mhz"] = ESP.getCpuFreqMHz();
-  root["free_heap"] = fh_entry;
-  root["sketch_size"] = ESP.getSketchSize();
-  root["free_sketch_space"] = ESP.getFreeSketchSpace();
-  root["sdk_version"] = ESP.getSdkVersion();
-  root["flash_chip_size"] = ESP.getFlashChipSize();
-  root["flash_chip_speed"] = ESP.getFlashChipSpeed();
+    // Normalized HW identification fields
+    {
+      String chip = ESP.getChipModel();
+      chip.toLowerCase();
+      chip.replace("-", "");
+      chip.replace(" ", "");
+      root["chip_id"] = chip;
 
-  // Normalized HW identification fields
-  {
-    String chip = ESP.getChipModel();
-    chip.toLowerCase();
-    chip.replace("-", "");
-    chip.replace(" ", "");
-    root["chip_id"] = chip;
+      int flashMB = (int)((ESP.getFlashChipSize() + 512 * 1024) / (1024 * 1024));
+      root["flash_mb"] = flashMB;
 
-    int flashMB = (int)((ESP.getFlashChipSize() + 512 * 1024) / (1024 * 1024));
-    root["flash_mb"] = flashMB;
+      int psramMB = 0;
+      size_t psramSize = ESP.getPsramSize();
+      if (psramSize > 0) {
+        psramMB = (int)((psramSize + 512 * 1024) / (1024 * 1024));
+      }
+      root["psram_mb"] = psramMB;
 
-    int psramMB = 0;
-    size_t psramSize = ESP.getPsramSize();
-    if (psramSize > 0) {
-      psramMB = (int)((psramSize + 512 * 1024) / (1024 * 1024));
+      String suffix = chip + "-n" + String(flashMB);
+      if (psramMB > 0) {
+        suffix += "r" + String(psramMB);
+      }
+      root["hw_suffix"] = suffix;
     }
-    root["psram_mb"] = psramMB;
 
-    String suffix = chip + "-n" + String(flashMB);
-    if (psramMB > 0) {
-      suffix += "r" + String(psramMB);
-    }
-    root["hw_suffix"] = suffix;
-  }
+    // Canonical device identity — same source as cert Subject CN and
+    // mothership deviceId payload, so monitoring tooling that scrapes
+    // /api/v1/system/health can correlate this device with its server-
+    // side record without parsing the cert.
+    root["device_id"]    = DeviceIdentity::canonical();
+    root["project_name"] = DeviceIdentity::projectName();
+    root["fw_version"]   = DeviceIdentity::version();
+    root["hw_revision"]  = DeviceIdentity::hwRevision();
+    root["mac_address"]  = DeviceIdentity::macColon();
+    root["hardware_uid"] = DeviceIdentity::uidHex32();
+    root["flash_uid"]    = DeviceIdentity::flashUidHex();
 
-  // Canonical device identity — same source as cert Subject CN and
-  // mothership deviceId payload, so monitoring tooling that scrapes
-  // /api/v1/system/status can correlate this device with its server-
-  // side record without parsing the cert.
-  root["device_id"]    = DeviceIdentity::canonical();
-  root["project_name"] = DeviceIdentity::projectName();
-  root["fw_version"]   = DeviceIdentity::version();
-  root["hw_revision"]  = DeviceIdentity::hwRevision();
-  root["mac_address"]  = DeviceIdentity::macColon();
-  root["hardware_uid"] = DeviceIdentity::uidHex32();
-  root["flash_uid"]    = DeviceIdentity::flashUidHex();
-
-  root["fs_total"] = ESPFS.totalBytes();
-  root["fs_used"] = ESPFS.usedBytes();
-
-  response->setLength();
-  request->send(response);
+    root["fs_total"] = ESPFS.totalBytes();
+    root["fs_used"]  = ESPFS.usedBytes();
+  }, 1792);
 }
 
 void SystemStatus::systemStatusForm(AsyncWebServerRequest* request) {
-  // Snapshot heap BEFORE the 2 KB AsyncJsonResponse pool is allocated.
+  // Snapshot heap BEFORE sendAdaptiveJson allocates the response doc.
   // The form's "Heap (live, at request entry)" row reads from these
   // captured values so it reports what the heap looked like when this
   // request arrived — not what it looks like a few millis later with
@@ -344,37 +341,13 @@ void SystemStatus::systemStatusForm(AsyncWebServerRequest* request) {
   // observer delta vs the mothership-checkin path; the rest is from
   // lwIP TCP_PCB / receive buffers held by the active HTTP session,
   // which can't be measured-around without lying.
+  // sendAdaptiveJson starts at 1792 B and grows x2 if the rtos_tasks
+  // table overflows the first attempt — no pool-full silent truncation.
   const uint32_t fh_entry = ESP.getFreeHeap();
   const uint32_t ma_entry = ESP.getMaxAllocHeap();
-  // Pool sized for the worst case we serve: ~9 form fields (CPU + 3
-  // heap rows + PSRAM + sketch + flash + fs) PLUS the rtos_tasks table
-  // which has one row per FreeRTOS task. On a fully-loaded S3 that's
-  // ~12 tasks (async_tcp, loopTask, IDLE0/1, mothership, tiT, mdns,
-  // sys_evt, Tmr Svc, esp_timer, async_udp, wifi, arduino_events,
-  // ipc1). Each field-card costs ~250 B in pool memory (key, label,
-  // icon, value, access, type slots); each task row another ~80 B.
-  // 9 × 250 + 12 × 80 ≈ 3.2 KB. Pool of 4 KB leaves ×1.25 safety —
-  // the previous 2 KB silently truncated the rtos_tasks array tail
-  // because ArduinoJson v6 stops appending on pool full WITHOUT
-  // raising an error. The overflowed() check below catches a future
-  // regrowth so we see it as a log warn before the operator sees a
-  // mysteriously short table.
-  AsyncJsonResponse* response = new AsyncJsonResponse(false, MAX_ESP_STATUS_SIZE * 4);
-  JsonObject root = response->getRoot();
-  buildForm(root, fh_entry, ma_entry);
-  response->setLength();
-  // Guard: if a future field addition crosses the pool ceiling,
-  // ArduinoJson silently truncates arrays — the rtos_tasks rows go
-  // missing without any error path firing. Log a warning instead so
-  // the next regression is visible in the serial trace and we know
-  // to bump MAX_ESP_STATUS_SIZE * 4 before users see a short table.
-  if (root.memoryUsage() > (size_t)(MAX_ESP_STATUS_SIZE * 4) * 7 / 8) {
-    log_w("[sysstatus] form pool near full: %u of %u bytes used — "
-          "rtos_tasks may be truncated",
-          (unsigned)root.memoryUsage(),
-          (unsigned)(MAX_ESP_STATUS_SIZE * 4));
-  }
-  request->send(response);
+  sendAdaptiveJson(request, [this, fh_entry, ma_entry](JsonObject& o) {
+    buildForm(o, fh_entry, ma_entry);
+  }, 1792);
 }
 
 void SystemStatus::buildIdentityForm(JsonObject& root) {
@@ -479,9 +452,5 @@ void SystemStatus::buildIdentityForm(JsonObject& root) {
 }
 
 void SystemStatus::systemIdentityForm(AsyncWebServerRequest* request) {
-  AsyncJsonResponse* response = new AsyncJsonResponse(false, MAX_ESP_STATUS_SIZE * 2);
-  JsonObject root = response->getRoot();
-  buildIdentityForm(root);
-  response->setLength();
-  request->send(response);
+  sendAdaptiveJson(request, [this](JsonObject& o){ buildIdentityForm(o); }, 1792);
 }

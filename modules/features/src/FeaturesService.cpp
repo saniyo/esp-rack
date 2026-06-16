@@ -1,4 +1,5 @@
 #include <FeaturesService.h>
+#include <AdaptiveJson.h>
 #include <WebManager.h>
 
 FeaturesService::FeaturesService(AsyncWebServer* server, WebManager* web) {
@@ -68,9 +69,7 @@ void FeaturesService::buildFeaturesObject(JsonObject root) {
 }
 
 void FeaturesService::features(AsyncWebServerRequest* request) {
-  AsyncJsonResponse* response = new AsyncJsonResponse(false, MAX_FEATURES_SIZE);
-  JsonObject root = response->getRoot();
-  buildFeaturesObject(root);
-  response->setLength();
-  request->send(response);
+  sendAdaptiveJson(request, [](JsonObject& root) {
+    buildFeaturesObject(root);
+  }, 512);
 }

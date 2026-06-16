@@ -1,5 +1,6 @@
 #include <ConfigManagerService.h>
 
+#include <AdaptiveJson.h>
 #include <ESPFS.h>
 #include <FormBuilder.h>
 #include <WebManager.h>
@@ -96,11 +97,7 @@ void ConfigManagerService::registerManifest(WebManager* web) {
 }
 
 void ConfigManagerService::serveForm(AsyncWebServerRequest* request) {
-  AsyncJsonResponse* response = new AsyncJsonResponse(false, CONFIG_MGR_BUFFER_SIZE);
-  JsonObject root = response->getRoot();
-  buildForm(root);
-  response->setLength();
-  request->send(response);
+  sendAdaptiveJson(request, [this](JsonObject& o){ buildForm(o); }, 2560);
 }
 
 void ConfigManagerService::buildForm(JsonObject& root) {

@@ -1,4 +1,5 @@
 #include "UiDynService.h"
+#include <AdaptiveJson.h>
 #include <SecurityManager.h>
 #include <WebManager.h>
 
@@ -31,12 +32,13 @@ void UiDynService::begin() {
   if (_mounted || !_server)
     return;
 
+  // _jsonCapacity was previously used as a fixed AsyncJsonResponse slab.
+  // Use it as the start hint for sendAdaptiveJson so the caller's measured
+  // size is still honoured, but the helper grows and sheds gracefully.
   ArRequestHandlerFunction handler = [this](AsyncWebServerRequest* request) {
-    auto* response = new AsyncJsonResponse(false, _jsonCapacity);
-    JsonObject root = response->getRoot();
-    toJson(root);
-    response->setLength();
-    request->send(response);
+    sendAdaptiveJson(request, [this](JsonObject& root) {
+      toJson(root);
+    }, _jsonCapacity);
   };
 
   if (_securityManager) {

@@ -6,7 +6,6 @@
 #include <ConfigManager.h>
 
 #define CONFIG_MGR_FORM_PATH    "/api/v1/system/configmgr/form"
-#define CONFIG_MGR_BUFFER_SIZE  4096
 
 class WebManager;
 

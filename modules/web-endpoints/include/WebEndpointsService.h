@@ -5,7 +5,6 @@
 #include <SecurityManager.h>
 
 #define WEB_ENDPOINTS_FORM_PATH    "/api/v1/system/endpoints/form"
-#define WEB_ENDPOINTS_BUFFER_SIZE  8192
 
 class WebManager;
 class WsManager;

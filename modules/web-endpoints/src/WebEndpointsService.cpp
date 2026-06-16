@@ -1,7 +1,7 @@
 #include <WebEndpointsService.h>
 
+#include <AdaptiveJson.h>
 #include <FormBuilder.h>
-#include <ProblemJson.h>
 #include <WebManager.h>
 #include <WsManager.h>
 
@@ -54,28 +54,7 @@ void WebEndpointsService::registerManifest(WebManager* web) {
 }
 
 void WebEndpointsService::serveForm(AsyncWebServerRequest* request) {
-  // Proactive heap guard — same contract as HttpEndpoint's. Without it
-  // this (admin-only, biggest-doc) endpoint kept serving under pressure
-  // and the response head String failed to allocate mid-send: the body
-  // went out with NO status line / headers at all ("Received HTTP/0.9
-  // when not allowed" on the wire, observed live on a C3 at ~9 KB
-  // maxAlloc). A clean 503 the UI can retry beats a protocol-corrupt 200.
-  if (ESP.getMaxAllocHeap() < WEB_ENDPOINTS_BUFFER_SIZE + 1024) {
-    sendProblem(request, 503, "heap_pressure",
-                "Endpoints inventory needs more contiguous heap than is free", 2);
-    return;
-  }
-  AsyncJsonResponse* response = new AsyncJsonResponse(false, WEB_ENDPOINTS_BUFFER_SIZE);
-  JsonObject root = response->getRoot();
-  if (root.isNull()) {  // doc alloc failed despite the guard — race lost
-    delete response;
-    sendProblem(request, 503, "heap_pressure",
-                "Response buffer allocation failed", 2);
-    return;
-  }
-  buildForm(root);
-  response->setLength();
-  request->send(response);
+  sendAdaptiveJson(request, [this](JsonObject& o){ buildForm(o); }, 6144);
 }
 
 namespace {
@@ -145,10 +124,10 @@ void WebEndpointsService::buildForm(JsonObject& root) {
   // source as the Clients tab uses for its rows (WsManager::fillStats),
   // we just project the headline metrics here.
   if (_ws) {
-    // Heap, not StaticJsonDocument: 4 KB on the stack of the async_tcp
-    // task (8 KB total) left no headroom for FormBuilder frames below —
-    // stack-overflow territory. The serveForm() heap guard already
-    // ensured this allocation fits before we got here.
+    // Heap, not StaticJsonDocument: a large doc on the stack of the
+    // async_tcp task left no headroom for FormBuilder frames below —
+    // stack-overflow territory. sendAdaptiveJson owns the heap-pressure
+    // gate so this allocation fits when we get here.
     DynamicJsonDocument stats(4096);
     JsonObject statsRoot = stats.to<JsonObject>();
     _ws->fillStats(statsRoot);

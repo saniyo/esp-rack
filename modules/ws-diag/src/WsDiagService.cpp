@@ -1,8 +1,8 @@
 #include <WsDiagService.h>
 
+#include <AdaptiveJson.h>
 #include <FormBuilder.h>
 #include <PresenceService.h>
-#include <ProblemJson.h>
 #include <WebManager.h>
 
 WsDiagService::WsDiagService(AsyncWebServer* server, SecurityManager* securityManager,
@@ -56,22 +56,7 @@ void WsDiagService::registerManifest(WebManager* web) {
 }
 
 void WsDiagService::socketsForm(AsyncWebServerRequest* request) {
-  // Proactive heap guard — same contract as HttpEndpoint's.
-  if (ESP.getMaxAllocHeap() < WS_DIAG_BUFFER_SIZE + 1024) {
-    sendProblem(request, 503, "heap_pressure",
-                "Clients view needs more contiguous heap than is free", 2);
-    return;
-  }
-  AsyncJsonResponse* response = new AsyncJsonResponse(false, WS_DIAG_BUFFER_SIZE);
-  JsonObject root = response->getRoot();
-  if (root.isNull()) {
-    delete response;
-    sendProblem(request, 503, "heap_pressure", "Response buffer alloc failed", 2);
-    return;
-  }
-  buildForm(root);
-  response->setLength();
-  request->send(response);
+  sendAdaptiveJson(request, [this](JsonObject& o){ buildForm(o); }, 1536);
 }
 
 void WsDiagService::buildForm(JsonObject& root) {
@@ -84,13 +69,16 @@ void WsDiagService::buildForm(JsonObject& root) {
   // up because every axios call hits the SecurityManager wrap and touches
   // the registry.
   // Heap, NOT StaticJsonDocument: this runs on the async_tcp task whose
-  // stack is 6144 B (right-sized for the C3 heap ceiling). A 4 KB doc on
+  // stack is 6144 B (right-sized for the C3 heap ceiling). A large doc on
   // that stack, on top of the FormBuilder frames below, overflows it and
   // the task faults — the connection resets and the Clients tab "doesn't
-  // load" (curl saw 000). The serveForm guard above ensured this fits.
-  DynamicJsonDocument presenceDoc(4096);
+  // load" (curl saw 000). sendAdaptiveJson owns the heap-pressure gate now.
+  // 2048 holds the presence scratch for ~10 tabs; if it can't allocate
+  // under pressure, presenceRoot is null and the table renders empty —
+  // a degraded view beats a 503.
+  DynamicJsonDocument presenceDoc(2048);
   JsonObject presenceRoot = presenceDoc.to<JsonObject>();
-  if (_presence) _presence->fillStats(presenceRoot);
+  if (_presence && !presenceRoot.isNull()) _presence->fillStats(presenceRoot);
 
   const uint32_t totalPresence = presenceRoot["total_presence"] | 0;
   String presenceSummary = String(totalPresence) + " active tab(s) tracked";

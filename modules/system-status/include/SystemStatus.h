@@ -10,7 +10,6 @@
 #include <SecurityManager.h>
 #include <ESPFS.h>
 
-#define MAX_ESP_STATUS_SIZE 1024
 // C1 (api-v1) bespoke page paths. The flat machine reader lives at
 // /api/v1/system/health — NOT /api/v1/system/status — because
 // AsyncWebServer prefix-matches a registered URI against "<uri>/..."
@@ -43,11 +42,11 @@ class SystemStatus {
   // versions; passing _web through every call site would be noise.
   //
   // free_snap / max_snap — optional pre-captured heap values taken
-  // at the request-handler entry point, BEFORE AsyncJsonResponse's
-  // 2 KB DynamicJsonDocument pool was allocated. Used to display
-  // the "Heap (live, at request entry)" row. Pass 0 / 0 and the
-  // form falls back to a live read inside buildForm (legacy
-  // path for any callers that haven't been updated).
+  // at the request-handler entry point, BEFORE sendAdaptiveJson
+  // allocates the response doc. Used to display the "Heap (live,
+  // at request entry)" row. Pass 0 / 0 and the form falls back to
+  // a live read inside buildForm (legacy path for callers that
+  // haven't been updated).
   void buildForm(JsonObject& root,
                   uint32_t free_snap = 0,
                   uint32_t max_snap  = 0);
