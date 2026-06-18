@@ -236,6 +236,17 @@ class WebManager {
     for (const auto& e : _entries) if (e) cb(*e);
   }
 
+  // Indexable access to the registry — for a RESUMABLE walk that survives
+  // across calls (forEachEntry runs to completion in one shot and can't be
+  // paused). Used by the endpoints-tab chunked streamer, which serializes
+  // one entry per beginChunkedResponse callback so a big registry table
+  // never has to exist as one contiguous tree. Index/count are stable
+  // after boot (entries are only registered during init, never removed).
+  size_t entryCount() const { return _entries.size(); }
+  const IWebFeatureEntry* entryAt(size_t i) const {
+    return (i < _entries.size()) ? _entries[i].get() : nullptr;
+  }
+
   // Late-bind the SecurityManager pointer. Used by the SecurityModule
   // to swap App's NullSecurityManager for the real PBKDF2-backed
   // implementation during onInstall. Must be called BEFORE any other
