@@ -10,7 +10,8 @@
 #include <Arduino.h>
 #include <ESPAsyncWebServer.h>
 #include <ArduinoJson.h>
-#include <Ticker.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 
 #include <functional>
 #include <map>
@@ -65,13 +66,22 @@ class WsManager {
         _lastPingTs(0),
         _hasFirstRtt(false),
         _alpha(0.30f),
-        _avgRtt(0.0f) {}
+        _avgRtt(0.0f) {
+    // Guards the client-tracking maps (_lastPong, EndpointBase::clients)
+    // against concurrent access from the three tasks that touch them:
+    // async_tcp (WS events + form handlers/fillStats), loopTask
+    // (processAllQueues from App::loop), and — historically — the ping
+    // Ticker's esp_timer task (now removed; ping runs inline in
+    // processAllQueues). Recursive so a locked path that re-enters
+    // (e.g. event -> processAllQueues -> processTx) can't self-deadlock.
+    _clientsMx = xSemaphoreCreateRecursiveMutex();
+  }
 
   ~WsManager() {
-    _pingTicker.detach();
     _endpoints.clear();
     _endpointsByPath.clear();
     _lastPong.clear();
+    if (_clientsMx) vSemaphoreDelete(_clientsMx);
   }
 
   // =======================================================================
@@ -244,6 +254,10 @@ void* addEndpoint(const String& path,
   // seconds since last inbound/outbound frame). Safe to call from any
   // context that already holds an AsyncJsonResponse.
   void fillStats(JsonObject& root) const {
+    // Iterates _endpoints + every ep->clients while building the JSON; hold
+    // the lock so a concurrent WS event (async_tcp) or processTx (loopTask)
+    // can't mutate a map mid-iteration. Bounded client count -> short hold.
+    ClientsLock g(_clientsMx);
     const unsigned long now = millis();
     auto sinceSec = [now](uint32_t ts) -> uint32_t {
       if (ts == 0) return 0;
@@ -332,14 +346,23 @@ void* addEndpoint(const String& path,
     }
     processRx();
     processTx();
+    // Keepalive — formerly a Ticker on the esp_timer task, which raced the
+    // client maps. Now inline on the queue-pump task so ping/eviction share
+    // the same context (and lock) as the map mutations. Gated by interval.
+    if (_pingIntervalSec &&
+        (millis() - _lastPingTs >= (unsigned long)_pingIntervalSec * 1000UL)) {
+      pingAll();          // updates _lastPingTs
+      checkInactive();
+    }
   }
 
   // Ping/Pong keepalive
   void beginPingPong(unsigned pingIntervalSec = 10, unsigned long pongTimeoutMs = 30000) {
+    // No Ticker: the ping/eviction pass runs inline in processAllQueues()
+    // (loop/async_tcp context) so it shares the client-map lock. Just record
+    // the cadence; the gate in processAllQueues fires it.
     _pingIntervalSec = pingIntervalSec;
     _pongTimeoutMs = pongTimeoutMs;
-    _pingTicker.detach();
-    _pingTicker.attach((float)_pingIntervalSec, &WsManager::staticPingCb, this);
   }
 
   float averageRTT() const { return _avgRtt; }
@@ -499,12 +522,25 @@ void* addEndpoint(const String& path,
   PtrRingQueue<WsTxItem> _txQ;
   PtrRingQueue<WsRxItem> _rxQ;
 
-  // ping/pong
-  Ticker _pingTicker;
+  // ping/pong — driven inline from processAllQueues() (NOT a Ticker, which
+  // ran on the esp_timer task and raced the client maps; see _clientsMx).
   unsigned _pingIntervalSec;
   unsigned long _pongTimeoutMs;
   unsigned long _lastPingTs;
   std::map<uint32_t, unsigned long> _lastPong;
+
+  // Serializes access to the client-tracking maps (_lastPong and every
+  // EndpointBase::clients) across async_tcp + loopTask. RAII guard below.
+  SemaphoreHandle_t _clientsMx = nullptr;
+  struct ClientsLock {
+    SemaphoreHandle_t h;
+    explicit ClientsLock(SemaphoreHandle_t s) : h(s) {
+      if (h) xSemaphoreTakeRecursive(h, portMAX_DELAY);
+    }
+    ~ClientsLock() { if (h) xSemaphoreGiveRecursive(h); }
+    ClientsLock(const ClientsLock&) = delete;
+    ClientsLock& operator=(const ClientsLock&) = delete;
+  };
 
   // RTT
   bool _hasFirstRtt;
@@ -528,6 +564,9 @@ void* addEndpoint(const String& path,
   }
 
   void processTx() {
+    // Reads/updates base->clients per frame; lock so a WS connect/disconnect
+    // (async_tcp) can't erase an entry while we hold an iterator into it.
+    ClientsLock g(_clientsMx);
     WsTxItem* it = nullptr;
     while (_txQ.pop(it)) {
       if (!it) continue;
@@ -618,51 +657,61 @@ void* addEndpoint(const String& path,
                      uint8_t* data,
                      size_t len) {
     const uint32_t id = c->id();
+    bool justConnected = false;
 
-    switch (t) {
-      case WS_EVT_CONNECT: {
-        _lastPong[id] = millis();
-        WsClientInfo info;
-        info.id = id;
-        info.remoteIp = c->remoteIP().toString();
-        info.connectedAtMs = millis();
-        info.lastRxMs = millis();
-        info.lastTxMs = 0;
-        ep.clients[id] = info;
-        sendId(c);
-        // одразу пушимо стан endpoint-а
-        broadcastCurrentState(ep.path, "ws_connect");
-      } break;
+    // Map mutations under the lock. ws sends (sendId/broadcast) and queue
+    // pumping happen AFTER releasing it — they touch ws + the tx queue, not
+    // the client maps, and we don't want to hold the lock across them.
+    {
+      ClientsLock g(_clientsMx);
+      switch (t) {
+        case WS_EVT_CONNECT: {
+          _lastPong[id] = millis();
+          WsClientInfo info;
+          info.id = id;
+          info.remoteIp = c->remoteIP().toString();
+          info.connectedAtMs = millis();
+          info.lastRxMs = millis();
+          info.lastTxMs = 0;
+          ep.clients[id] = info;
+          justConnected = true;
+        } break;
 
-      case WS_EVT_PONG: {
-        _lastPong[id] = millis();
-        auto itPong = ep.clients.find(id);
-        if (itPong != ep.clients.end()) itPong->second.lastRxMs = millis();
-        if (_lastPingTs) updRtt(millis() - _lastPingTs);
-      } break;
+        case WS_EVT_PONG: {
+          _lastPong[id] = millis();
+          auto itPong = ep.clients.find(id);
+          if (itPong != ep.clients.end()) itPong->second.lastRxMs = millis();
+          if (_lastPingTs) updRtt(millis() - _lastPingTs);
+        } break;
 
-      case WS_EVT_DISCONNECT:
-      case WS_EVT_ERROR:
-        _lastPong.erase(id);
-        ep.clients.erase(id);
-        break;
+        case WS_EVT_DISCONNECT:
+        case WS_EVT_ERROR:
+          _lastPong.erase(id);
+          ep.clients.erase(id);
+          break;
 
-      case WS_EVT_DATA: {
-        // Any inbound frame proves the TCP link is alive, so count it as a
-        // pong-equivalent — protects active clients from being evicted just
-        // because they missed a scheduled pong window.
-        _lastPong[id] = millis();
-        auto itData = ep.clients.find(id);
-        if (itData != ep.clients.end()) itData->second.lastRxMs = millis();
-        AwsFrameInfo* info = reinterpret_cast<AwsFrameInfo*>(a);
-        if (info && info->final && info->index == 0 && info->opcode == WS_TEXT) {
-          String s(reinterpret_cast<char*>(data), len);
-          enqueueRx(ep.path, id, s, true);
-        }
-      } break;
+        case WS_EVT_DATA: {
+          // Any inbound frame proves the TCP link is alive, so count it as a
+          // pong-equivalent — protects active clients from being evicted just
+          // because they missed a scheduled pong window.
+          _lastPong[id] = millis();
+          auto itData = ep.clients.find(id);
+          if (itData != ep.clients.end()) itData->second.lastRxMs = millis();
+          AwsFrameInfo* info = reinterpret_cast<AwsFrameInfo*>(a);
+          if (info && info->final && info->index == 0 && info->opcode == WS_TEXT) {
+            String s(reinterpret_cast<char*>(data), len);
+            enqueueRx(ep.path, id, s, true);
+          }
+        } break;
 
-      default:
-        break;
+        default:
+          break;
+      }
+    }
+
+    if (justConnected) {
+      sendId(c);
+      broadcastCurrentState(ep.path, "ws_connect");  // push initial state
     }
 
     // одразу обробляємо — швидкий UX
@@ -678,13 +727,6 @@ void* addEndpoint(const String& path,
     c->text(s);
   }
 
-  static void staticPingCb(WsManager* m) {
-    if (m) {
-      m->pingAll();
-      m->checkInactive();
-    }
-  }
-
   void pingAll() {
     _lastPingTs = millis();
     for (auto& up : _endpoints) {
@@ -694,14 +736,21 @@ void* addEndpoint(const String& path,
 
   void checkInactive() {
     const unsigned long now = millis();
-    for (auto it = _lastPong.begin(); it != _lastPong.end();) {
-      if (now - it->second > _pongTimeoutMs) {
-        closeAll(it->first);
-        it = _lastPong.erase(it);
-      } else {
-        ++it;
+    std::vector<uint32_t> expired;
+    {
+      ClientsLock g(_clientsMx);
+      for (auto it = _lastPong.begin(); it != _lastPong.end();) {
+        if (now - it->second > _pongTimeoutMs) {
+          expired.push_back(it->first);
+          it = _lastPong.erase(it);
+        } else {
+          ++it;
+        }
       }
     }
+    // closeAll() touches AsyncWebSocket, not the client maps — do it outside
+    // the lock to keep the hold short and avoid lock-ordering surprises.
+    for (uint32_t cid : expired) closeAll(cid);
   }
 
   void closeAll(uint32_t cid) {
