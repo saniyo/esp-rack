@@ -10,5 +10,4 @@ export interface Features {
   telegram: boolean;
   auto_update: boolean;
   system_info: boolean;
-  audio: boolean;
 }
