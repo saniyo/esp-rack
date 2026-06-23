@@ -874,6 +874,26 @@ paths:
           $ref: '#/components/responses/Forbidden'
       parameters:
       - *id001
+  /api/v1/discovery/peers:
+    get:
+      summary: 'Discovery: peers'
+      tags:
+      - discovery
+      security:
+      - bearerAuth: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+        '503':
+          $ref: '#/components/responses/HeapPressure'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
   /api/v1/fs/archive/cancel:
     post:
       summary: 'File System: archiveCancel'
@@ -1419,26 +1439,6 @@ paths:
             schema:
               type: object
       description: 'Requires a write-capable role: reader tokens receive 403 forbidden.'
-  /api/v1/mesh/peers:
-    get:
-      summary: 'Discovery: peers'
-      tags:
-      - discovery
-      security:
-      - bearerAuth: []
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                type: object
-        '503':
-          $ref: '#/components/responses/HeapPressure'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '403':
-          $ref: '#/components/responses/Forbidden'
   /api/v1/mothership/form:
     get:
       summary: 'Mothership: Form-DSL envelope (web-UI face)'
