@@ -102,7 +102,12 @@ void DiscoveryService::begin() {
   // HMAC + epoch is the replay-hardening step — see DISCOVERY_PROTOCOL.md §6.)
   _sig       = hmacHex(_psk, _canonical, 16);
   _mutex     = xSemaphoreCreateMutex();
-  _peers.reserve(DISCOVERY_MAX_PEERS);  // one-time; upserts never reallocate the vector
+  // Deliberately NOT reserve()d: reserve(MAX_PEERS) of the String-bearing Peer
+  // is a ~7 KB contiguous HEAP block that pins C3 max_alloc into the 6-8 KB 503
+  // zone — i.e. it eats the very headroom that removing the mDNS responder was
+  // meant to free (HW-measured: max_alloc stuck at 7668 with the reserve). The
+  // vector grows on demand instead (a handful of peers on a bench). The fixed
+  // BSS PeerRow table (DISCOVERY_PROTOCOL.md §4) is the real 50+ determinism fix.
 
   // Persistent discovery task. Static stack — the buffer lives in BSS, not
   // heap, so it never sits as a hole that FRAGMENTS the heap (same P4 pattern
