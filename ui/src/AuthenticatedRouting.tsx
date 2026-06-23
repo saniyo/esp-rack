@@ -3,6 +3,7 @@ import { Navigate, Routes, Route, useNavigate, useLocation } from 'react-router-
 import { AxiosError } from 'axios';
 
 import PresenceProvider from './contexts/presence/PresenceProvider';
+import WsProvider from './contexts/ws/WsProvider';
 import * as AuthenticationApi from './api/authentication';
 import { AXIOS } from './api/endpoints';
 import { Layout, RequireAdmin } from './components';
@@ -112,6 +113,7 @@ const AuthenticatedRouting: FC = () => {
 
   return (
     <PresenceProvider>
+    <WsProvider>
     <Layout>
       <Routes>
         {manifestRoutes}
@@ -127,6 +129,7 @@ const AuthenticatedRouting: FC = () => {
         <Route path="/*" element={<Navigate to={defaultPath} />} />
       </Routes>
     </Layout>
+    </WsProvider>
     </PresenceProvider>
   );
 };

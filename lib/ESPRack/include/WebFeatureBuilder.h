@@ -92,7 +92,7 @@ class WebMenu {
   // to opt OUT and keep this feature's tabs in the top tab-bar only.
   WebMenu& expandTabs(bool v = true)       { _m.expandTabs = v; return *this; }
   // Mark this as the device's MAIN-ROLE feature (the consumer app). In the
-  // device-mesh menu it renders directly under the device record; non-role
+  // device discovery menu it renders directly under the device record; non-role
   // features fall into the "Device" group. Default off (framework / infra).
   WebMenu& role(bool v = true)             { _m.role = v; return *this; }
 

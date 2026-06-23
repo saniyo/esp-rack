@@ -30,7 +30,7 @@ import { resolveIcon } from '../dynamic-component/utils/iconRegistry';
 import { FeatureEntry } from '../../types';
 import { routeMatches } from '../../utils';
 import LayoutMenuItem, { MenuNode } from './LayoutMenuItem';
-import { Peer, SelfInfo, useDeviceMesh } from '../../utils/useDeviceMesh';
+import { Peer, SelfInfo, useDeviceDiscovery } from '../../utils/useDeviceDiscovery';
 
 // Manifest-driven side-nav — now a recursive TREE.
 //
@@ -98,7 +98,7 @@ const activePath = (nodes: MenuNode[], pathname: string): string[] => {
   return [];
 };
 
-// Reshape the flat feature tree into the device-mesh layout:
+// Reshape the flat feature tree into the device discovery layout:
 //   <role feature(s)>   — e.g. Light, at the TOP; the "Device" group (all infra
 //                         features: WiFi, NTP, … System) is nested INSIDE the
 //                         role, so the role is this device's single home.
@@ -108,7 +108,7 @@ const activePath = (nodes: MenuNode[], pathname: string): string[] => {
 //                         sorted by canonical id (stable order everywhere).
 // The device name is NEVER a top-level menu item — the top shows only the role
 // + Discovery; the identity lives INSIDE Discovery.
-// GRACEFUL: with no mesh module there is no "discovery" feature, so the flat
+// GRACEFUL: with no discovery module there is no "discovery" feature, so the flat
 // tree is returned unchanged (classic single-device menu).
 const buildDeviceTree = (
   localRoots: MenuNode[],
@@ -247,9 +247,9 @@ const LayoutMenu: FC = () => {
     return rootNodes;
   }, [manifest, me.admin, features.security]);
 
-  // Discovered LAN peers (empty/graceful when the mesh module isn't installed).
-  const { self, peers } = useDeviceMesh();
-  // Device-mesh layout: role + "Device" infra group at the top, then a
+  // Discovered LAN peers (empty/graceful when the discovery module isn't installed).
+  const { self, peers } = useDeviceDiscovery();
+  // Device discovery layout: role + "Device" infra group at the top, then a
   // "Discovery" group whose roster is this device + the discovered peers.
   const roots = useMemo<MenuNode[]>(
     () => buildDeviceTree(localRoots, self, peers),

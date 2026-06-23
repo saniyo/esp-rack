@@ -1,11 +1,26 @@
 #pragma once
 
-// Multi-endpoint WebSocket manager for ESPAsyncWebServer.
+// Single-socket, channel-multiplexed WebSocket manager for ESPAsyncWebServer.
 //
-// Цілі:
-// - ConfigManager-like wiring style через WsManager::Binding<T>
-// - Коректний доступ до стану через StatefulService<T>::read / update
-// - Черги без жорсткої привʼязки до FreeRTOS (але з коректною синхронізацією на ESP32)
+// ONE AsyncWebSocket at "/ws" carries every feature's live state, multiplexed by
+// a `ch` (channel = feature id) field in the JSON envelope. This collapses the
+// former per-feature sockets into one connection per browser tab, which relieves
+// the binding C3 constraint (the finite AsyncTCP PCB pool) and pays the WS auth
+// handshake once.
+//
+// Wire envelope (flat JSON):
+//   client->server: {"type":"sub","ch":"<id>"} / {"type":"unsub","ch":"<id>"}
+//                   {"type":"p","ch":"<id>","origin_id":"...","p":{...}}   (state write)
+//   server->client: {"type":"id","id":"ws:<cid>"}                          (once on connect)
+//                   {"type":"p","ch":"<id>","origin_id":"...","p":{...}}    (push + snapshot)
+// Resume = snapshot-on-(re)subscribe (server pushes current channel state when a
+// client subscribes); NO replay buffer.
+//
+// Design notes:
+// - ConfigManager-like wiring via WsManager::Binding<T> (the `path` argument is now
+//   the CHANNEL name = feature id).
+// - State access through StatefulService<T>::read / update.
+// - Queues are FreeRTOS-free (portable) but correctly synchronised on ESP32.
 
 #include <Arduino.h>
 #include <ESPAsyncWebServer.h>
@@ -16,6 +31,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <set>
 #include <vector>
 
 #ifdef ESP32
@@ -27,6 +43,12 @@
 
 #ifndef MWS_DEFAULT_JSON_CAP
 #define MWS_DEFAULT_JSON_CAP 2048
+#endif
+
+// The single multiplexed WebSocket path. Distinct from /ws/presence (which stays
+// its own always-on socket) so there is no path-prefix ambiguity. Override via -D.
+#ifndef WS_MUX_PATH
+#define WS_MUX_PATH "/ws/app"
 #endif
 
 // Per-client back-pressure threshold for outbound broadcasts. When a
@@ -41,15 +63,17 @@
 #endif
 
 // ---- Queue items ----
+// Tx: cid==0 means "fan out to every client SUBSCRIBED to `channel`";
+//     cid!=0 means "unicast to that client" (snapshot-on-subscribe).
 struct WsTxItem {
-  String path;
+  String channel;
   uint32_t cid;
   String payload;
   bool text;
 };
 
+// Rx: the channel lives INSIDE the payload (`ch`), so it isn't carried here.
 struct WsRxItem {
-  String path;
   uint32_t cid;
   String payload;
   bool text;
@@ -67,25 +91,29 @@ class WsManager {
         _hasFirstRtt(false),
         _alpha(0.30f),
         _avgRtt(0.0f) {
-    // Guards the client-tracking maps (_lastPong, EndpointBase::clients)
-    // against concurrent access from the three tasks that touch them:
-    // async_tcp (WS events + form handlers/fillStats), loopTask
-    // (processAllQueues from App::loop), and — historically — the ping
-    // Ticker's esp_timer task (now removed; ping runs inline in
-    // processAllQueues). Recursive so a locked path that re-enters
-    // (e.g. event -> processAllQueues -> processTx) can't self-deadlock.
+    // Guards the client roster (_clients incl. per-client subscription sets, and
+    // _lastPong) against concurrent access from the two tasks that touch them:
+    // async_tcp (WS events + form handlers/fillStats) and loopTask
+    // (processAllQueues from App::loop). Recursive so a locked path that
+    // re-enters (e.g. event -> processAllQueues -> processTx) can't self-deadlock.
     _clientsMx = xSemaphoreCreateRecursiveMutex();
+    // Guards the ONE shared outbound-build doc (_txDoc), reused for every
+    // channel's state frame instead of a per-broadcast allocation.
+    _txDocMx = xSemaphoreCreateRecursiveMutex();
   }
 
   ~WsManager() {
-    _endpoints.clear();
-    _endpointsByPath.clear();
+    _channelList.clear();
+    _channels.clear();
+    _clients.clear();
     _lastPong.clear();
+    if (_ws) { delete _ws; _ws = nullptr; }
     if (_clientsMx) vSemaphoreDelete(_clientsMx);
+    if (_txDocMx) vSemaphoreDelete(_txDocMx);
   }
 
   // =======================================================================
-  // ConfigManager-style helper: Binding<TState>
+  // ConfigManager-style helper: Binding<TState>  (path == channel name)
   // =======================================================================
   template <typename TState>
   class Binding {
@@ -115,15 +143,15 @@ class WsManager {
 
       _mgr->template addEndpoint<TState>(_path, _service, _reader, _updater, _jsonCapacity);
 
-      // Автобродкаст при будь-якому апдейті сервісу (REST/MQTT/WS),
-      // origin передається, щоб фронт міг відсіяти власні echo.
+      // Auto-broadcast on any service update (REST/MQTT/WS); origin lets the
+      // frontend filter its own echoes.
       if (_autoBroadcast && !_handlerId) {
         _handlerId = addHandlerCompat(
             _service,
             [this](const String& origin) {
               if (_mgr) _mgr->broadcastCurrentState(_path, origin);
             },
-            false /* як у твоєму коді: без "початкового" виклику */,
+            false,
             0);
       }
 
@@ -149,9 +177,6 @@ class WsManager {
     bool _attached{false};
     update_handler_id_t _handlerId{0};
 
-    // Підтримка двох підписів addUpdateHandler:
-    // 1) addUpdateHandler(fn)
-    // 2) addUpdateHandler(fn, bool)
     template <typename TSvc, typename TFn>
     static auto addHandlerCompat(TSvc* svc, TFn fn, bool b, int)
         -> decltype(svc->addUpdateHandler(fn, b), update_handler_id_t()) {
@@ -171,92 +196,69 @@ class WsManager {
   };
 
   // =======================================================================
-  // Endpoint registration
+  // Channel registration
   // =======================================================================
 
-  // C3 (api-v1): upgrade-time auth gate applied to EVERY ws endpoint.
-  // Before this, the ?access_token= on WS URLs was a frontend convention
-  // only — a raw WebSocket connect to any /ws/* path was served
-  // unauthenticated. SecurityModule wires filterRequest(IS_AUTHENTICATED)
-  // here at install time; endpoints registered EARLIER also get it
-  // because the filter is applied on the handler at registration and
-  // retro-applied to already-mounted sockets below. When no filter is
-  // ever set (FT_SECURITY=0 / Null manager) behaviour stays open —
-  // consistent with the rest of the null-security posture.
+  // C3 (api-v1): upgrade-time auth gate applied ONCE to the single /ws socket.
+  // The ?access_token= on the WS URL is validated at the WebSocket upgrade;
+  // a raw connect without a valid token is rejected before any frame flows.
+  // When no filter is set (FT_SECURITY=0 / Null manager) behaviour stays open.
   void setAuthFilter(ArRequestFilterFunction filter) {
     _authFilter = filter;
-    for (auto& ep : _endpoints) {
-      if (ep && ep->ws) ep->ws->setFilter(_authFilter);
+    if (_ws) _ws->setFilter(_authFilter);
+  }
+
+  // `path` is the CHANNEL name (feature id). All channels share one socket.
+  template <typename TState>
+  void* addEndpoint(const String& path,
+                    StatefulService<TState>* svc,
+                    JsonStateReader<TState> reader,
+                    JsonStateUpdater<TState> updater,
+                    size_t jsonCapacity = MWS_DEFAULT_JSON_CAP) {
+    if (!_server || !svc || path.length() == 0) {
+      return nullptr;
     }
+
+    ensureSocket();
+
+    auto existing = _channels.find(path);
+    if (existing != _channels.end()) {
+      return existing->second;
+    }
+
+    std::unique_ptr<Channel<TState>> ch(new Channel<TState>(path, svc, reader, updater, jsonCapacity));
+    ChannelBase* chPtr = ch.get();
+
+    _channels[path] = chPtr;
+    _channelList.push_back(std::move(ch));
+
+    // The shared outbound-build doc is sized to the LARGEST channel only — not
+    // the sum. All channels reuse that one buffer (see buildStateFrame).
+    if (jsonCapacity > _maxWsCap) _maxWsCap = jsonCapacity;
+    return chPtr;
   }
-
-template <typename TState>
-void* addEndpoint(const String& path,
-                  StatefulService<TState>* svc,
-                  JsonStateReader<TState> reader,
-                  JsonStateUpdater<TState> updater,
-                  size_t jsonCapacity = MWS_DEFAULT_JSON_CAP) {
-  if (!_server || !svc || path.length() == 0) {
-    return nullptr;
-  }
-
-  if (_endpointsByPath.find(path) != _endpointsByPath.end()) {
-    return _endpointsByPath[path];
-  }
-
-  std::unique_ptr<Endpoint<TState>> ep(new Endpoint<TState>(path, svc, reader, updater, jsonCapacity));
-  EndpointBase* epPtr = ep.get();
-
-  AsyncWebSocket* ws = new AsyncWebSocket(path.c_str());
-  epPtr->ws = ws;
-
-  ws->onEvent([this, epPtr](AsyncWebSocket* /*s*/, AsyncWebSocketClient* c, AwsEventType t, void* a, uint8_t* d,
-                            size_t l) {
-    if (!epPtr || !c) return;
-    this->handleWsEvent(*epPtr, c, t, a, d, l);
-  });
-
-  if (_authFilter) ws->setFilter(_authFilter);
-
-  _server->addHandler(ws);
-
-  _endpointsByPath[path] = epPtr;
-  _endpoints.push_back(std::move(ep));
-
-  return epPtr;
-}
 
   // =======================================================================
-  // Sending API
+  // Sending API  (channel == feature id)
   // =======================================================================
-  void broadcast(const String& path, const String& payload, bool text = true) { enqueueTx(path, 0, payload, text); }
+  void broadcast(const String& channel, const String& payload, bool text = true) {
+    enqueueTx(channel, 0, payload, text);
+  }
 
-  void sendTo(const String& path, uint32_t cid, const String& payload, bool text = true) {
-    enqueueTx(path, cid, payload, text);
+  void sendTo(const String& channel, uint32_t cid, const String& payload, bool text = true) {
+    enqueueTx(channel, cid, payload, text);
   }
 
   // Subscriber introspection — used by services to gate expensive work
   // (periodic ticks, per-message echoes) before building any payload.
-  bool hasClients(const String& path) const {
-    auto it = _endpointsByPath.find(path);
-    if (it == _endpointsByPath.end() || !it->second || !it->second->ws) return false;
-    return it->second->ws->count() > 0;
-  }
+  bool hasClients(const String& channel) const { return subscriberCount(channel) > 0; }
+  size_t clientCount(const String& channel) const { return subscriberCount(channel); }
 
-  size_t clientCount(const String& path) const {
-    auto it = _endpointsByPath.find(path);
-    if (it == _endpointsByPath.end() || !it->second || !it->second->ws) return 0;
-    return it->second->ws->count();
-  }
-
-  // Serialise the full registry for the admin Sockets tab: every endpoint
-  // with its current client roster (id, ip, how long each has been around,
-  // seconds since last inbound/outbound frame). Safe to call from any
-  // context that already holds an AsyncJsonResponse.
+  // Serialise the registry for the admin Clients/Endpoints tabs: every channel
+  // with the clients currently SUBSCRIBED to it (id, ip, age, seconds since last
+  // rx/tx). Shape kept compatible with the old per-endpoint layout
+  // (endpoints[].clients[]) so WebEndpointsService/WsDiag need no change.
   void fillStats(JsonObject& root) const {
-    // Iterates _endpoints + every ep->clients while building the JSON; hold
-    // the lock so a concurrent WS event (async_tcp) or processTx (loopTask)
-    // can't mutate a map mid-iteration. Bounded client count -> short hold.
     ClientsLock g(_clientsMx);
     const unsigned long now = millis();
     auto sinceSec = [now](uint32_t ts) -> uint32_t {
@@ -265,30 +267,34 @@ void* addEndpoint(const String& path,
     };
 
     JsonArray eps = root.createNestedArray("endpoints");
-    size_t total = 0;
-    uint32_t totalDropped = 0;
     uint32_t totalBroadcastsDropped = 0;
-    for (auto& ep : _endpoints) {
-      if (!ep || !ep->ws) continue;
+    for (auto& chPair : _channels) {
+      ChannelBase* ch = chPair.second;
+      if (!ch) continue;
       JsonObject j = eps.createNestedObject();
-      j["path"]  = ep->path;
-      j["count"] = ep->ws->count();
-      j["dropped_broadcasts"] = ep->droppedBroadcasts;
-      total += ep->ws->count();
-      totalBroadcastsDropped += ep->droppedBroadcasts;
+      j["path"] = ch->name;
+      totalBroadcastsDropped += ch->droppedBroadcasts;
+      j["dropped_broadcasts"] = ch->droppedBroadcasts;
       JsonArray cl = j.createNestedArray("clients");
-      for (auto& kv : ep->clients) {
+      size_t cnt = 0;
+      for (auto& kv : _clients) {
+        if (kv.second.subs.find(ch->name) == kv.second.subs.end()) continue;
+        cnt++;
         JsonObject c = cl.createNestedObject();
-        c["id"]         = kv.second.id;
-        c["ip"]         = kv.second.remoteIp;
-        c["age_s"]      = sinceSec(kv.second.connectedAtMs);
-        c["last_rx_s"]  = sinceSec(kv.second.lastRxMs);
-        c["last_tx_s"]  = kv.second.lastTxMs == 0 ? (uint32_t)0 : sinceSec(kv.second.lastTxMs);
-        c["drops"]      = kv.second.droppedFrames;
-        totalDropped += kv.second.droppedFrames;
+        c["id"]        = kv.second.id;
+        c["ip"]        = kv.second.remoteIp;
+        c["age_s"]     = sinceSec(kv.second.connectedAtMs);
+        c["last_rx_s"] = sinceSec(kv.second.lastRxMs);
+        c["last_tx_s"] = kv.second.lastTxMs == 0 ? (uint32_t)0 : sinceSec(kv.second.lastTxMs);
+        c["drops"]     = kv.second.droppedFrames;
       }
+      j["count"] = cnt;
     }
-    root["total_clients"]  = total;
+
+    uint32_t totalDropped = 0;
+    for (auto& kv : _clients) totalDropped += kv.second.droppedFrames;
+
+    root["total_clients"]  = _clients.size();   // distinct connections on the one socket
     root["avg_rtt_ms"]     = _avgRtt;
     root["ping_interval_s"] = _pingIntervalSec;
     root["pong_timeout_ms"] = _pongTimeoutMs;
@@ -298,57 +304,25 @@ void* addEndpoint(const String& path,
     root["backpressure_max"]         = (uint32_t)WS_MAX_QUEUED_MESSAGES;
   }
 
-  // Push current state
-  void broadcastCurrentState(const String& path, const String& origin = "") {
-    EndpointBase* base = findEndpoint(path);
-    if (!base) return;
-    // Fallback guard: skip the full JSON allocation + readInto + serialise
-    // when nobody's subscribed. Services should short-circuit even earlier
-    // via WebFeatureEntry::hasSubscribers() so we don't even get here, but
-    // keeping this as belt-and-suspenders for any caller that forgot.
-    if (!base->ws || base->ws->count() == 0) return;
-    // If every client is currently back-pressured, skip the build-once step
-    // entirely — the payload would land in the queue only to be dropped by
-    // processTx anyway. Accounted on the endpoint rather than individual
-    // clients because none even had the frame offered to them.
-    bool anyReady = false;
-    for (auto& client : base->ws->getClients()) {
-      if (client.canSend() && client.queueLen() < WS_BACKPRESSURE_THRESHOLD) {
-        anyReady = true;
-        break;
-      }
-    }
-    if (!anyReady) {
-      base->droppedBroadcasts++;
-      return;
-    }
-
-    const size_t cap = base->jsonCapacity > 0 ? base->jsonCapacity : (size_t)MWS_DEFAULT_JSON_CAP;
-    DynamicJsonDocument doc(cap + 256);
-
-    JsonObject root = doc.to<JsonObject>();
-    root["type"] = "p";
-    root["origin_id"] = origin;
-    JsonObject p = root.createNestedObject("p");
-
-    base->readInto(p);
-
+  // Push current channel state to ALL its subscribers.
+  void broadcastCurrentState(const String& channel, const String& origin = "") {
+    ChannelBase* base = findChannel(channel);
+    if (!base || !_ws) return;
+    // Belt-and-suspenders: skip the serialise when nobody is subscribed.
+    // Services should also gate earlier via hasClients(channel).
+    if (subscriberCount(channel) == 0) return;
     String out;
-    serializeJson(doc, out);
-    broadcast(path, out, true);
+    if (!buildStateFrame(base, origin, out)) return;
+    broadcast(channel, out, true);
   }
 
   // Processing queues (call from loop)
   void processAllQueues() {
-    // clean up stale WS connections to free TCP slots for HTTP
-    for (auto& ep : _endpoints) {
-      if (ep && ep->ws) ep->ws->cleanupClients(2);
-    }
+    if (_ws) _ws->cleanupClients(2);  // free TCP slots for HTTP
     processRx();
     processTx();
-    // Keepalive — formerly a Ticker on the esp_timer task, which raced the
-    // client maps. Now inline on the queue-pump task so ping/eviction share
-    // the same context (and lock) as the map mutations. Gated by interval.
+    // Keepalive — inline on the queue-pump task so ping/eviction share the
+    // same context (and lock) as the map mutations. Gated by interval.
     if (_pingIntervalSec &&
         (millis() - _lastPingTs >= (unsigned long)_pingIntervalSec * 1000UL)) {
       pingAll();          // updates _lastPingTs
@@ -356,11 +330,8 @@ void* addEndpoint(const String& path,
     }
   }
 
-  // Ping/Pong keepalive
+  // Ping/Pong keepalive — cadence only; the pass runs inline in processAllQueues.
   void beginPingPong(unsigned pingIntervalSec = 10, unsigned long pongTimeoutMs = 30000) {
-    // No Ticker: the ping/eviction pass runs inline in processAllQueues()
-    // (loop/async_tcp context) so it shares the client-map lock. Just record
-    // the cadence; the gate in processAllQueues fires it.
     _pingIntervalSec = pingIntervalSec;
     _pongTimeoutMs = pongTimeoutMs;
   }
@@ -430,35 +401,26 @@ void* addEndpoint(const String& path,
 #endif
   };
 
-  // Per-client bookkeeping for diagnostics and phantom-eviction. Populated
-  // by handleWsEvent on connect/disconnect/rx/pong; read by fillStats() for
-  // the admin Sockets tab.
+  // Per-client bookkeeping for diagnostics, phantom-eviction, and the set of
+  // channels this client is subscribed to. Populated by handleWsEvent /
+  // processRx; read by fillStats(). Guarded by _clientsMx.
   struct WsClientInfo {
     uint32_t id{0};
     String   remoteIp;
     uint32_t connectedAtMs{0};
     uint32_t lastRxMs{0};
     uint32_t lastTxMs{0};
-    uint32_t droppedFrames{0};  // frames skipped due to per-client back-pressure
+    uint32_t droppedFrames{0};   // frames skipped due to per-client back-pressure
+    std::set<String> subs;       // channels this client subscribed to
   };
 
-  // --------- Endpoint type-erasure ---------
-  struct EndpointBase {
-    String path;
-    AsyncWebSocket* ws{nullptr};
+  // --------- Channel type-erasure ---------
+  struct ChannelBase {
+    String name;                              // channel id (== feature id)
     size_t jsonCapacity{MWS_DEFAULT_JSON_CAP};
-    std::map<uint32_t, WsClientInfo> clients;
-    // Broadcasts that were skipped entirely because every client was
-    // back-pressured at the time — we saved a full serialise cycle.
-    uint32_t droppedBroadcasts{0};
+    uint32_t droppedBroadcasts{0};            // skipped because no subscriber was ready
 
-    virtual ~EndpointBase() {
-      if (ws) {
-        delete ws;
-        ws = nullptr;
-      }
-    }
-
+    virtual ~ChannelBase() {}
     virtual void readInto(JsonObject& out) = 0;
     virtual StateUpdateResult apply(JsonObject& in, const String& origin) = 0;
   };
@@ -484,14 +446,14 @@ void* addEndpoint(const String& path,
   }
 
   template <typename TState>
-  struct Endpoint : public EndpointBase {
-    Endpoint(const String& p,
-             StatefulService<TState>* s,
-             JsonStateReader<TState> r,
-             JsonStateUpdater<TState> u,
-             size_t cap)
+  struct Channel : public ChannelBase {
+    Channel(const String& n,
+            StatefulService<TState>* s,
+            JsonStateReader<TState> r,
+            JsonStateUpdater<TState> u,
+            size_t cap)
         : svc(s), reader(r), updater(u) {
-      path = p;
+      name = n;
       jsonCapacity = cap ? cap : (size_t)MWS_DEFAULT_JSON_CAP;
     }
 
@@ -512,25 +474,24 @@ void* addEndpoint(const String& path,
 
   // --------- internals ---------
   AsyncWebServer* _server{nullptr};
-
-  // Upgrade-time auth gate (C3) — see setAuthFilter().
+  AsyncWebSocket* _ws{nullptr};                 // THE single multiplexed socket
   ArRequestFilterFunction _authFilter{nullptr};
 
-  std::vector<std::unique_ptr<EndpointBase>> _endpoints;
-  std::map<String, EndpointBase*> _endpointsByPath;
+  std::vector<std::unique_ptr<ChannelBase>> _channelList;
+  std::map<String, ChannelBase*> _channels;
+
+  // Single client roster (one socket). Guarded by _clientsMx.
+  std::map<uint32_t, WsClientInfo> _clients;
 
   PtrRingQueue<WsTxItem> _txQ;
   PtrRingQueue<WsRxItem> _rxQ;
 
-  // ping/pong — driven inline from processAllQueues() (NOT a Ticker, which
-  // ran on the esp_timer task and raced the client maps; see _clientsMx).
+  // ping/pong — driven inline from processAllQueues().
   unsigned _pingIntervalSec;
   unsigned long _pongTimeoutMs;
   unsigned long _lastPingTs;
   std::map<uint32_t, unsigned long> _lastPong;
 
-  // Serializes access to the client-tracking maps (_lastPong and every
-  // EndpointBase::clients) across async_tcp + loopTask. RAII guard below.
   SemaphoreHandle_t _clientsMx = nullptr;
   struct ClientsLock {
     SemaphoreHandle_t h;
@@ -542,78 +503,129 @@ void* addEndpoint(const String& path,
     ClientsLock& operator=(const ClientsLock&) = delete;
   };
 
+  // ONE shared outbound-build doc, reused for every channel's state frame
+  // (sized to the LARGEST channel only — _maxWsCap, not the sum). Eliminates
+  // the per-broadcast alloc/free churn (notably LightState's ~10 Hz chart) and
+  // bounds WS build memory to a single max-sized buffer. Guarded by _txDocMx
+  // since broadcasts originate from several tasks (loop/async_tcp/mqtt/...).
+  size_t _maxWsCap{MWS_DEFAULT_JSON_CAP};
+  std::unique_ptr<DynamicJsonDocument> _txDoc;
+  SemaphoreHandle_t _txDocMx = nullptr;
+
   // RTT
   bool _hasFirstRtt;
   float _alpha;
   float _avgRtt;
 
-  EndpointBase* findEndpoint(const String& path) {
-    auto it = _endpointsByPath.find(path);
-    if (it == _endpointsByPath.end()) return nullptr;
-    return it->second;
+  void ensureSocket() {
+    if (_ws || !_server) return;
+    _ws = new AsyncWebSocket(WS_MUX_PATH);
+    _ws->onEvent([this](AsyncWebSocket* /*s*/, AsyncWebSocketClient* c, AwsEventType t, void* a,
+                        uint8_t* d, size_t l) {
+      if (c) this->handleWsEvent(c, t, a, d, l);
+    });
+    if (_authFilter) _ws->setFilter(_authFilter);
+    _server->addHandler(_ws);
   }
 
-  void enqueueTx(const String& path, uint32_t cid, const String& payload, bool text) {
-    auto* it = new WsTxItem{path, cid, payload, text};
+  ChannelBase* findChannel(const String& name) {
+    auto it = _channels.find(name);
+    return (it == _channels.end()) ? nullptr : it->second;
+  }
+
+  size_t subscriberCount(const String& channel) const {
+    ClientsLock g(_clientsMx);
+    size_t n = 0;
+    for (auto& kv : _clients) {
+      if (kv.second.subs.find(channel) != kv.second.subs.end()) n++;
+    }
+    return n;
+  }
+
+  // Build {"type":"p","ch":<channel>,"origin_id":<origin>,"p":{...state...}}
+  // into the ONE shared, reused doc (sized to the largest channel, _maxWsCap).
+  // The lock serialises builds across the several tasks that can broadcast
+  // (loop/async_tcp/mqtt/...); ws sends happen later in processTx, NOT here, so
+  // the lock is never held across a socket write. ClientsLock is just a generic
+  // recursive-mutex RAII guard, reused here for _txDocMx.
+  bool buildStateFrame(ChannelBase* base, const String& origin, String& out) {
+    if (!base) return false;
+    ClientsLock g(_txDocMx);
+    const size_t want = _maxWsCap + 256;
+    if (!_txDoc || _txDoc->capacity() < want) {
+      _txDoc.reset(new DynamicJsonDocument(want));   // one-time grow (channels register at boot)
+    }
+    if (!_txDoc || _txDoc->capacity() == 0) return false;
+    _txDoc->clear();
+    JsonObject root = _txDoc->to<JsonObject>();
+    root["type"] = "p";
+    root["ch"] = base->name;
+    root["origin_id"] = origin;
+    JsonObject p = root.createNestedObject("p");
+    base->readInto(p);
+    serializeJson(*_txDoc, out);
+    return true;
+  }
+
+  // Snapshot-on-subscribe: push the channel's current state to ONE client.
+  void pushSnapshot(const String& channel, uint32_t cid) {
+    ChannelBase* base = findChannel(channel);
+    if (!base) return;
+    String out;
+    if (!buildStateFrame(base, "ws_sub", out)) return;
+    sendTo(channel, cid, out, true);
+  }
+
+  void enqueueTx(const String& channel, uint32_t cid, const String& payload, bool text) {
+    auto* it = new WsTxItem{channel, cid, payload, text};
     if (!_txQ.push(it)) delete it;
   }
 
-  void enqueueRx(const String& path, uint32_t cid, const String& payload, bool text) {
-    auto* it = new WsRxItem{path, cid, payload, text};
+  void enqueueRx(uint32_t cid, const String& payload, bool text) {
+    auto* it = new WsRxItem{cid, payload, text};
     if (!_rxQ.push(it)) delete it;
   }
 
   void processTx() {
-    // Reads/updates base->clients per frame; lock so a WS connect/disconnect
-    // (async_tcp) can't erase an entry while we hold an iterator into it.
+    // Reads/updates the _clients roster per frame; lock so a WS
+    // connect/disconnect (async_tcp) can't erase an entry mid-iteration.
     ClientsLock g(_clientsMx);
+    if (!_ws) {
+      WsTxItem* drain = nullptr;
+      while (_txQ.pop(drain)) delete drain;
+      return;
+    }
     WsTxItem* it = nullptr;
+    const uint32_t nowMs = millis();
     while (_txQ.pop(it)) {
       if (!it) continue;
-
-      EndpointBase* base = findEndpoint(it->path);
-      if (base && base->ws) {
-        const uint32_t nowMs = millis();
-        if (it->cid == 0) {
-          // Broadcast — but dispatch per-client so a single slow client
-          // can't fill its own queue to the WS_MAX_QUEUED_MESSAGES ceiling
-          // and trigger AsyncWebSocket's "too many queued" close. Each
-          // client is gated on canSend() + queueLen() < threshold; failures
-          // are counted per-client so the admin Sockets tab can pinpoint
-          // the straggler while fast clients keep receiving every frame.
-          for (auto& client : base->ws->getClients()) {
-            const uint32_t cid = client.id();
-            auto cit = base->clients.find(cid);
-            const bool slow = !client.canSend() || client.queueLen() >= WS_BACKPRESSURE_THRESHOLD;
-            if (slow) {
-              if (cit != base->clients.end()) cit->second.droppedFrames++;
-              continue;
-            }
-            if (it->text) {
-              client.text(it->payload);
-            } else {
-              client.binary(reinterpret_cast<const uint8_t*>(it->payload.c_str()), it->payload.length());
-            }
-            if (cit != base->clients.end()) cit->second.lastTxMs = nowMs;
-          }
-        } else {
-          // Unicast — same gate; if the specific client is back-pressured
-          // we drop and increment its counter rather than risk the close.
-          AsyncWebSocketClient* c = base->ws->client(it->cid);
-          if (c && c->status() == WS_CONNECTED) {
-            auto cit = base->clients.find(it->cid);
-            const bool slow = !c->canSend() || c->queueLen() >= WS_BACKPRESSURE_THRESHOLD;
-            if (slow) {
-              if (cit != base->clients.end()) cit->second.droppedFrames++;
-            } else {
-              if (it->text) c->text(it->payload);
-              else c->binary(reinterpret_cast<const uint8_t*>(it->payload.c_str()), it->payload.length());
-              if (cit != base->clients.end()) cit->second.lastTxMs = nowMs;
-            }
+      if (it->cid == 0) {
+        // Broadcast to every client SUBSCRIBED to this channel.
+        for (auto& kv : _clients) {
+          if (kv.second.subs.find(it->channel) == kv.second.subs.end()) continue;
+          AsyncWebSocketClient* c = _ws->client(kv.first);
+          if (!c || c->status() != WS_CONNECTED) continue;
+          const bool slow = !c->canSend() || c->queueLen() >= WS_BACKPRESSURE_THRESHOLD;
+          if (slow) { kv.second.droppedFrames++; continue; }
+          if (it->text) c->text(it->payload);
+          else c->binary(reinterpret_cast<const uint8_t*>(it->payload.c_str()), it->payload.length());
+          kv.second.lastTxMs = nowMs;
+        }
+      } else {
+        // Unicast (snapshot-on-subscribe).
+        AsyncWebSocketClient* c = _ws->client(it->cid);
+        if (c && c->status() == WS_CONNECTED) {
+          auto cit = _clients.find(it->cid);
+          const bool slow = !c->canSend() || c->queueLen() >= WS_BACKPRESSURE_THRESHOLD;
+          if (slow) {
+            if (cit != _clients.end()) cit->second.droppedFrames++;
+          } else {
+            if (it->text) c->text(it->payload);
+            else c->binary(reinterpret_cast<const uint8_t*>(it->payload.c_str()), it->payload.length());
+            if (cit != _clients.end()) cit->second.lastTxMs = nowMs;
           }
         }
       }
-
       delete it;
     }
   }
@@ -623,26 +635,36 @@ void* addEndpoint(const String& path,
     while (_rxQ.pop(it)) {
       if (!it) continue;
 
-      EndpointBase* base = findEndpoint(it->path);
-      if (!base) {
-        delete it;
-        continue;
-      }
-
-      DynamicJsonDocument doc((base->jsonCapacity ? base->jsonCapacity : (size_t)MWS_DEFAULT_JSON_CAP) + 256);
+      DynamicJsonDocument doc((size_t)MWS_DEFAULT_JSON_CAP + 256);
       DeserializationError err = deserializeJson(doc, it->payload);
 
       if (!err && doc.is<JsonObject>()) {
         JsonObject root = doc.as<JsonObject>();
+        const char* type = root["type"] | "";
+        String ch = root["ch"] | "";
 
-        // origin: або з повідомлення, або дефолт "ws:<cid>"
-        String origin;
-        if (root.containsKey("origin_id")) origin = root["origin_id"].as<String>();
-        if (origin.length() == 0) origin = String("ws:") + String(it->cid);
-
-        if (root.containsKey("p") && root["p"].is<JsonObject>()) {
-          JsonObject p = root["p"].as<JsonObject>();
-          (void)base->apply(p, origin);
+        if (ch.length() > 0) {
+          if (strcmp(type, "sub") == 0) {
+            {
+              ClientsLock g(_clientsMx);
+              auto cit = _clients.find(it->cid);
+              if (cit != _clients.end()) cit->second.subs.insert(ch);
+            }
+            pushSnapshot(ch, it->cid);   // enqueues a unicast; processTx (below) sends it
+          } else if (strcmp(type, "unsub") == 0) {
+            ClientsLock g(_clientsMx);
+            auto cit = _clients.find(it->cid);
+            if (cit != _clients.end()) cit->second.subs.erase(ch);
+          } else {
+            // State write from the client.
+            ChannelBase* base = findChannel(ch);
+            if (base && root["p"].is<JsonObject>()) {
+              String origin = root["origin_id"] | "";
+              if (origin.length() == 0) origin = String("ws:") + String(it->cid);
+              JsonObject p = root["p"].as<JsonObject>();
+              (void)base->apply(p, origin);
+            }
+          }
         }
       }
 
@@ -650,8 +672,7 @@ void* addEndpoint(const String& path,
     }
   }
 
-  void handleWsEvent(EndpointBase& ep,
-                     AsyncWebSocketClient* c,
+  void handleWsEvent(AsyncWebSocketClient* c,
                      AwsEventType t,
                      void* a,
                      uint8_t* data,
@@ -659,9 +680,8 @@ void* addEndpoint(const String& path,
     const uint32_t id = c->id();
     bool justConnected = false;
 
-    // Map mutations under the lock. ws sends (sendId/broadcast) and queue
-    // pumping happen AFTER releasing it — they touch ws + the tx queue, not
-    // the client maps, and we don't want to hold the lock across them.
+    // Map mutations under the lock. ws sends (sendId) and queue pumping happen
+    // AFTER releasing it.
     {
       ClientsLock g(_clientsMx);
       switch (t) {
@@ -673,34 +693,31 @@ void* addEndpoint(const String& path,
           info.connectedAtMs = millis();
           info.lastRxMs = millis();
           info.lastTxMs = 0;
-          ep.clients[id] = info;
+          _clients[id] = info;   // empty subs — state flows only after an explicit sub
           justConnected = true;
         } break;
 
         case WS_EVT_PONG: {
           _lastPong[id] = millis();
-          auto itPong = ep.clients.find(id);
-          if (itPong != ep.clients.end()) itPong->second.lastRxMs = millis();
+          auto cit = _clients.find(id);
+          if (cit != _clients.end()) cit->second.lastRxMs = millis();
           if (_lastPingTs) updRtt(millis() - _lastPingTs);
         } break;
 
         case WS_EVT_DISCONNECT:
         case WS_EVT_ERROR:
           _lastPong.erase(id);
-          ep.clients.erase(id);
+          _clients.erase(id);
           break;
 
         case WS_EVT_DATA: {
-          // Any inbound frame proves the TCP link is alive, so count it as a
-          // pong-equivalent — protects active clients from being evicted just
-          // because they missed a scheduled pong window.
           _lastPong[id] = millis();
-          auto itData = ep.clients.find(id);
-          if (itData != ep.clients.end()) itData->second.lastRxMs = millis();
+          auto cit = _clients.find(id);
+          if (cit != _clients.end()) cit->second.lastRxMs = millis();
           AwsFrameInfo* info = reinterpret_cast<AwsFrameInfo*>(a);
           if (info && info->final && info->index == 0 && info->opcode == WS_TEXT) {
             String s(reinterpret_cast<char*>(data), len);
-            enqueueRx(ep.path, id, s, true);
+            enqueueRx(id, s, true);
           }
         } break;
 
@@ -710,11 +727,9 @@ void* addEndpoint(const String& path,
     }
 
     if (justConnected) {
-      sendId(c);
-      broadcastCurrentState(ep.path, "ws_connect");  // push initial state
+      sendId(c);   // {"type":"id","id":"ws:<cid>"} — NO auto state broadcast; client subscribes
     }
 
-    // одразу обробляємо — швидкий UX
     processAllQueues();
   }
 
@@ -729,9 +744,7 @@ void* addEndpoint(const String& path,
 
   void pingAll() {
     _lastPingTs = millis();
-    for (auto& up : _endpoints) {
-      if (up && up->ws) up->ws->pingAll();
-    }
+    if (_ws) _ws->pingAll();
   }
 
   void checkInactive() {
@@ -748,16 +761,12 @@ void* addEndpoint(const String& path,
         }
       }
     }
-    // closeAll() touches AsyncWebSocket, not the client maps — do it outside
-    // the lock to keep the hold short and avoid lock-ordering surprises.
-    for (uint32_t cid : expired) closeAll(cid);
+    for (uint32_t cid : expired) closeClient(cid);
   }
 
-  void closeAll(uint32_t cid) {
-    for (auto& up : _endpoints) {
-      if (!up || !up->ws) continue;
-      if (AsyncWebSocketClient* c = up->ws->client(cid)) c->close();
-    }
+  void closeClient(uint32_t cid) {
+    if (!_ws) return;
+    if (AsyncWebSocketClient* c = _ws->client(cid)) c->close();
   }
 
   void updRtt(unsigned long rttMs) {

@@ -3,7 +3,7 @@ import { Navigate, Route, Routes } from 'react-router-dom';
 import { AxiosPromise } from 'axios';
 import { Tab } from '@mui/material';
 
-import { AXIOS, WEB_SOCKET_ROOT } from '../../api/endpoints';
+import { AXIOS } from '../../api/endpoints';
 import { RouterTabs, useRouterTab, useLayoutTitle } from '../../components';
 import DynamicStatus from './DynamicStatus';
 import DynamicSettings from './DynamicSettings';
@@ -11,7 +11,7 @@ import FormLoader from '../loading/FormLoader';
 import { useManifest } from '../../contexts/manifest';
 import { FeatureEntry, TabSpec } from '../../types';
 import { useRest } from '../../utils';
-import { useWs } from '../../utils/useWs';
+import { useWsChannel } from '../../utils/useWsChannel';
 import { DynamicFormContext, DynamicFormCtx } from './DynamicFormContext';
 
 // AXIOS baseURL is '/api/v1/'. Manifest publishes absolute paths; strip the
@@ -207,19 +207,24 @@ const DynamicFeature: FC<DynamicFeatureProps> = ({ featureId, fallback }) => {
   useLayoutTitle(entry?.title ?? featureId);
   const { routerTab } = useRouterTab();
 
-  const wsUrl = useMemo<string | undefined>(() => {
-    if (!entry?.ws) return undefined;
-    return WEB_SOCKET_ROOT + entry.ws.replace(/^\/ws\//, '');
-  }, [entry?.ws]);
+  // Live features advertise a CHANNEL id, multiplexed over the single /ws/app
+  // socket (see WsProvider). `ws` is the legacy per-feature socket path, still
+  // honoured as a fallback by stripping the /ws/ prefix.
+  const channel = useMemo<string | undefined>(() => {
+    if (entry?.ch) return entry.ch;
+    if (entry?.ws) return entry.ws.replace(/^\/ws\//, '');
+    return undefined;
+  }, [entry?.ch, entry?.ws]);
 
-  const { connected, wsData, updateData: updateWsData, disconnect, messageTick } = useWs<any>(wsUrl ?? '');
+  const { connected, wsData, updateData: updateWsData, disconnect, messageTick } =
+    useWsChannel<any>(channel);
 
   const [originId, setOriginId] = useState<string>('');
   useEffect(() => {
     if (wsData && wsData.origin_id) setOriginId(wsData.origin_id);
   }, [wsData]);
 
-  const wsBundle = wsUrl
+  const wsBundle = channel
     ? { connected, wsData, originId, updateWsData, disconnect, messageTick }
     : undefined;
 

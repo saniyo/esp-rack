@@ -32,7 +32,7 @@ export interface MenuNode {
   // a grey panel to distinguish it from nested feature components (white).
   isTab?: boolean;
   // True for the device's MAIN-ROLE feature — renders directly under the
-  // device record in the mesh menu (vs. the "Device" infra group).
+  // device record in the discovery menu (vs. the "Device" infra group).
   isRole?: boolean;
   // True for a REMOTE device record: `to` is a full URL (http://peer-ip/) and
   // clicking navigates the browser there (full page load), not an SPA route —

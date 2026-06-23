@@ -109,8 +109,11 @@ class WebFeatureEntry : public IWebFeatureEntry {
     // Heap-allocate the Binding so its address never changes. Its ctor registers
     // an update handler that captures `this` — if we stored by value and moved,
     // that lambda would dangle.
+    // Channel multiplex: every live feature shares ONE /ws socket; the channel
+    // name is the feature id (NOT the legacy wsPath). _spec.wsPath now serves
+    // only as the opt-in "this feature is live" flag.
     if (_spec.wsPath && _wsManager && !_wsBinding) {
-      _wsBinding.reset(new WsManager::Binding<T>(_wsManager, _spec.wsPath, _wsBufferSize,
+      _wsBinding.reset(new WsManager::Binding<T>(_wsManager, _spec.id, _wsBufferSize,
                                                  _service, _wsReader, _wsUpdater, true));
     }
 
@@ -166,7 +169,9 @@ class WebFeatureEntry : public IWebFeatureEntry {
       rest["update"] = stateBuf;
       rest["state"]  = stateBuf;
     }
-    if (_spec.wsPath) obj["ws"] = _spec.wsPath;
+    // Live features advertise a CHANNEL id (multiplexed over the single /ws),
+    // not a per-feature socket path. The frontend subscribes by `ch`.
+    if (_spec.wsPath) obj["ch"] = _spec.id;
 
     JsonArray tabs = obj.createNestedArray("tabs");
     for (const auto& t : _spec.tabs) {
@@ -290,7 +295,7 @@ class WebFeatureEntry : public IWebFeatureEntry {
   // timestamp arithmetic, state reads and allocations when nobody's watching.
   bool hasSubscribers() const {
     if (!_wsManager || !_spec.wsPath || !*_spec.wsPath) return false;
-    return _wsManager->hasClients(_spec.wsPath);
+    return _wsManager->hasClients(_spec.id);   // channel == feature id
   }
 
   StatefulService<T>* service() const { return _service; }

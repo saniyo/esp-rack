@@ -14,7 +14,7 @@ export interface MenuMeta {
   // the tree (jump straight to /<id>/<tabKey>), beside any child features.
   expandTabs?: boolean;
   // role: the device's MAIN-ROLE feature (the consumer app). In the
-  // device-mesh menu, role features render directly under the device record;
+  // device discovery menu, role features render directly under the device record;
   // everything else goes into the "Device" group. Absent/false = infra.
   role?: boolean;
 }
@@ -25,7 +25,7 @@ export interface TabSpec {
   icon?: string;        // optional per-tab MUI icon, surfaced on the menu sub-tab leaf
   restPath: string;
   postable?: boolean;  // tab can POST updates to restPath
-  live?: boolean;       // tab subscribes to feature.ws for push updates
+  live?: boolean;       // tab subscribes to feature.ch over the shared /ws/app socket
   auth?: AuthLevel;
 }
 
@@ -59,6 +59,10 @@ export interface FeatureEntry {
   menu?: MenuMeta;
   auth?: AuthLevel;
   rest?: { read?: string; update?: string };
+  // Live features advertise a CHANNEL id, multiplexed over the single
+  // /ws/app socket (see WsProvider). `ws` is the legacy per-feature socket
+  // path, kept optional for back-compat; current backends emit `ch`.
+  ch?: string;
   ws?: string;
   tabs?: TabSpec[];
   actions?: ActionSpec[];

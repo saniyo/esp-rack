@@ -52,8 +52,8 @@ struct WebMenuMeta {
   // (Single-tab features are unaffected — the frontend only expands tabs>1.)
   bool expandTabs = true;
   // role: marks this as the device's MAIN-ROLE feature (the consumer app,
-  // e.g. Light). In the device-mesh menu the role feature(s) render directly
-  // under the device record; everything else falls into the "Device" group.
+  // e.g. Light). In the device discovery menu the role feature(s) render
+  // directly under the device record; everything else falls into the "Device" group.
   // Default false (framework / infra). The consumer opts its app feature in.
   bool role = false;
 };

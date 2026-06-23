@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { AXIOS } from '../api/endpoints';
 
-// A single LAN peer as reported by the mesh module's GET /api/v1/mesh/peers.
+// A single LAN peer as reported by the discovery module's GET /api/v1/discovery/peers.
 export interface Peer {
   device_id: string;
   project: string;
@@ -24,22 +24,23 @@ export interface SelfInfo {
   ip: string;
 }
 
-export interface DeviceMesh {
+export interface DeviceDiscovery {
   self: SelfInfo | null;
   peers: Peer[];
 }
 
-// useDeviceMesh — polls GET /api/v1/mesh/peers (the mesh module's discovered,
-// trust-verified peer list + this device's own info). Returns empty/null
-// GRACEFULLY when the mesh module isn't installed (the endpoint 404s), so
-// the menu degrades to the classic single-device layout. One shared fetch
-// path for both the menu (peers) and the Discovery page (self + peers).
+// useDeviceDiscovery — polls GET /api/v1/discovery/peers (the discovery
+// module's discovered, trust-verified peer list + this device's own info).
+// Returns empty/null GRACEFULLY when the discovery module isn't installed (the
+// endpoint 404s), so the menu degrades to the classic single-device layout.
+// One shared fetch path for both the menu (peers) and the Discovery page
+// (self + peers).
 //
 // C3-friendly: it does NOT poll while the tab is hidden (no background tab
 // hammering the device's tiny connection budget), and a transient failure
 // (device momentarily busy) KEEPS the last roster instead of wiping it.
-export function useDeviceMesh(pollMs = 30000): DeviceMesh {
-  const [data, setData] = useState<DeviceMesh>({ self: null, peers: [] });
+export function useDeviceDiscovery(pollMs = 30000): DeviceDiscovery {
+  const [data, setData] = useState<DeviceDiscovery>({ self: null, peers: [] });
 
   useEffect(() => {
     let alive = true;
@@ -47,7 +48,7 @@ export function useDeviceMesh(pollMs = 30000): DeviceMesh {
 
     const load = () => {
       if (document.hidden) return; // don't poll a backgrounded tab
-      AXIOS.get('mesh/peers')
+      AXIOS.get('discovery/peers')
         .then((r) => {
           if (!alive) return;
           setData({

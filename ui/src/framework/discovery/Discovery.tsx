@@ -15,7 +15,7 @@ import VerifiedUserIcon from '@mui/icons-material/VerifiedUser';
 import WarningIcon from '@mui/icons-material/Warning';
 
 import { SectionContent, useLayoutTitle } from '../../components';
-import { Peer, useDeviceMesh } from '../../utils/useDeviceMesh';
+import { Peer, useDeviceDiscovery } from '../../utils/useDeviceDiscovery';
 
 // Discovery — the consolidated LAN device overview (cards). The menu nests
 // the navigable device records under this same "Discovery" umbrella; this
@@ -85,7 +85,7 @@ const PeerGrid: FC<{ items: Peer[] }> = ({ items }) => (
 
 const Discovery: FC = () => {
   useLayoutTitle('Discovery');
-  const { self, peers } = useDeviceMesh(10000);
+  const { self, peers } = useDeviceDiscovery(10000);
 
   const { same, others } = useMemo(() => {
     const selfProject = self?.project;
