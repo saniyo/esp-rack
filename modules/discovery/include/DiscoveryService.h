@@ -6,23 +6,25 @@
 // custom UDP membership protocol (NOT mDNS, NOT a mesh network — see
 // DiscoveryModule.h for the naming rationale).
 //
-// HOW (v1 — the SWIM "C-subset": multicast self-announce + timeout liveness):
+// HOW (SWIM "C-subset": multicast self-announce + timeout liveness):
 //   * Announce: every ~8 s each device multicasts a small UDP packet carrying
-//     its identity + a project-key HMAC trust tag (the SAME trust model the old
-//     mDNS-TXT version used). This multicast is the cold-join bootstrap — the
-//     one piece SWIM itself does not provide.
+//     its identity + a project-key HMAC trust tag. This multicast is the
+//     cold-join bootstrap — the one piece SWIM itself does not provide.
 //   * Learn: a background task receives announces, recomputes the trust tag
 //     from the shared project key (proving the peer is "ours" without ever
 //     transmitting the key) + checks manifest-schema compatibility, and upserts
-//     the peer into a bounded table. Peers that stop announcing age out.
+//     the peer into a FIXED BSS table. Peers that stop announcing age out.
 //   * Serve: GET /api/v1/discovery/peers returns {self, peers[]}.
 //
-// Roadmap (modules/discovery/DISCOVERY_PROTOCOL.md): layer on full SWIM —
-// unicast probing (direct + k indirect) + incarnation gossip + per-packet
-// HMAC/epoch replay-hardening + a fixed BSS table for true 50+ heap
-// determinism. This v1 deliberately reuses the String-based Peer with UPSERT
-// (no per-cycle rebuild like the old mDNS browse) to keep the change small and
-// the trust/serve logic identical.
+// MEMORY: the peer table is a fixed PeerRow[] in BSS (file-static in the .cpp,
+// NOT a member — DiscoveryService is heap-allocated, so a member array would
+// land on the heap). Fixed char[] fields, zero per-peer heap, zero churn. This
+// is what keeps C3 max_alloc stable at 50+ peers — a std::vector<Peer> would
+// grow into a ~8 KB contiguous HEAP block and crater max_alloc (see
+// DISCOVERY_PROTOCOL.md §4 + the reserve(64) regression that proved it).
+//
+// Roadmap: full SWIM — unicast direct + k-indirect probing, incarnation gossip,
+// per-packet HMAC + NVS epoch replay-hardening, anti-entropy /table + /digest.
 //
 // The table is read on the AsyncWebServer thread and written on the discovery
 // task → guarded by a mutex held only for the quick upsert / serialise.
@@ -30,7 +32,6 @@
 #include <Arduino.h>
 #include <IPAddress.h>
 #include <WiFiUdp.h>
-#include <vector>
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -47,32 +48,17 @@ class DiscoveryService {
   // /api/v1/discovery/peers endpoint on the manifest. Called during onInstall.
   void registerManifest(WebManager* web);
 
-  // Post-network: compute our identity + trust tag, then spawn the discovery
-  // task. The task opens the UDP socket once STA has an IP. Self-contained —
-  // no mDNS / resolver dependency.
+  // Post-network: compute our identity + trust tag, cache our announce packet,
+  // then spawn the discovery task (which opens the UDP socket once STA has an
+  // IP). Self-contained — no mDNS / resolver dependency.
   void begin();
 
  private:
-  struct Peer {
-    String    deviceId;
-    String    project;
-    String    fw;
-    String    schema;
-    String    framework;
-    String    sig;
-    IPAddress ip;
-    uint16_t  port{0};
-    bool      trusted{false};     // project-key HMAC verified
-    bool      compatible{false};  // manifest schema we can render
-    uint32_t  lastSeenMs{0};
-  };
-
   void servePeers(AsyncWebServerRequest* request);
-  bool openSocket();                                   // (re)join the multicast group
-  void announceSelf();                                 // multicast our record
+  bool openSocket();                                      // (re)join the multicast group
+  void announceSelf();                                    // multicast our cached record
   void processPacket(char* buf, int len, IPAddress src);  // parse + verify + upsert
-  void upsertPeer(Peer&& p);                           // add or update in place
-  void pruneStale(uint32_t now);                       // drop peers past the timeout
+  void pruneStale(uint32_t now);                          // drop peers past the timeout
   static void taskTramp(void* arg);
   void discoveryLoop();
 
@@ -84,8 +70,13 @@ class DiscoveryService {
   String            _canonical;  // our DeviceIdentity::canonical()
   String            _sig;        // HMAC(_psk, _canonical) trust tag, hex
   uint16_t          _webPort{80};
-  std::vector<Peer> _peers;      // bounded; upserted in place (not rebuilt)
-  SemaphoreHandle_t _mutex{nullptr};
+
+  // Announce packet built ONCE in begin() (identity is immutable) → zero
+  // per-announce heap churn. Sized for the pipe-delimited record.
+  char              _announceBuf[320];
+  int               _announceLen{0};
+
+  SemaphoreHandle_t _mutex{nullptr};   // guards the file-static peer table
   TaskHandle_t      _task{nullptr};
 };
 

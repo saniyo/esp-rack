@@ -2,12 +2,12 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
+#include <string.h>
 #include "mbedtls/md.h"
 
 #include <AsyncJson.h>
 #include <ESPAsyncWebServer.h>
 #include <AdaptiveJson.h>
-#include <ProblemJson.h>
 #include <WebManager.h>
 #include <WebFeatureSpec.h>
 #include <DeviceIdentity.h>
@@ -28,19 +28,45 @@
 // our web ("a web version we support"), regardless of its project.
 #define DISCOVERY_SCHEMA_VERSION "3"
 
+// Max peers the fixed BSS table holds. BSS cost = MAX_PEERS * sizeof(PeerRow)
+// (~104 B) ≈ 6.5 KB at 64. Headroom over the "50+" target. It lives in BSS so
+// it shrinks the heap REGION once at link time but NEVER fragments the heap
+// (unlike a std::vector that grows into a multi-KB contiguous heap block) —
+// so C3 max_alloc stays stable no matter how many peers show up.
+#ifndef DISCOVERY_MAX_PEERS
+#define DISCOVERY_MAX_PEERS 64
+#endif
+
 namespace {
 const char*    PEERS_PATH            = "/api/v1/discovery/peers";
-// Org-local (239.x) multicast group + port for the discovery membership
-// protocol. See modules/discovery/DISCOVERY_PROTOCOL.md §2.1.
-const char*    DISCOVERY_GROUP       = "239.42.7.1";
+const char*    DISCOVERY_GROUP       = "239.42.7.1";   // org-local multicast group
 const uint16_t DISCOVERY_PORT        = 7711;
 const uint32_t ANNOUNCE_INTERVAL_MS  = 8000;    // self-announce cadence
 const uint32_t PEER_TIMEOUT_MS       = 30000;   // ~3.75 missed announces -> drop
 const uint32_t RX_IDLE_DELAY_MS      = 50;      // poll yield when no packet
-const size_t   DISCOVERY_MAX_PEERS   = 64;      // bounded table (headroom over 50)
 const size_t   MAX_PKT               = 320;     // one announce fits comfortably
 const char     PKT_MAGIC             = 'E';     // "E5|2|..." wire prefix
 const uint8_t  PKT_VER               = 2;
+
+// ── Fixed BSS peer table ─────────────────────────────────────────────────
+// File-static => lives in .bss, NOT on the heap (DiscoveryService itself is
+// new'd, so a member array would be heap-resident). Fixed char[] fields => no
+// per-peer String alloc, no churn. Field widths are tight to the canonical ID
+// layout (<project>-<mac12>-<uid8>) + the small version/schema strings.
+struct PeerRow {
+  uint32_t ip;            // IPv4 raw (host uint32 from IPAddress)
+  uint32_t lastSeenMs;
+  uint16_t port;
+  bool     used;
+  bool     trusted;       // project-key HMAC verified
+  bool     compatible;    // manifest schema we can render
+  char     schema[4];
+  char     deviceId[40];  // canonical "<project>-<mac12>-<uid8>"
+  char     project[20];
+  char     fw[14];
+  char     framework[12];
+};
+PeerRow s_peers[DISCOVERY_MAX_PEERS];   // .bss, zero-initialised
 
 // HMAC-SHA256(key, msg) truncated to `outBytes`, lowercase hex.
 String hmacHex(const String& key, const String& msg, size_t outBytes) {
@@ -102,18 +128,30 @@ void DiscoveryService::begin() {
   // HMAC + epoch is the replay-hardening step — see DISCOVERY_PROTOCOL.md §6.)
   _sig       = hmacHex(_psk, _canonical, 16);
   _mutex     = xSemaphoreCreateMutex();
-  // Deliberately NOT reserve()d: reserve(MAX_PEERS) of the String-bearing Peer
-  // is a ~7 KB contiguous HEAP block that pins C3 max_alloc into the 6-8 KB 503
-  // zone — i.e. it eats the very headroom that removing the mDNS responder was
-  // meant to free (HW-measured: max_alloc stuck at 7668 with the reserve). The
-  // vector grows on demand instead (a handful of peers on a bench). The fixed
-  // BSS PeerRow table (DISCOVERY_PROTOCOL.md §4) is the real 50+ determinism fix.
 
-  // Persistent discovery task. Static stack — the buffer lives in BSS, not
-  // heap, so it never sits as a hole that FRAGMENTS the heap (same P4 pattern
-  // as Mothership/Telegram). 4096 B covers the WiFiUDP recv + parse + the
-  // String upsert; re-measure stack_free in System->Resources if the protocol
-  // grows (the SWIM probing phase will add a little).
+  // Build the announce packet ONCE — our identity is immutable, so there is no
+  // reason to re-serialise (and re-allocate Strings) every 8 s.
+  // Wire: "E5|2|<device_id>|<project>|<fw>|<schema>|<fw_fx>|<sig>|<port>".
+  _announceLen = snprintf(_announceBuf, sizeof(_announceBuf),
+                          "%c%u|%u|%s|%s|%s|%s|%s|%s|%u",
+                          PKT_MAGIC, (unsigned)5, (unsigned)PKT_VER,
+                          _canonical.c_str(),
+                          DeviceIdentity::projectName().c_str(),
+                          DeviceIdentity::version().c_str(),
+                          DISCOVERY_SCHEMA_VERSION,
+                          ESPRACK_VERSION_STR,
+                          _sig.c_str(),
+                          (unsigned)_webPort);
+  if (_announceLen <= 0 || _announceLen >= (int)sizeof(_announceBuf)) {
+    log_w("[discovery] announce payload truncated (%d) — peers may not see us",
+          _announceLen);
+  }
+
+  // Persistent discovery task. Static stack — the buffer lives in BSS, not heap
+  // (same P4 pattern as Mothership/Telegram). 4096 B: HW-measured high-water of
+  // the WiFiUDP recv + parse path is ~2.4 KB (stack_free 1688), so 4096 keeps a
+  // healthy ~1.7 KB margin. Re-measure stack_free in System->Resources if the
+  // SWIM probing phase adds depth.
   if (_task == nullptr) {
     constexpr uint32_t kStackWords = 4096 / sizeof(StackType_t);
     static StackType_t  s_taskStack[kStackWords];
@@ -125,8 +163,9 @@ void DiscoveryService::begin() {
     }
   }
 
-  log_i("[discovery] up id=%s sig=%s key=%s", _canonical.c_str(), _sig.c_str(),
-        (_psk == "esprack-discovery-dev") ? "DEFAULT(dev)" : "custom");
+  log_i("[discovery] up id=%s sig=%s key=%s table=%uB(bss)", _canonical.c_str(),
+        _sig.c_str(), (_psk == "esprack-discovery-dev") ? "DEFAULT(dev)" : "custom",
+        (unsigned)sizeof(s_peers));
 }
 
 void DiscoveryService::taskTramp(void* arg) {
@@ -146,32 +185,17 @@ bool DiscoveryService::openSocket() {
 }
 
 void DiscoveryService::announceSelf() {
-  // Wire: "E5|2|<device_id>|<project>|<fw>|<schema>|<fw_fx>|<sig>|<port>".
-  // The receiver takes the source IP from the datagram, so we don't send it.
-  char buf[MAX_PKT];
-  int n = snprintf(buf, sizeof(buf), "%c%u|%u|%s|%s|%s|%s|%s|%s|%u",
-                   PKT_MAGIC, (unsigned)5, (unsigned)PKT_VER,
-                   _canonical.c_str(),
-                   DeviceIdentity::projectName().c_str(),
-                   DeviceIdentity::version().c_str(),
-                   DISCOVERY_SCHEMA_VERSION,
-                   ESPRACK_VERSION_STR,
-                   _sig.c_str(),
-                   (unsigned)_webPort);
-  if (n <= 0 || n >= (int)sizeof(buf)) {
-    log_w("[discovery] announce payload truncated (%d)", n);
-    return;
-  }
+  if (_announceLen <= 0) return;
   if (_udp.beginMulticastPacket() != 1) {
     log_d("[discovery] beginMulticastPacket failed");
     return;
   }
-  _udp.write((const uint8_t*)buf, n);
+  _udp.write((const uint8_t*)_announceBuf, _announceLen);
   _udp.endPacket();
 }
 
 void DiscoveryService::processPacket(char* buf, int len, IPAddress src) {
-  if (len < 6) return;
+  if (len < 6 || len >= (int)MAX_PKT) return;
   buf[len] = '\0';
 
   // Split on '|' in place, preserving empty fields (no strtok — it collapses
@@ -184,56 +208,57 @@ void DiscoveryService::processPacket(char* buf, int len, IPAddress src) {
     if (*c == '|') { *c = '\0'; f[nf++] = c + 1; }
   }
   if (nf < MAXF) return;                       // malformed
-  // f[0] = "E5", f[1] = ver
   if (f[0][0] != PKT_MAGIC || f[0][1] != '5') return;
   if ((uint8_t)atoi(f[1]) != PKT_VER) return;
 
-  Peer p;
-  p.deviceId  = f[2];
+  const char* deviceId = f[2];
   // Skip self and any unidentified responder.
-  if (p.deviceId.length() == 0 || p.deviceId == _canonical) return;
-  p.project   = f[3];
-  p.fw        = f[4];
-  p.schema    = f[5];
-  p.framework = f[6];
-  p.sig       = f[7];
-  p.port      = (uint16_t)atoi(f[8]);
-  p.ip        = src;
+  if (deviceId[0] == '\0' || _canonical == deviceId) return;
+
+  const char* sig = f[7];
   // Same trust model as the mDNS-TXT version: recompute HMAC(PSK, device_id)
   // and compare to the advertised tag — proves shared-PSK ownership.
-  p.trusted    = p.sig.length() && (hmacHex(_psk, p.deviceId, 16) == p.sig);
-  p.compatible = (p.schema == DISCOVERY_SCHEMA_VERSION);
-  p.lastSeenMs = millis();
+  bool trusted    = sig[0] && (hmacHex(_psk, String(deviceId), 16) == sig);
+  bool compatible = (strcmp(f[5], DISCOVERY_SCHEMA_VERSION) == 0);
+  uint32_t ipRaw  = (uint32_t)src;
+  uint16_t port   = (uint16_t)atoi(f[8]);
 
-  upsertPeer(std::move(p));
-}
-
-void DiscoveryService::upsertPeer(Peer&& p) {
   if (!_mutex) return;
   xSemaphoreTake(_mutex, portMAX_DELAY);
-  bool found = false;
-  for (auto& e : _peers) {
-    if (e.deviceId == p.deviceId) {
-      e = std::move(p);          // update in place (ip/fw/sig/lastSeen refresh)
-      found = true;
-      break;
+  // Find existing row by deviceId, else first free slot.
+  int slot = -1, freeSlot = -1;
+  for (int i = 0; i < DISCOVERY_MAX_PEERS; ++i) {
+    if (s_peers[i].used) {
+      if (strcmp(s_peers[i].deviceId, deviceId) == 0) { slot = i; break; }
+    } else if (freeSlot < 0) {
+      freeSlot = i;
     }
   }
-  if (!found && _peers.size() < DISCOVERY_MAX_PEERS) {
-    _peers.push_back(std::move(p));
+  if (slot < 0) slot = freeSlot;
+  if (slot >= 0) {
+    PeerRow& r = s_peers[slot];
+    strlcpy(r.deviceId,  deviceId, sizeof(r.deviceId));
+    strlcpy(r.project,   f[3],     sizeof(r.project));
+    strlcpy(r.fw,        f[4],     sizeof(r.fw));
+    strlcpy(r.schema,    f[5],     sizeof(r.schema));
+    strlcpy(r.framework, f[6],     sizeof(r.framework));
+    r.ip         = ipRaw;
+    r.port       = port;
+    r.trusted    = trusted;
+    r.compatible = compatible;
+    r.lastSeenMs = millis();
+    r.used       = true;
   }
+  // else: table full — drop (a 64-peer subnet is already past the design point).
   xSemaphoreGive(_mutex);
 }
 
 void DiscoveryService::pruneStale(uint32_t now) {
   if (!_mutex) return;
   xSemaphoreTake(_mutex, portMAX_DELAY);
-  for (size_t i = 0; i < _peers.size();) {
-    if (now - _peers[i].lastSeenMs > PEER_TIMEOUT_MS) {
-      _peers[i] = std::move(_peers.back());
-      _peers.pop_back();
-    } else {
-      ++i;
+  for (int i = 0; i < DISCOVERY_MAX_PEERS; ++i) {
+    if (s_peers[i].used && (now - s_peers[i].lastSeenMs) > PEER_TIMEOUT_MS) {
+      s_peers[i].used = false;
     }
   }
   xSemaphoreGive(_mutex);
@@ -288,14 +313,16 @@ void DiscoveryService::servePeers(AsyncWebServerRequest* request) {
     JsonArray arr = root.createNestedArray("peers");
     if (_mutex) xSemaphoreTake(_mutex, portMAX_DELAY);
     uint32_t now = millis();
-    for (const auto& p : _peers) {
+    for (int i = 0; i < DISCOVERY_MAX_PEERS; ++i) {
+      const PeerRow& p = s_peers[i];
+      if (!p.used) continue;
       JsonObject o = arr.createNestedObject();
       o["device_id"]  = p.deviceId;
       o["project"]    = p.project;
       o["fw"]         = p.fw;
       o["schema"]     = p.schema;
       o["framework"]  = p.framework;
-      o["ip"]         = p.ip.toString();
+      o["ip"]         = IPAddress(p.ip).toString();
       o["port"]       = p.port;
       o["trusted"]    = p.trusted;
       o["compatible"] = p.compatible;
