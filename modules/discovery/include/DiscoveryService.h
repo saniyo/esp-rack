@@ -2,38 +2,39 @@
 #ifndef ESPRACK_DISCOVERY_SERVICE_H
 #define ESPRACK_DISCOVERY_SERVICE_H
 
-// DiscoveryService — discovers sibling ESP-Rack devices on the LAN.
+// DiscoveryService — discovers sibling ESP-Rack devices on the LAN over a
+// custom UDP membership protocol (NOT mDNS, NOT a mesh network — see
+// DiscoveryModule.h for the naming rationale).
 //
-// This is LAN discovery (mDNS), not a mesh network — see DiscoveryModule.h for
-// the naming rationale ("mesh" is reserved for a future device-to-device WiFi
-// mesh).
+// HOW (v1 — the SWIM "C-subset": multicast self-announce + timeout liveness):
+//   * Announce: every ~8 s each device multicasts a small UDP packet carrying
+//     its identity + a project-key HMAC trust tag (the SAME trust model the old
+//     mDNS-TXT version used). This multicast is the cold-join bootstrap — the
+//     one piece SWIM itself does not provide.
+//   * Learn: a background task receives announces, recomputes the trust tag
+//     from the shared project key (proving the peer is "ours" without ever
+//     transmitting the key) + checks manifest-schema compatibility, and upserts
+//     the peer into a bounded table. Peers that stop announcing age out.
+//   * Serve: GET /api/v1/discovery/peers returns {self, peers[]}.
 //
-// HOW:
-//   * Advertise: rides the mDNS module's `_esprack._tcp` advert with three
-//     extra TXT keys — `schema` (manifest envelope version we speak),
-//     `fw_fx` (framework version), and `sig` (a project-key HMAC trust tag).
-//   * Browse: a background task periodically queries `_esprack._tcp` (IDF
-//     mdns API, which exposes TXT) and, for every responder, recomputes the
-//     trust tag from the shared project key — proving the peer is "ours"
-//     without ever transmitting the key — and checks manifest-schema
-//     compatibility (so same-project AND cross-project devices we can render
-//     are recognised). The verified, bounded peer list is cached.
-//   * Serve: GET /api/v1/discovery/peers returns {self, peers[]} for the
-//     Discovery page.
+// Roadmap (modules/discovery/DISCOVERY_PROTOCOL.md): layer on full SWIM —
+// unicast probing (direct + k indirect) + incarnation gossip + per-packet
+// HMAC/epoch replay-hardening + a fixed BSS table for true 50+ heap
+// determinism. This v1 deliberately reuses the String-based Peer with UPSERT
+// (no per-cycle rebuild like the old mDNS browse) to keep the change small and
+// the trust/serve logic identical.
 //
-// The cache is read on the AsyncWebServer thread and written on the discovery
-// task → guarded by a mutex held only for the quick swap/serialise (never
-// during the blocking browse).
+// The table is read on the AsyncWebServer thread and written on the discovery
+// task → guarded by a mutex held only for the quick upsert / serialise.
 
 #include <Arduino.h>
 #include <IPAddress.h>
+#include <WiFiUdp.h>
 #include <vector>
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/semphr.h>
-
-#include <IMdnsResolver.h>
 
 class WebManager;
 class AsyncWebServerRequest;
@@ -46,9 +47,10 @@ class DiscoveryService {
   // /api/v1/discovery/peers endpoint on the manifest. Called during onInstall.
   void registerManifest(WebManager* web);
 
-  // Post-network: compute our trust tag, then spawn the discovery task.
-  // `mdns` is the framework resolver (we only browse while it's active).
-  void begin(IMdnsResolver* mdns);
+  // Post-network: compute our identity + trust tag, then spawn the discovery
+  // task. The task opens the UDP socket once STA has an IP. Self-contained —
+  // no mDNS / resolver dependency.
+  void begin();
 
  private:
   struct Peer {
@@ -66,16 +68,23 @@ class DiscoveryService {
   };
 
   void servePeers(AsyncWebServerRequest* request);
-  void ensureAdvert();       // (re)assert our extra TXT on the _esprack advert
-  void browseAndUpdate();    // IDF mdns browse -> verify -> swap cache
+  bool openSocket();                                   // (re)join the multicast group
+  void announceSelf();                                 // multicast our record
+  void processPacket(char* buf, int len, IPAddress src);  // parse + verify + upsert
+  void upsertPeer(Peer&& p);                           // add or update in place
+  void pruneStale(uint32_t now);                       // drop peers past the timeout
   static void taskTramp(void* arg);
   void discoveryLoop();
 
-  IMdnsResolver*    _mdns{nullptr};
+  WiFiUDP           _udp;
+  bool              _udpReady{false};
+  uint32_t          _lastAnnounceMs{0};
+
   String            _psk;        // shared project key (the "internal key")
   String            _canonical;  // our DeviceIdentity::canonical()
   String            _sig;        // HMAC(_psk, _canonical) trust tag, hex
-  std::vector<Peer> _peers;      // bounded, replaced each browse cycle
+  uint16_t          _webPort{80};
+  std::vector<Peer> _peers;      // bounded; upserted in place (not rebuilt)
   SemaphoreHandle_t _mutex{nullptr};
   TaskHandle_t      _task{nullptr};
 };

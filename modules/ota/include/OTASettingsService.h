@@ -12,12 +12,6 @@
 // 3.7+ is leaner about its includes, so we depend on it explicitly.
 #include <WiFi.h>
 
-#ifdef ESP32
-#include <ESPmDNS.h>
-#elif defined(ESP8266)
-#include <ESP8266mDNS.h>
-#endif
-
 #include <ArduinoOTA.h>
 #include <WiFiUdp.h>
 
@@ -75,14 +69,13 @@ class OTASettings {
 };
 
 class WebManager;
-namespace ESPRack { class App; }
 
 class OTASettingsService : public StatefulService<OTASettings> {
  public:
-  // `app` is optional — when supplied, OTA advertises itself over the SHARED
-  // mDNS responder (owned by MdnsModule) iff that module is installed
-  // (app->mdns() non-null). Without it, OTA runs mDNS-free.
-  OTASettingsService(ConfigManager* cfgMgr, ESPRack::App* app = nullptr);
+  // OTA is fully mDNS-free: ArduinoOTA's own responder is disabled and the
+  // framework ships no mDNS module. Upload by IP, or <host>.local via lwIP's
+  // native one-shot mDNS query (no responder needed).
+  OTASettingsService(ConfigManager* cfgMgr);
 
   // Contribute the 'ota' tab to the compound 'system' feature.
   void registerManifest(WebManager* web);
@@ -94,7 +87,6 @@ class OTASettingsService : public StatefulService<OTASettings> {
   ConfigDelegate<OTASettings>   _cfg;
   WebFeatureEntry<OTASettings>* _feature{nullptr};
   ArduinoOTAClass*              _arduinoOTA{nullptr};
-  ESPRack::App*                 _app{nullptr};
 
   void configureArduinoOTA();
 #ifdef ESP32

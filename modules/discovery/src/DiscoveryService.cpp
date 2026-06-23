@@ -2,8 +2,6 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
-#include <ESPmDNS.h>
-#include "mdns.h"
 #include "mbedtls/md.h"
 
 #include <AsyncJson.h>
@@ -31,10 +29,18 @@
 #define DISCOVERY_SCHEMA_VERSION "3"
 
 namespace {
-const char*    PEERS_PATH                   = "/api/v1/discovery/peers";
-const uint32_t DISCOVERY_BROWSE_INTERVAL_MS = 20000;  // re-browse cadence
-const uint32_t DISCOVERY_QUERY_TIMEOUT_MS   = 3000;   // per mdns_query_ptr
-const size_t   DISCOVERY_MAX_PEERS          = 8;      // bounded cache — also caps the mdns_query_ptr result alloc + per-peer String heap
+const char*    PEERS_PATH            = "/api/v1/discovery/peers";
+// Org-local (239.x) multicast group + port for the discovery membership
+// protocol. See modules/discovery/DISCOVERY_PROTOCOL.md §2.1.
+const char*    DISCOVERY_GROUP       = "239.42.7.1";
+const uint16_t DISCOVERY_PORT        = 7711;
+const uint32_t ANNOUNCE_INTERVAL_MS  = 8000;    // self-announce cadence
+const uint32_t PEER_TIMEOUT_MS       = 30000;   // ~3.75 missed announces -> drop
+const uint32_t RX_IDLE_DELAY_MS      = 50;      // poll yield when no packet
+const size_t   DISCOVERY_MAX_PEERS   = 64;      // bounded table (headroom over 50)
+const size_t   MAX_PKT               = 320;     // one announce fits comfortably
+const char     PKT_MAGIC             = 'E';     // "E5|2|..." wire prefix
+const uint8_t  PKT_VER               = 2;
 
 // HMAC-SHA256(key, msg) truncated to `outBytes`, lowercase hex.
 String hmacHex(const String& key, const String& msg, size_t outBytes) {
@@ -87,28 +93,24 @@ void DiscoveryService::registerManifest(WebManager* web) {
   web->registerPage(std::move(page));
 }
 
-void DiscoveryService::begin(IMdnsResolver* mdns) {
-  _mdns      = mdns;
+void DiscoveryService::begin() {
   _psk       = FACTORY_DISCOVERY_PSK;
   _canonical = DeviceIdentity::canonical();
   // Static trust tag: HMAC(PSK, our device id) truncated to 16 bytes. A peer
   // recomputes HMAC(PSK, peer.device_id) and compares — proving we both hold
-  // the PSK without ever transmitting it. (Static for v1; a rolling
-  // time-window tag is the replay-hardening step.)
+  // the PSK without ever transmitting it. (Static for v1; a rolling per-packet
+  // HMAC + epoch is the replay-hardening step — see DISCOVERY_PROTOCOL.md §6.)
   _sig       = hmacHex(_psk, _canonical, 16);
   _mutex     = xSemaphoreCreateMutex();
+  _peers.reserve(DISCOVERY_MAX_PEERS);  // one-time; upserts never reallocate the vector
 
   // Persistent discovery task. Static stack — the buffer lives in BSS, not
   // heap, so it never sits as a hole that FRAGMENTS the heap (same P4 pattern
-  // as Mothership/Telegram). But BSS still costs RAM (shrinks the heap region,
-  // so max_alloc too), so size it tight: measured stack high-water on C3 is
-  // ~1928 B (the mdns_query_ptr browse), so 3072 B gives ~1.6x headroom. Was
-  // 5120 B — 3.2 KB of it was never touched; on the no-PSRAM C3 (idle
-  // max_alloc ~10 KB) that waste dropped max_alloc to ~7.7 KB, right into the
-  // 6-8 KB REST-buffer 503 zone. Re-measure stack_free in System->Resources
-  // if the browse logic grows.
+  // as Mothership/Telegram). 4096 B covers the WiFiUDP recv + parse + the
+  // String upsert; re-measure stack_free in System->Resources if the protocol
+  // grows (the SWIM probing phase will add a little).
   if (_task == nullptr) {
-    constexpr uint32_t kStackWords = 3072 / sizeof(StackType_t);
+    constexpr uint32_t kStackWords = 4096 / sizeof(StackType_t);
     static StackType_t  s_taskStack[kStackWords];
     static StaticTask_t s_taskBlock;
     _task = xTaskCreateStatic(&DiscoveryService::taskTramp, "discovery", kStackWords,
@@ -126,73 +128,143 @@ void DiscoveryService::taskTramp(void* arg) {
   static_cast<DiscoveryService*>(arg)->discoveryLoop();
 }
 
-void DiscoveryService::discoveryLoop() {
-  for (;;) {
-    vTaskDelay(pdMS_TO_TICKS(DISCOVERY_BROWSE_INTERVAL_MS));
-    if (!_mdns || !_mdns->isActive()) continue;  // wait for the responder
-    ensureAdvert();
-    browseAndUpdate();
+bool DiscoveryService::openSocket() {
+  // beginMulticast joins the group AND binds the listen port in one call.
+  IPAddress group;
+  group.fromString(DISCOVERY_GROUP);
+  if (_udp.beginMulticast(group, DISCOVERY_PORT) != 1) {
+    log_w("[discovery] beginMulticast(%s:%u) failed", DISCOVERY_GROUP, DISCOVERY_PORT);
+    return false;
   }
+  log_i("[discovery] listening on %s:%u", DISCOVERY_GROUP, DISCOVERY_PORT);
+  return true;
 }
 
-void DiscoveryService::ensureAdvert() {
-  // (Re)assert our extra TXT on the mDNS module's _esprack._tcp advert.
-  // addServiceTxt SETS (idempotent), so re-running each cycle survives an
-  // mDNS re-init after a WiFi drop. device_id/project/fw come from the mDNS
-  // module; we add the discovery keys.
-  MDNS.addServiceTxt("_esprack", "_tcp", "schema", DISCOVERY_SCHEMA_VERSION);
-  MDNS.addServiceTxt("_esprack", "_tcp", "fw_fx",  ESPRACK_VERSION_STR);
-  MDNS.addServiceTxt("_esprack", "_tcp", "sig",    _sig.c_str());
-}
-
-void DiscoveryService::browseAndUpdate() {
-  mdns_result_t* results = nullptr;
-  esp_err_t err = mdns_query_ptr("_esprack", "_tcp",
-                                 DISCOVERY_QUERY_TIMEOUT_MS, DISCOVERY_MAX_PEERS,
-                                 &results);
-  if (err != ESP_OK) {
-    log_w("[discovery] mdns_query_ptr failed: %d", (int)err);
+void DiscoveryService::announceSelf() {
+  // Wire: "E5|2|<device_id>|<project>|<fw>|<schema>|<fw_fx>|<sig>|<port>".
+  // The receiver takes the source IP from the datagram, so we don't send it.
+  char buf[MAX_PKT];
+  int n = snprintf(buf, sizeof(buf), "%c%u|%u|%s|%s|%s|%s|%s|%s|%u",
+                   PKT_MAGIC, (unsigned)5, (unsigned)PKT_VER,
+                   _canonical.c_str(),
+                   DeviceIdentity::projectName().c_str(),
+                   DeviceIdentity::version().c_str(),
+                   DISCOVERY_SCHEMA_VERSION,
+                   ESPRACK_VERSION_STR,
+                   _sig.c_str(),
+                   (unsigned)_webPort);
+  if (n <= 0 || n >= (int)sizeof(buf)) {
+    log_w("[discovery] announce payload truncated (%d)", n);
     return;
   }
-
-  std::vector<Peer> found;
-  uint32_t now = millis();
-  for (mdns_result_t* r = results; r != nullptr; r = r->next) {
-    Peer p;
-    for (size_t i = 0; i < r->txt_count; ++i) {
-      const char* k = r->txt[i].key;
-      const char* v = r->txt[i].value ? r->txt[i].value : "";
-      if      (!strcmp(k, "device_id")) p.deviceId  = v;
-      else if (!strcmp(k, "project"))   p.project   = v;
-      else if (!strcmp(k, "fw"))        p.fw        = v;
-      else if (!strcmp(k, "schema"))    p.schema    = v;
-      else if (!strcmp(k, "fw_fx"))     p.framework = v;
-      else if (!strcmp(k, "sig"))       p.sig       = v;
-    }
-    // Skip self and any unidentified responder.
-    if (p.deviceId.length() == 0 || p.deviceId == _canonical) continue;
-
-    for (mdns_ip_addr_t* a = r->addr; a != nullptr; a = a->next) {
-      if (a->addr.type == ESP_IPADDR_TYPE_V4) {
-        p.ip = IPAddress(a->addr.u_addr.ip4.addr);
-        break;
-      }
-    }
-    p.port       = r->port;
-    p.trusted    = p.sig.length() && (hmacHex(_psk, p.deviceId, 16) == p.sig);
-    p.compatible = (p.schema == DISCOVERY_SCHEMA_VERSION);
-    p.lastSeenMs = now;
-    found.push_back(std::move(p));
-    if (found.size() >= DISCOVERY_MAX_PEERS) break;
+  if (_udp.beginMulticastPacket() != 1) {
+    log_d("[discovery] beginMulticastPacket failed");
+    return;
   }
-  if (results) mdns_query_results_free(results);
+  _udp.write((const uint8_t*)buf, n);
+  _udp.endPacket();
+}
 
-  // Swap the snapshot in under the lock — held only for the quick move.
-  if (_mutex) xSemaphoreTake(_mutex, portMAX_DELAY);
-  _peers = std::move(found);
-  size_t n = _peers.size();
-  if (_mutex) xSemaphoreGive(_mutex);
-  log_i("[discovery] %u peer(s) on the LAN", (unsigned)n);
+void DiscoveryService::processPacket(char* buf, int len, IPAddress src) {
+  if (len < 6) return;
+  buf[len] = '\0';
+
+  // Split on '|' in place, preserving empty fields (no strtok — it collapses
+  // adjacent delimiters and would misalign the columns).
+  const int   MAXF = 9;
+  const char* f[MAXF];
+  int nf = 0;
+  f[nf++] = buf;
+  for (char* c = buf; *c && nf < MAXF; ++c) {
+    if (*c == '|') { *c = '\0'; f[nf++] = c + 1; }
+  }
+  if (nf < MAXF) return;                       // malformed
+  // f[0] = "E5", f[1] = ver
+  if (f[0][0] != PKT_MAGIC || f[0][1] != '5') return;
+  if ((uint8_t)atoi(f[1]) != PKT_VER) return;
+
+  Peer p;
+  p.deviceId  = f[2];
+  // Skip self and any unidentified responder.
+  if (p.deviceId.length() == 0 || p.deviceId == _canonical) return;
+  p.project   = f[3];
+  p.fw        = f[4];
+  p.schema    = f[5];
+  p.framework = f[6];
+  p.sig       = f[7];
+  p.port      = (uint16_t)atoi(f[8]);
+  p.ip        = src;
+  // Same trust model as the mDNS-TXT version: recompute HMAC(PSK, device_id)
+  // and compare to the advertised tag — proves shared-PSK ownership.
+  p.trusted    = p.sig.length() && (hmacHex(_psk, p.deviceId, 16) == p.sig);
+  p.compatible = (p.schema == DISCOVERY_SCHEMA_VERSION);
+  p.lastSeenMs = millis();
+
+  upsertPeer(std::move(p));
+}
+
+void DiscoveryService::upsertPeer(Peer&& p) {
+  if (!_mutex) return;
+  xSemaphoreTake(_mutex, portMAX_DELAY);
+  bool found = false;
+  for (auto& e : _peers) {
+    if (e.deviceId == p.deviceId) {
+      e = std::move(p);          // update in place (ip/fw/sig/lastSeen refresh)
+      found = true;
+      break;
+    }
+  }
+  if (!found && _peers.size() < DISCOVERY_MAX_PEERS) {
+    _peers.push_back(std::move(p));
+  }
+  xSemaphoreGive(_mutex);
+}
+
+void DiscoveryService::pruneStale(uint32_t now) {
+  if (!_mutex) return;
+  xSemaphoreTake(_mutex, portMAX_DELAY);
+  for (size_t i = 0; i < _peers.size();) {
+    if (now - _peers[i].lastSeenMs > PEER_TIMEOUT_MS) {
+      _peers[i] = std::move(_peers.back());
+      _peers.pop_back();
+    } else {
+      ++i;
+    }
+  }
+  xSemaphoreGive(_mutex);
+}
+
+void DiscoveryService::discoveryLoop() {
+  char buf[MAX_PKT];
+  for (;;) {
+    // Wait for STA to actually have an IP before touching the socket.
+    if (WiFi.status() != WL_CONNECTED || WiFi.localIP() == IPAddress((uint32_t)0)) {
+      if (_udpReady) { _udp.stop(); _udpReady = false; }
+      vTaskDelay(pdMS_TO_TICKS(1000));
+      continue;
+    }
+    if (!_udpReady) {
+      if (!openSocket()) { vTaskDelay(pdMS_TO_TICKS(1000)); continue; }
+      _udpReady = true;
+      announceSelf();                 // announce immediately on (re)join
+      _lastAnnounceMs = millis();
+    }
+
+    int sz = _udp.parsePacket();
+    if (sz > 0) {
+      int n = _udp.read((uint8_t*)buf, sizeof(buf) - 1);
+      if (n > 0) processPacket(buf, n, _udp.remoteIP());
+    } else {
+      vTaskDelay(pdMS_TO_TICKS(RX_IDLE_DELAY_MS));
+    }
+
+    uint32_t now = millis();
+    if (now - _lastAnnounceMs >= ANNOUNCE_INTERVAL_MS) {
+      announceSelf();
+      pruneStale(now);
+      _lastAnnounceMs = now;
+    }
+  }
 }
 
 void DiscoveryService::servePeers(AsyncWebServerRequest* request) {

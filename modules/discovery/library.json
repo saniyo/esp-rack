@@ -1,7 +1,7 @@
 {
   "name": "DiscoveryModule",
   "version": "0.1.0",
-  "description": "ESPRack module: LAN device discovery (mDNS, not a mesh network). Browses _esprack._tcp peers (with an HMAC project-key trust tag + manifest-schema compatibility), exposes /api/v1/discovery/peers, and adds a Discovery page. Builds on MdnsModule (the mDNS substrate is part of this feature). Compile-time excludable.",
+  "description": "ESPRack module: LAN device discovery over a custom UDP membership protocol (NOT mDNS, NOT a mesh network). Each device announces itself + learns peers (HMAC project-key trust tag + manifest-schema compatibility), exposes /api/v1/discovery/peers, and adds a Discovery page. Self-contained UDP socket; no mDNS responder. Compile-time excludable.",
   "license": "MIT",
   "frameworks": [
     "arduino"
@@ -12,9 +12,6 @@
   "dependencies": [
     {
       "name": "ESPRack"
-    },
-    {
-      "name": "MdnsModule"
     }
   ],
   "build": {

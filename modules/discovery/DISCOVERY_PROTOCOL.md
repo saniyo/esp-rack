@@ -7,6 +7,16 @@
 
 ---
 
+## 0. IMPLEMENTATION STATUS (2026-06-23)
+
+Decision updated to **R2 (full mDNS removal)** per operator call — OTA does not need mDNS. The `mothership.local` blocker (§1) was retired by **verification, not by changing the URL**: `CONFIG_LWIP_DNS_SUPPORT_MDNS_QUERIES=y`, so lwIP resolves `.local` with a native one-shot multicast query independent of the responder — `mothership.local` keeps working and checkin is unaffected. The espressif/mdns module (responder + browse + System/mDNS tab + `IMdnsResolver`) is **DELETED**; `app->mdns()` wiring and OTA's `.local` advert are gone; `setMdnsEnabled(false)` stays (ArduinoOTA never starts a responder).
+
+**Landed: the SWIM "C-subset"** — `DiscoveryService` multicasts a self-announce on `239.42.7.1:7711` every ~8 s and upserts peers with a 30 s timeout, reusing the existing HMAC project-key trust tag (`trusted`), schema-compat (`compatible`), `WiFiUDP`, the static BSS task, the mutex, and the `/api/v1/discovery/peers` `{self,peers[]}` serve shape verbatim. Transport is the only thing that changed (mDNS browse → UDP). Compiles clean on C3 (RAM 20.8%, flash 80.1%); **not yet HW-verified** for peer pickup / heap recovery.
+
+**Pending (the rest of full SWIM, §§2-3):** unicast direct + k-indirect probing, incarnation gossip + suspicion/refutation, per-packet HMAC + NVS epoch replay-hardening, the fixed BSS PeerRow table for true 50+ determinism, anti-entropy `/table` + `/digest`, Lifeguard NSA, and the correlated-loss circuit-breaker.
+
+---
+
 ## 1. RECOMMENDATION
 
 **Adopt a SWIM-style unicast-gossip membership protocol (Candidate B) as the endpoint, reached via a staged C→B rollout.** Evolve `DiscoveryService` from an mDNS browser into a unicast-probe failure detector over a fixed BSS peer table, with multicast demoted to a rare, HMAC'd, NVS-seeded **bootstrap-only** seed.
