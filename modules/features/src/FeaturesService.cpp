@@ -2,7 +2,8 @@
 #include <AdaptiveJson.h>
 #include <WebManager.h>
 
-FeaturesService::FeaturesService(AsyncWebServer* server, WebManager* web) {
+FeaturesService::FeaturesService(AsyncWebServer* server, WebManager* web)
+    : _web(web) {
   server->on(FEATURES_SERVICE_PATH, HTTP_GET, std::bind(&FeaturesService::features, this, std::placeholders::_1));
 
   // Phase 7c — mship-ui proxy can't reach paths registered directly
@@ -12,64 +13,43 @@ FeaturesService::FeaturesService(AsyncWebServer* server, WebManager* web) {
   if (web) {
     web->registerProxyEndpoint(
         "GET", FEATURES_SERVICE_PATH,
-        [](JsonVariant /*body*/, JsonVariant out, int& out_status) {
-          buildFeaturesObject(out.to<JsonObject>());
+        [web](JsonVariant /*body*/, JsonVariant out, int& out_status) {
+          buildFeaturesObject(out.to<JsonObject>(), web);
           out_status = 200;
           return true;
         });
   }
 }
 
-void FeaturesService::buildFeaturesObject(JsonObject root) {
-#if FT_ENABLED(FT_PROJECT)
-  root["project"] = true;
-#else
-  root["project"] = false;
-#endif
+// Module-installed features are derived from WebManager's install map (the
+// same source App::begin uses for manifest.buildFeatures, keyed by each
+// installed module's describe().id, plus the consumer "project" flag) — so
+// enabling/disabling one is purely whether its module is .install<>()'d; the
+// per-module FT_* compile flags are gone. FT_SECURITY stays a compile-out
+// flag (it swaps the core SecurityManager for NullSecurityManager rather than
+// gating a standalone module), so the `security` key still reflects it.
+void FeaturesService::buildFeaturesObject(JsonObject root, WebManager* web) {
+  auto installed = [web](const char* moduleId) -> bool {
+    return web && web->hasBuildFeature(moduleId);
+  };
+  root["project"]         = installed("project");
+  root["telegram"]        = installed("telegram");
+  root["mqtt"]            = installed("mqtt");
+  root["ntp"]             = installed("ntp");
+  root["ota"]             = installed("ota");
+  root["upload_firmware"] = installed("uploadFirmware");
+  root["auto_update"]     = installed("autoUpdate");
+  root["system_info"]     = installed("systemStatus");
 #if FT_ENABLED(FT_SECURITY)
   root["security"] = true;
 #else
   root["security"] = false;
 #endif
-#if FT_ENABLED(FT_TELEGRAM)
-  root["telegram"] = true;
-#else
-  root["telegram"] = false;
-#endif
-#if FT_ENABLED(FT_MQTT)
-  root["mqtt"] = true;
-#else
-  root["mqtt"] = false;
-#endif
-#if FT_ENABLED(FT_NTP)
-  root["ntp"] = true;
-#else
-  root["ntp"] = false;
-#endif
-#if FT_ENABLED(FT_OTA)
-  root["ota"] = true;
-#else
-  root["ota"] = false;
-#endif
-#if FT_ENABLED(FT_UPLOAD_FIRMWARE)
-  root["upload_firmware"] = true;
-#else
-  root["upload_firmware"] = false;
-#endif
-#if FT_ENABLED(FT_AUTO_UPDATE)
-  root["auto_update"] = true;
-#else
-  root["auto_update"] = false;
-#endif
-#if FT_ENABLED(FT_SYSTEM_INFO)
-  root["system_info"] = true;
-#else
-  root["system_info"] = false;
-#endif
 }
 
 void FeaturesService::features(AsyncWebServerRequest* request) {
-  sendAdaptiveJson(request, [](JsonObject& root) {
-    buildFeaturesObject(root);
+  WebManager* web = _web;
+  sendAdaptiveJson(request, [web](JsonObject& root) {
+    buildFeaturesObject(root, web);
   }, 512);
 }

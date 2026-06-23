@@ -75,10 +75,14 @@ class OTASettings {
 };
 
 class WebManager;
+namespace ESPRack { class App; }
 
 class OTASettingsService : public StatefulService<OTASettings> {
  public:
-  OTASettingsService(ConfigManager* cfgMgr);
+  // `app` is optional — when supplied, OTA advertises itself over the SHARED
+  // mDNS responder (owned by MdnsModule) iff that module is installed
+  // (app->mdns() non-null). Without it, OTA runs mDNS-free.
+  OTASettingsService(ConfigManager* cfgMgr, ESPRack::App* app = nullptr);
 
   // Contribute the 'ota' tab to the compound 'system' feature.
   void registerManifest(WebManager* web);
@@ -90,6 +94,7 @@ class OTASettingsService : public StatefulService<OTASettings> {
   ConfigDelegate<OTASettings>   _cfg;
   WebFeatureEntry<OTASettings>* _feature{nullptr};
   ArduinoOTAClass*              _arduinoOTA{nullptr};
+  ESPRack::App*                 _app{nullptr};
 
   void configureArduinoOTA();
 #ifdef ESP32

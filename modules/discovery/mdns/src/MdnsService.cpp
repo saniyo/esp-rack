@@ -306,7 +306,7 @@ MdnsService::browseService(const String& service,
   // (hostnames, addr records, per-instance strings) on the heap until
   // some future user action. With the raw API the results are local
   // and freed on every path before returning. Same pattern
-  // MeshService::browseAndUpdate() already uses.
+  // DiscoveryService::browseAndUpdate() already uses.
   uint32_t t0 = millis();
   mdns_result_t* results = nullptr;
   esp_err_t err = mdns_query_ptr(svc.c_str(), pr.c_str(),

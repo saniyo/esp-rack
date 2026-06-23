@@ -197,6 +197,20 @@ class WebManager {
     _buildFeatures.push_back({key, enabled});
   }
 
+  // Query the install map populated by registerBuildFeature (App::begin
+  // registers one entry per installed module, keyed by describe().id, plus
+  // the consumer "project" flag). True iff `key` was registered enabled.
+  // Lets services derive feature gating from the .install<>() chain instead
+  // of per-module FT_* compile macros. Read-only and safe on the request
+  // thread — the map is built once in begin() and never mutated after.
+  bool hasBuildFeature(const char* key) const {
+    if (!key) return false;
+    for (const auto& f : _buildFeatures) {
+      if (f.key && std::strcmp(f.key, key) == 0) return f.enabled;
+    }
+    return false;
+  }
+
   // Module-version registry. App.begin() iterates installed modules,
   // calls describe() on each, and pushes (id, version) pairs here so
   // manifest.modules[] surfaces the wrapper rev independent

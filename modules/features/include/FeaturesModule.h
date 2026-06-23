@@ -2,9 +2,11 @@
 #ifndef ESPRACK_FEATURES_MODULE_H
 #define ESPRACK_FEATURES_MODULE_H
 
-// FeaturesModule — exposes the build-time FT_* feature flag set as
-// /api/v1/features so the React frontend can adapt routing/menu to
-// what's actually compiled in. Just wraps FeaturesService
+// FeaturesModule — exposes the installed-feature set as /api/v1/features
+// so the React frontend can adapt routing/menu to what's actually wired
+// up. Module features are derived from the Builder().install<>() chain
+// (via WebManager's install map); only a few non-module flags (FT_SECURITY,
+// FT_PROJECT, …) still come from compile macros. Just wraps FeaturesService
 // (which mounts its endpoint internally on construction).
 
 #include <Module.h>

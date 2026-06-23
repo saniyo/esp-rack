@@ -106,7 +106,7 @@ class App {
   void               setTls(ITLSProvider* p) { tls_ = p; }
 
   // ICertProvider late-binding — same pattern as mqtt(). Set by
-  // CertManagerModule::onInstall when FT_CERT_MANAGER=1. Consumer
+  // CertManagerModule::onInstall when that module is installed. Consumer
   // services check `app->cert()->hasValidCert()` before assuming
   // mTLS is available.
   ICertProvider*     cert()                  { return cert_; }

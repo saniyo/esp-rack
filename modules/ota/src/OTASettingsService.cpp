@@ -2,6 +2,7 @@
 
 #include <web/Form.h>
 #include <WebManager.h>
+#include <App.h>
 
 void OTASettings::buildForm(OTASettings& settings, JsonObject& root) {
   web::Form form(root, "ota", "OTA Settings");
@@ -11,7 +12,7 @@ void OTASettings::buildForm(OTASettings& settings, JsonObject& root) {
   form.add(web::Secret("pwd", settings.password.c_str()).icon("Lock"));
 }
 
-OTASettingsService::OTASettingsService(ConfigManager* cfgMgr) :
+OTASettingsService::OTASettingsService(ConfigManager* cfgMgr, ESPRack::App* app) :
     _cfg(cfgMgr,
          "ota",
          OTA_SETTINGS_FILE,
@@ -22,6 +23,7 @@ OTASettingsService::OTASettingsService(ConfigManager* cfgMgr) :
          false /*autoSave*/,
          nullptr /*validator*/,
          OTASettings::buildForm /*formReader*/) {
+  _app = app;
 #ifdef ESP32
   WiFi.onEvent(std::bind(&OTASettingsService::onStationModeGotIP, this, std::placeholders::_1, std::placeholders::_2),
                WiFiEvent_t::ARDUINO_EVENT_WIFI_STA_GOT_IP);
@@ -102,6 +104,18 @@ void OTASettingsService::configureArduinoOTA() {
 #endif
     log_d("Starting OTA Update Service...");
     _arduinoOTA = new ArduinoOTAClass;
+    // Do NOT let ArduinoOTA start its own mDNS responder. Its begin()
+    // unconditionally calls MDNS.begin() when _mdnsEnabled (default true),
+    // which spawns the IDF "mdns" task + responder heap even on builds that
+    // never installed MdnsModule — a not-installed feature leaving a live
+    // task/heap behind. mDNS ownership belongs solely to MdnsModule: when it's
+    // absent there must be NO mDNS, and when it IS present OTA must not
+    // double-init the single global responder. OTA upload still works by IP
+    // (espota / PlatformIO target the device IP, not <host>.local). <host>.local
+    // OTA discovery comes from the SHARED mDNS instead: when MdnsModule is
+    // installed it owns the single responder and we advertise the OTA service
+    // over it below (MDNS.enableArduino) — never a second MDNS.begin().
+    _arduinoOTA->setMdnsEnabled(false);
     _arduinoOTA->setPort(_state.port);
     _arduinoOTA->setPassword(_state.password.c_str());
     _arduinoOTA->onStart([]() { Serial.println(F("Starting")); });
@@ -123,6 +137,17 @@ void OTASettingsService::configureArduinoOTA() {
         log_d("End Failed");
     });
     _arduinoOTA->begin();
+
+    // Shared-mDNS advertisement. ArduinoOTA's own mDNS is off (above), so it
+    // started no responder. If MdnsModule is installed it has already brought
+    // the single shared responder up (app->mdns() non-null) — advertise the
+    // Arduino-OTA service on THAT responder so the device is discoverable as
+    // <host>.local:<port> for IDE/PlatformIO OTA. enableArduino() only adds a
+    // service record; it never calls MDNS.begin(). MdnsModule absent => skipped,
+    // OTA stays fully mDNS-free (upload by IP).
+    if (_app && _app->mdns()) {
+      MDNS.enableArduino(_state.port, _state.password.length() > 0);
+    }
   }
 }
 

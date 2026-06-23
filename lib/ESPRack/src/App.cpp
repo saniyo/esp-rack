@@ -8,6 +8,7 @@
 #include "DeviceIdentity.h"
 #include "DataApi.h"
 #include "HeapMonitor.h"
+#include "ProblemJson.h"
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -326,10 +327,15 @@ void App::begin() {
         srv->on(uri.c_str(), HTTP_GET, handler);
         if (uri.equals("/index.html")) {
           srv->onNotFound([handler](AsyncWebServerRequest* req) {
-            if (req->method() == HTTP_GET) {
-              handler(req);
-            } else if (req->method() == HTTP_OPTIONS) {
-              req->send(200);
+            if (req->method() == HTTP_OPTIONS) {
+              req->send(200);                       // CORS preflight
+            } else if (req->url().startsWith("/api/")) {
+              // Unknown API path => clean 404, never the SPA shell. A module
+              // that isn't installed mounts no handler, so its /api/* routes
+              // must read as "gone", not "alive with HTML".
+              sendProblem(req, 404, "not_found", "No such endpoint");
+            } else if (req->method() == HTTP_GET) {
+              handler(req);                         // SPA fallback (client routes)
             } else {
               req->send(404);
             }
@@ -343,10 +349,12 @@ void App::begin() {
   srv->serveStatic("/app/",         ESPFS, "/www/app/");
   srv->serveStatic("/favicon.ico",  ESPFS, "/www/favicon.ico");
   srv->onNotFound([](AsyncWebServerRequest* req) {
-    if (req->method() == HTTP_GET) {
+    if (req->method() == HTTP_OPTIONS) {
+      req->send(200);                       // CORS preflight
+    } else if (req->url().startsWith("/api/")) {
+      sendProblem(req, 404, "not_found", "No such endpoint");
+    } else if (req->method() == HTTP_GET) {
       req->send(ESPFS, "/www/index.html");
-    } else if (req->method() == HTTP_OPTIONS) {
-      req->send(200);
     } else {
       req->send(404);
     }

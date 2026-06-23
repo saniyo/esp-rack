@@ -24,13 +24,17 @@ class FeaturesService {
   // rest.proxy. Same JSON shape either way.
   FeaturesService(AsyncWebServer* server, WebManager* web = nullptr);
 
-  // Shared JSON builder — used by both the AsyncWebServer handler
-  // and the WebManager proxy-endpoint handler. Writes the FT_*
-  // build-flag map into root.
-  static void buildFeaturesObject(JsonObject root);
+  // Shared JSON builder — used by both the AsyncWebServer handler and the
+  // WebManager proxy-endpoint handler. Module-installed features are derived
+  // from WebManager's install map (the same source as manifest.buildFeatures,
+  // populated in App::begin from the .install<>() chain), so feature on/off
+  // tracks what's installed rather than per-module FT_* macros. FT_SECURITY
+  // (a core compile-out flag, not a standalone module) still gates `security`.
+  static void buildFeaturesObject(JsonObject root, WebManager* web);
 
  private:
   void features(AsyncWebServerRequest* request);
+  WebManager* _web{nullptr};
 };
 
 #endif

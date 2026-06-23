@@ -7,23 +7,39 @@
 // below.
 #define FT_ENABLED(feature) feature
 
-// ── Default policy ──────────────────────────────────────────────────
-// ESPRack ships as a single library bundle with all 19 modules always
-// linked. Defaults therefore turn EVERY framework feature ON — a
-// consumer that wants the whole framework just adds its own service
-// (FT_PROJECT) and uses everything else with zero ceremony. To trim
-// flash, the consumer explicitly disables what they don't need:
+// ── Feature control policy ──────────────────────────────────────────
+// MODULE features are turned on/off purely by the Builder().install<>()
+// chain in the consumer's composition root (main.cpp). To drop a feature
+// — Telegram, MQTT, NTP, OTA, Upload-Firmware, Auto-Update, System-Status,
+// Cert-Manager, Mothership, the Discovery/mDNS pair, … — remove that
+// module's .install<>() call (and its lib_deps entry to reclaim flash).
+// The manifest's buildFeatures map (and /api/v1/features) is DERIVED from
+// what is actually installed (App::begin walks the installed modules), so
+// the frontend adapts with zero build flags and there can be no drift
+// between macros and what was wired up. There are deliberately NO
+// per-module FT_* macros.
+//
+// The FT_* flags that remain are NOT module toggles — they gate behavior
+// that has no standalone module to not-install:
+//
+//   FT_PROJECT        the consumer's own service body (opt-in; OFF by
+//                     default — the library can't predict the consumer
+//                     service). Mute it by not installing the consumer
+//                     module, or build with -D FT_PROJECT=0.
+//   FT_SECURITY       swaps the core SecurityManager for
+//                     NullSecurityManager (everyone authenticated as
+//                     admin) — a posture toggle woven through the core,
+//                     not a standalone module.
+//   FT_WEBSOCKET      core WS infrastructure for live tabs.
+//   FT_SECRETS_VAULT  field-level password encryption at rest (ON for
+//                     safety; mbedtls AES/SHA-256 compiled out when 0).
+//   FT_HEAP_MONITOR /
+//   FT_LOOP_PROFILE   DEBUG-only instrumentation (ship OFF).
 //
 //   [features]
 //   build_flags =
-//     -D FT_PROJECT=1
-//     -D FT_TELEGRAM=0   ; opt out of Telegram
-//     -D FT_OTA=0        ; opt out of OTA
-//
-// FT_PROJECT stays OFF by default — the consumer's own service is
-// the only thing the library can't predict. FT_SECRETS_VAULT stays
-// ON for safety (credentials encrypted at rest unless explicitly
-// disabled for debugging).
+//     -D FT_PROJECT=1          ; enable the consumer's own service
+//     -D FT_SECRETS_VAULT=0    ; plaintext secrets on disk (debug only)
 
 #ifndef FT_PROJECT
 #define FT_PROJECT 0           // consumer's own service — opt-in
@@ -37,38 +53,10 @@
 #define FT_WEBSOCKET 1         // WS infrastructure for live tabs
 #endif
 
-#ifndef FT_MQTT
-#define FT_MQTT 1              // MQTT broker connection
-#endif
-
-#ifndef FT_NTP
-#define FT_NTP 1               // NTP clock sync
-#endif
-
-#ifndef FT_OTA
-#define FT_OTA 1               // ArduinoOTA over WiFi
-#endif
-
-#ifndef FT_UPLOAD_FIRMWARE
-#define FT_UPLOAD_FIRMWARE 1   // POST .bin via web UI
-#endif
-
-#ifndef FT_TELEGRAM
-#define FT_TELEGRAM 1          // Telegram bot integration
-#endif
-
-#ifndef FT_AUTO_UPDATE
-#define FT_AUTO_UPDATE 1       // Periodic OTA poll against update server
-#endif
-
-#ifndef FT_SYSTEM_INFO
-#define FT_SYSTEM_INFO 1       // /api/v1/system/status + System tab roll-up
-#endif
-
 // ── Diagnostics pair (DEBUG-only, ship OFF) ─────────────────────────
 // Both were built for the perf / heap-fragmentation hunt. That work is
-// closed, so unlike every other FT_* above they default OFF — flip to 1
-// in features.ini only while actively investigating a regression.
+// closed, so they default OFF — flip to 1 in features.ini only while
+// actively investigating a regression.
 //
 // FT_HEAP_MONITOR — HeapMonitor's per-minute max_alloc ring + boot / WG /
 // mship / soak snapshot logging + per-task stack dump. When 0 the 960 B
@@ -95,25 +83,6 @@
 // default to keep credentials encrypted at rest.
 #ifndef FT_SECRETS_VAULT
 #define FT_SECRETS_VAULT 1
-#endif
-
-// Phase 1 of the mothership roadmap — device PKI lifecycle (X.509
-// cert+key in encrypted storage, ECDSA-P256 keypair gen, CSR
-// enrollment, rotation, gray-zone recovery). Default ON, like every
-// other framework module. Consumer trims with `-D FT_CERT_MANAGER=0`
-// to drop the PKI tab and skip the module's overhead.
-// See `docs/plans/mothership-roadmap.md`.
-#ifndef FT_CERT_MANAGER
-#define FT_CERT_MANAGER 1
-#endif
-
-// Phase 2 of the mothership roadmap — periodic HTTPS check-in to a
-// fleet management server with command dispatch. Requires
-// FT_CERT_MANAGER (mTLS handshake needs a device cert) but the
-// runtime is graceful: if the cert isn't enrolled yet, the
-// mothership tab shows NeedsCert and skips check-in attempts.
-#ifndef FT_MOTHERSHIP
-#define FT_MOTHERSHIP 1
 #endif
 
 #endif

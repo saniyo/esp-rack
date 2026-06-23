@@ -1,8 +1,12 @@
 #pragma once
-#ifndef ESPRACK_MESH_SERVICE_H
-#define ESPRACK_MESH_SERVICE_H
+#ifndef ESPRACK_DISCOVERY_SERVICE_H
+#define ESPRACK_DISCOVERY_SERVICE_H
 
-// MeshService — discovers sibling ESP-Rack devices on the LAN.
+// DiscoveryService — discovers sibling ESP-Rack devices on the LAN.
+//
+// This is LAN discovery (mDNS), not a mesh network — see DiscoveryModule.h for
+// the naming rationale ("mesh" is reserved for a future device-to-device WiFi
+// mesh).
 //
 // HOW:
 //   * Advertise: rides the mDNS module's `_esprack._tcp` advert with three
@@ -14,7 +18,8 @@
 //     without ever transmitting the key — and checks manifest-schema
 //     compatibility (so same-project AND cross-project devices we can render
 //     are recognised). The verified, bounded peer list is cached.
-//   * Serve: GET /api/v1/mesh/peers returns {self, peers[]} for the Devices page.
+//   * Serve: GET /api/v1/discovery/peers returns {self, peers[]} for the
+//     Discovery page.
 //
 // The cache is read on the AsyncWebServer thread and written on the discovery
 // task → guarded by a mutex held only for the quick swap/serialise (never
@@ -33,12 +38,12 @@
 class WebManager;
 class AsyncWebServerRequest;
 
-class MeshService {
+class DiscoveryService {
  public:
-  MeshService() = default;
+  DiscoveryService() = default;
 
-  // Registers the Devices page (component "Devices") + the /api/v1/mesh/peers
-  // endpoint on the manifest. Called during onInstall.
+  // Registers the Discovery page (component "Discovery") + the
+  // /api/v1/discovery/peers endpoint on the manifest. Called during onInstall.
   void registerManifest(WebManager* web);
 
   // Post-network: compute our trust tag, then spawn the discovery task.
@@ -75,4 +80,4 @@ class MeshService {
   TaskHandle_t      _task{nullptr};
 };
 
-#endif  // ESPRACK_MESH_SERVICE_H
+#endif  // ESPRACK_DISCOVERY_SERVICE_H
