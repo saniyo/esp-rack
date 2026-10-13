@@ -774,7 +774,14 @@ which peripheral or pins to use.
    `IMothershipProvider`, `IWireguardProvider`), late-bound through `App`;
    restart goes through the core's `ESPRack::restartDevice()`.
    `scripts/check_module_deps.py` checks this.
-9. **Reboot only through `ESPRack::restartDevice(reason)`**, never
+9. **Boot loops and the loop watchdog** (`system/BootGuard.h`,
+   `system/LoopWdt.h`):
+   - Read `ESPRack::BootGuard::info().safeMode` in `onBegin()`. In safe mode,
+     leave outputs off; the crash run that caused it is in `info()`.
+   - With `LoopWdt` armed by the consumer, one `loop()` pass longer than 5 s
+     resets the chip. Never block. Bracket one-off long work (erasing NVS, a
+     big file) with `LoopWdt::pause()` / `resume()`.
+10. **Reboot only through `ESPRack::restartDevice(reason)`**, never
    `ESP.restart()`, and make `onShutdown()` leave the hardware safe: outputs
    off, counters persisted, within 500 ms. A stray `esp_restart()` still
    runs the hooks through the shutdown handler, but on whatever task called

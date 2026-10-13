@@ -170,6 +170,26 @@ hooks run. At the next boot, `ESPRack::lastRestartReason()` combines it with
 The record is cleared once it has been read. The framework's reasons are the
 `kRestart*` constants in `App.h`.
 
+**Boot-loop guard and loop watchdog** (SES-LIB-014, `system/BootGuard.h`,
+`system/LoopWdt.h`).
+
+`BootGuard::begin()` runs early in `App::begin()`, before any `onBegin`:
+- Only crash boots count toward the run: panic, int-wdt, task-wdt, wdt,
+  `"idf"` and unknown. Power-on, brownout, ext and intended restarts neither
+  count nor reset it.
+- `limit` crash boots in a row (default 4) set `safeMode`. It is advisory and
+  sticky; the consumer reads `info().safeMode` in `onBegin`.
+- A boot that stays up `stableAfterMs` (120 s) ends the run (`markStable`,
+  from `App::loop`). A stable run never clears safe mode.
+- Safe mode is cleared by `clearSafeMode()` (admin action
+  `system.clearSafeMode`), a new firmware (ELF SHA) or a factory reset.
+- The record lives in NVS `esprack/boot`, with two writes per boot.
+
+`LoopWdt::arm()` puts the Arduino loop task on the 5 s task watchdog. It is
+opt-in, by the consumer. `pause()`/`resume()` nest: the framework pauses
+during an ArduinoOTA transfer and the restart hooks, and a consumer pauses
+around its own long one-off work.
+
 ### 2.5 Threads
 
 | Context | Runs |

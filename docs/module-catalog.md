@@ -442,6 +442,11 @@ This is an audit snapshot of `feature/ses-light-support`, dated 2026-10-13:
   - The default `guest` account and the `IS_OPERATOR` rule are listed as bugs at the end.
 
 ### `system-status` — SystemStatusModule
+> Since SES-LIB-007/014 the Resources tab also shows "Last restart"
+> (`lastRestartReason()`) and "Boot" (boot count, crash run, safe mode, loop
+> WDT state; "Clear safe mode" in safe mode). The legacy status JSON carries
+> `last_restart`, `boot_count` and `safe_mode`.
+
 - **Purpose:**
   - System → Identity tab: device id, project, versions, chip, MAC, UIDs.
   - System → Resources tab: three heap views, PSRAM, sketch, flash, filesystem, a FreeRTOS task stack high-water table, and restart / factory-reset buttons.

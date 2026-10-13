@@ -47,6 +47,9 @@ Work beyond the plan that has landed:
   - SES-LIB-016 (UI pack B): dated table columns (`date/time/datetime/duration`),
     `Message.levelKey`, `Action.withClientTime`, `updateValue` for 32/64-bit
     integers, 13 icons. Plan: `docs/plans/ses-lib-016-ui-pack-b.md`.
+  - SES-LIB-014 (core 0.6.0): `BootGuard` (crash-run counter, sticky advisory
+    safe mode, NVS `esprack/boot`) and `LoopWdt` (opt-in loop task watchdog;
+    OTA and restart hooks pause it). Plan: `docs/plans/ses-lib-014-bootguard-loopwdt.md`.
   - SES-LIB-007: `ESPRack::lastRestartReason()`, from a 32-byte RTC record plus
     `esp_reset_reason()`. The framework's restart reasons are normalised to
     `kRestart*` constants; OTA reboots through `restartDevice`. Plan:
