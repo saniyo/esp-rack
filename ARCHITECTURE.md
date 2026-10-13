@@ -287,10 +287,15 @@ knows no driver.
     is in use (the prebuilt libs run a secondary USB-JTAG console);
     UART0 when it's the console; `Builder::reserveGpio()` pins; the SD
     card's `BOARD_SD_MMC_*` pins (reserved by the filesystem module).
+  - **The console UART** comes from `CONFIG_ESP_CONSOLE_UART_NUM`, the IDF
+    console's. The prebuilt libs keep it on UART0 even with
+    `ARDUINO_USB_CDC_ON_BOOT`, which only moves `Serial` to USB. So UART0
+    and its pins are reserved there too. A console on UART1/2 (a custom
+    sdkconfig) is reserved as that UART.
   - **Caution** (ok, with a warning): strapping pins (ESP32 0/2/5/12/15,
-    S3 0/3/45/46, C3 2/8/9, C6 4/5/8/9/15), UART0 pins when Serial is USB
-    CDC (ROM boot log), and ADC2 pins for an `Adc` claim (unreliable while
-    Wi-Fi is on).
+    S3 0/3/45/46, C3 2/8/9, C6 4/5/8/9/15), UART0 pins when no console
+    uses UART0 (ROM boot log), and ADC2 pins for an `Adc` claim (unreliable
+    while Wi-Fi is on).
   - Classic ESP32: GPIO34–39 are input-only, so an output claim on them
     fails.
   - Overrides: `-D ESPRACK_HW_USB_IN_USE=0/1`, `-D ESPRACK_HW_UART0_CONSOLE=0/1`.

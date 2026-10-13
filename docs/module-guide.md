@@ -740,7 +740,8 @@ which peripheral or pins to use.
    hot paths. Discovery's `PeerRow` table is the in-tree example
    (commit `afd1150`).
 6. **UART budget per chip** (Arduino `Serial1`/`Serial2`):
-   - ESP32-C3 has 2 UARTs. UART0 is the console unless USB-CDC is on.
+   - ESP32-C3 has 2 UARTs. UART0 is the console, with or without USB CDC
+     on boot (the IDF console stays there), so the registry refuses it.
    - ESP32-C6 has 2 HP UARTs plus 1 LP UART.
    - ESP32-S3 has 3 UARTs: GPS on `Serial1` and PZEM on `Serial2` fit next
      to the console.

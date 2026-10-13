@@ -139,11 +139,27 @@ BoardFlags currentBoardFlags() {
 #ifdef ESPRACK_HW_UART0_CONSOLE
   f.uart0Console = ESPRACK_HW_UART0_CONSOLE;
 #elif ARDUINO_USB_CDC_ON_BOOT
-  f.uart0Console = false;  // Serial is USB CDC
+  // Serial is USB CDC, but the IDF console may still print on UART0 (it does
+  // on the prebuilt libs).
+  f.uart0Console = currentConsoleUart().num == 0;
 #else
-  f.uart0Console = true;
+  f.uart0Console = true;  // Serial is UART0
 #endif
   return f;
+}
+
+ConsoleUart currentConsoleUart() {
+  ConsoleUart c;
+#if defined(CONFIG_ESP_CONSOLE_NONE) && CONFIG_ESP_CONSOLE_NONE
+  // no console at all
+#elif defined(CONFIG_ESP_CONSOLE_UART_NUM)
+  c.num = CONFIG_ESP_CONSOLE_UART_NUM;  // -1 when the console is on USB
+#if defined(CONFIG_ESP_CONSOLE_UART_CUSTOM) && CONFIG_ESP_CONSOLE_UART_CUSTOM
+  c.tx = CONFIG_ESP_CONSOLE_UART_TX_GPIO;
+  c.rx = CONFIG_ESP_CONSOLE_UART_RX_GPIO;
+#endif
+#endif
+  return c;
 }
 
 BoardInfo currentBoardInfo() { return boardInfoFor(currentChip(), currentBoardFlags()); }

@@ -52,7 +52,14 @@ unsigned usedOf(const HwClaims& claims, HwKind kind) {
 
 }  // namespace
 
-HwRegistry::HwRegistry() : _mx(xSemaphoreCreateMutex()), _claims(currentBoardInfo()) {}
+HwRegistry::HwRegistry() : _mx(xSemaphoreCreateMutex()), _claims(currentBoardInfo()) {
+  // UART0 as the console is in the board tables. A console elsewhere (a
+  // custom sdkconfig) is reserved like any consumer resource.
+  const ConsoleUart con = currentConsoleUart();
+  if (con.num > 0) _claims.reserve(HwResource{HwKind::Uart, con.num, -1, 0, nullptr}, "console");
+  if (con.tx >= 0) _claims.board().addNote(con.tx, PinLevel::Reserved, "console TX");
+  if (con.rx >= 0) _claims.board().addNote(con.rx, PinLevel::Reserved, "console RX");
+}
 
 HwRegistry::~HwRegistry() {
   if (_mx) vSemaphoreDelete(_mx);
