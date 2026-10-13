@@ -1,0 +1,738 @@
+# Writing an ESPRack module
+
+This guide is for anyone adding a feature to ESPRack: a framework module
+in `modules/`, or an application module that lives in a consumer repo. Every
+statement is checked against the code on `feature/ses-light-support`, and
+references point at the source (`path:line` or a symbol name).
+
+The working reference is **[`modules/template/`](../modules/template)**. It's
+a small but real hardware module, a UART line monitor, that uses every
+surface described below. Start new modules by copying it.
+
+Related docs: [`ARCHITECTURE.md`](../ARCHITECTURE.md) explains how the core
+works, [`consumer-guide.md`](consumer-guide.md) shows how a project installs
+modules, and [`module-catalog.md`](module-catalog.md) lists the built-in
+modules.
+
+---
+
+## 0. Quick start
+
+1. Copy `modules/template/` to `modules/<your-dir>/` (framework module) or
+   into the consumer's own `src/` (application module, like
+   `esp-rack-light-demo/src/LightControlModule.h`).
+2. Rename everything:
+   - library name in `library.json`
+   - `TemplateModule`/`TemplateService`/`TemplateState`
+   - the descriptor id `"template"`, the feature id, the action id
+     `template.*` and `TEMPLATE_*`/`FACTORY_TEMPLATE_*` macros
+   - the config file `/config/template.json`
+3. Consumer side: add the library name to `lib_deps` (the demo lists every
+   module explicitly and uses `lib_compat_mode = strict`, see
+   `esp-rack-light-demo/platformio.ini`). Then `#include <YourModule.h>` and
+   `.install<YourModule>(ctorArgs...)` in the Builder chain.
+4. Build, open the UI and check the boot log for
+   `[ESPRack] installed '<id>' ...` and `[boot] post-<id>: free=… max_alloc=…`.
+   That line shows how much heap your `onBegin()` took (`lib/ESPRack/src/App.cpp:250-260`).
+
+---
+
+## 1. Where code goes: core vs module
+
+| Layer | Location | What belongs there |
+|---|---|---|
+| Core | `lib/ESPRack/` (library `ESPRack`) | Hardware-independent machinery only: the Module/Builder/App lifecycle, persistence, web/WS/REST plumbing, security primitives, **interfaces and arbitration** (e.g. provider interfaces such as `messaging/IMessagingProvider.h`). |
+| Module | `modules/<dir>/` (one PlatformIO library each) | Anything that talks to hardware, a network service or a protocol: WiFi, MQTT, Telegram, OTA, and future GPS/PZEM drivers. Installed with `.install<>()` and pulled in through `lib_deps`. |
+| Consumer | consumer repo `src/` | The device's own application module(s) plus `main.cpp` with the Builder chain. |
+
+**Rule:** hardware drivers never go into `lib/ESPRack`. If several modules
+need a shared concept (a time source, a location provider), the *interface*
+goes into the core and each implementation is a module.
+
+---
+
+## 2. Directory layout and naming
+
+```
+modules/<dir>/
+  library.json            # PlatformIO library manifest
+  include/<Name>Module.h  # thin ESPRack::Module subclass (header-only)
+  include/<Name>Service.h # state struct + service class
+  src/<Name>Service.cpp   # implementation
+```
+
+`library.json` (copy `modules/template/library.json`):
+
+- `"name"` is what consumers put in `lib_deps`, by convention `<Name>Module`
+  (e.g. `NTPModule`, `MqttModule`). The directory name and library name don't
+  have to match: `modules/wireguard` is `WireGuardModule`.
+- `"dependencies": [{"name": "ESPRack"}]`, plus any external library the
+  module needs, e.g. `AsyncMqttClient` for mqtt. See each module's
+  `library.json`.
+- `"frameworks": ["arduino"]`, `"platforms": ["espressif32"]`.
+  `lib_compat_mode = strict` in the consumer rejects libraries that don't
+  declare these.
+- `"build": {"srcDir": "src", "includeDir": "include"}`.
+
+**Includes are flat.** Every library's `include/` dir goes on the include
+path, so you write `#include <Module.h>`, `#include <ConfigDelegate.h>` and
+`#include <NTPModule.h>`. The `<modules/wifi/WiFiModule.h>` form shown in
+`lib/ESPRack/include/ESPRack.h` and the old README does **not** match how the
+demo builds (`esp-rack-light-demo/src/main.cpp:78-100` uses `<WiFiModule.h>`).
+
+Naming conventions in the tree:
+
+| Item | Convention | Examples |
+|---|---|---|
+| Module class | `<Name>Module` | `NTPModule`, `MqttModule`, `LightControlModule` |
+| Service class | `<Name>Service` or `<Name>SettingsService` | `TelegramService`, `NTPSettingsService` |
+| State / settings struct | `<Name>Settings` / `<Name>State` | `NTPSettings`, `LightState` |
+| Descriptor id | camelCase, unique | `"ntp"`, `"lightControl"`, `"configManagerUi"` |
+| Feature id (UI) | camelCase, often the descriptor id | `"ntp"`, `"lightState"` |
+| Action id | dotted `<scope>.<verb>` | `light.reset`, `system.restart`, `wifi.scan` |
+| Config file | `/config/<id>.json` | `/config/ntpSettings.json`, `/config/lightState.json` |
+| Factory defaults | `FACTORY_<MODULE>_<KEY>` with `#ifndef` fallback | `FACTORY_NTP_SERVER` (`modules/ntp/include/NTPSettingsService.h:68-79`) |
+
+---
+
+## 3. The Module contract
+
+`lib/ESPRack/include/Module.h:110-132`:
+
+```cpp
+class Module {
+ public:
+  virtual ~Module() = default;
+  virtual void describe(ModuleDescriptor& d) = 0;   // phase A
+  virtual void onInstall(ModuleContext& ctx) = 0;   // phase B
+  virtual void onBegin() {}                         // phase C
+  virtual void onLoop() {}                          // phase D
+  virtual void onShutdown() {}                      // phase E
+};
+```
+
+### 3.1 When each hook runs
+
+| Hook | Called from | Environment at that moment |
+|---|---|---|
+| ctor | your `.install<M>(args...)`, which constructs the module in place (`Builder.h:40-46`) | Nothing exists yet. Store the args, nothing else. |
+| `describe(d)` | `Builder::build()` step 1 (`Builder.cpp:67-74`), again in `App::begin()` (`App.cpp:194-200`, `250-254`) and on every profiled loop | Must be **pure and idempotent**. It's called many times. |
+| `onInstall(ctx)` | `Builder::build()` step 5, once, in sorted order (`Builder.cpp:161-178`) | **Filesystem not mounted, WiFi not initialized.** Construct services, `registerFeature/Action/Page`, `addTabToFeature`. Don't load config here. |
+| `onBegin()` | `App::begin()` step 4, in install order (`App.cpp:250-260`) | LittleFS mounted (step 1), `ConfigManager::begin()` done (step 2), `WiFi.mode(WIFI_AP_STA)` done (step 3). **HTTP endpoints and WS channels are not mounted yet.** That happens after all `onBegin`s in `WebManager::begin()` (step 5, `App.cpp:265`), and `server.begin()` is the last step (`App.cpp:408`). Load config, open peripherals, subscribe to providers here. |
+| `onLoop()` | `App::loop()`, every iteration, in install order, followed by `WsManager::processAllQueues()` (`App.cpp:461-465`) | Cooperative and single-threaded on `loopTask`. **Never block** (no `delay()`, no unbounded reads). |
+| `onShutdown()` | `App::shutdown()`, in reverse order (`App.cpp:487-494`) | **Currently never runs in practice.** `App::shutdown()` is only called from `~App()`, and the restart, factory-reset, OTA and auto-update paths call `ESP.restart()` directly (`modules/restart/src/RestartService.cpp:25-28`, `modules/auto-update/src/AutoUpdateService.cpp:178`). Implement it for correctness, but don't rely on it to flush state. |
+
+### 3.2 `ModuleDescriptor` (`Module.h:81-106`)
+
+| Field | Default | Meaning |
+|---|---|---|
+| `id` | `nullptr` | Unique dependency key. Also used as the manifest `buildFeatures[id]` key and in `modules[]` (`App.cpp:194-200`). Static literal. |
+| `version` | `"0.0.0"` | Informational; surfaced in the manifest/System tab. |
+| `requires_` | `{}` | Hard dependencies (ids). Builder orders you after them. |
+| `priority` | `50` | Tie-breaker 0..100, lower = earlier. |
+| `enabled` | `true` | `false` = Builder skips the install (build-flag opt-out). |
+
+### 3.3 `ModuleContext` (`Module.h:63-73`)
+
+`server`, `cfgMgr`, `web`, `ws`, `security`, `presence`, `app`,
+`deviceName`, `deviceVersion`. `security` and `presence` are refreshed
+after each install (`Builder.cpp:175-176`). Every other provider is
+reached through `ctx.app`: `app->mqtt()`, `app->telegram()`, `app->tls()`,
+`app->cert()`, `app->mothership()`, `app->wireguard()` (`App.h:83-134`).
+They are `nullptr` when the module providing them isn't installed. Always
+null-check.
+
+### 3.4 Ordering, dependencies and priorities
+
+`Builder::build()` runs Kahn's topological sort. Among the modules that are
+ready, it picks the lowest `(priority, id)` (`Builder.cpp:97-133`).
+Consequences:
+
+- **`requires_` is the only ordering guarantee.** `priority` only breaks ties
+  among modules whose dependencies are already satisfied.
+- **Optional providers:** fetch `app->mqtt()`/`app->telegram()` in
+  `onBegin()`. By then every `onInstall` has run, so every provider that
+  exists is set. The demo reads them in `onInstall` and relies on
+  priority 60 > 40 (`esp-rack-light-demo/src/LightControlModule.h:33-46`).
+  That works today but is fragile.
+- **Validation is not fail-fast**, despite the comment in `Builder.h:85-90`:
+  - A missing dependency, duplicate id or cycle only logs `log_e`.
+  - A missing dependency leaves the module's in-degree above zero, so it gets
+    reported as a "dependency cycle" and the whole install order falls back
+    to **insertion order** (`Builder.cpp:88-95`, `135-142`).
+  - Watch the boot log.
+- A module with `enabled = false` is skipped, but it still satisfies other
+  modules' `requires_` (`Builder.cpp:164-167`).
+- `.core()`, `.networking()` and `.full()` are **empty stubs** today
+  (`Builder.cpp:28-38`). Install every module explicitly.
+
+Priorities used in-tree, from each `*Module.h::describe()`:
+
+| Priority | Modules |
+|---|---|
+| 5 | `features` |
+| 6 | `uiDyn` |
+| 7 | `presence` |
+| 8 | `security` (the comment at `Module.h:60-62` still says 5) |
+| 10 | `wifi`, `ap` |
+| 12 | `cert-manager` |
+| 14 | `wireguard` |
+| 20 | `filesystem` |
+| 24 | `discovery` |
+| 30 | `ntp` |
+| 35 | `mothership` |
+| 40 | `autoUpdate`, `mqtt`, `ota`, `telegram`, `uploadFirmware` |
+| 60 | app modules (`lightControl`, `template`) |
+| 80 | `systemStatus`, `wsDiag` |
+| 85 | `configManagerUi`, `webEndpoints` |
+| 90 | `restart`, `factoryReset` |
+
+Details per module are in [`module-catalog.md`](module-catalog.md).
+
+---
+
+## 4. State and persistence
+
+### 4.1 One state struct + `StatefulService<T>`
+
+A module keeps **one** class `T` that holds both persisted settings and
+runtime values. Its service derives from `StatefulService<T>`
+(`lib/ESPRack/include/StatefulService.h`), which gives you:
+
+| API | Use |
+|---|---|
+| `read(fn)` / `read(json, reader)` | Read under the recursive mutex (`:108-118`). |
+| `update(fn, origin)` / `update(json, updater, origin)` | Mutate under the mutex. If the result is `CHANGED`, it **calls every update handler** with `origin` (`:74-99`). |
+| `updateWithoutPropagation(...)` | Mutate under the mutex, **no handlers** (`:84-106`). Use for high-rate runtime values. |
+| `addUpdateHandler(cb, allowRemove)` | Subscribe to propagated updates. `cb(const String& origin)` (`:55-62`). |
+| `_state` | The protected instance (`:127`). Prefer `read()`/`update*()` once more than one task can touch it. |
+
+`origin` is a free-form string (`"boot"`, `"tick"`, `"rest.proxy"`,
+`"ws:<cid>"`...). The UI uses it to filter its own echoes.
+
+**Threads.**
+- `onLoop()` runs on `loopTask`.
+- REST handlers, actions and page endpoints run on the AsyncTCP task.
+- WS writes are applied in `WsManager::processAllQueues()`, which runs from
+  **both** `App::loop()` and the WS event handler (`WsManager.h:733`).
+
+So anything a web path can reach must go through the service mutex, and
+hardware must be driven from `onLoop()` only. Web paths just set a flag
+(`TemplateService::_applyPending`).
+
+### 4.2 `ConfigDelegate<T>`: the file on flash
+
+Construct it in the service's init list (`ConfigDelegate.h:19-30`):
+
+```cpp
+_cfg(cfgMgr,
+     "template",                 // id — Config Manager tab label, unique
+     "/config/template.json",    // primary file
+     2048,                       // bufferSize (see below)
+     this,                       // the StatefulService<T>
+     TemplateState::readConfig,  // T -> JSON written to the file
+     TemplateState::update,      // JSON -> T (file load AND every write path)
+     false,                      // autoSave: ignored; saving is always explicit
+     nullptr,                    // optional validator(JsonObjectConst)
+     TemplateState::buildForm)   // formReader: enables secret auto-discovery
+```
+
+Semantics, verified in `lib/ESPRack/include/ConfigManager.h`:
+
+- **Load in `onBegin()`** with `_cfg.ensureLoaded()`. On the first boot (no
+  primary and no snapshot file) the updater runs on an empty object, so your
+  C++ defaults stay, and the defaults get written (`:385-418`). If a file
+  exists but fails to verify, defaults run **in RAM only** and the file is
+  kept for the next boot (`:392-413`). Load uses
+  `updateWithoutPropagation`, so no handlers fire.
+- **Saving is explicit.** Every built-in settings service registers
+  `addUpdateHandler([this](const String& o){ _cfg.saveIfChanged(o); }, false)`.
+  See `modules/ntp/src/NTPSettingsService.cpp:27-31` and the template's
+  constructor. `saveIfChanged` serializes with `readConfig`, compares a
+  **plaintext CRC32** and skips the flash write when nothing changed
+  (`:496-502`). Otherwise it does an atomic write, rotating the previous file
+  into `<primary>.snapshot` (`:504-531`).
+- `ConfigDelegate::update(fn, origin)` mutates **and** persists in one call
+  (`ConfigDelegate.h:111-120`). `subscribe(cb)` fires only after a
+  successful write (`ConfigManager.h:120`).
+- Keep **runtime values out of `readConfig`**. Otherwise every tick looks
+  "changed".
+- `saveIfChanged` allocates a `bufferSize` document each call. Don't route
+  10 Hz runtime updates through propagated `update()`. Use
+  `updateWithoutPropagation()` and push WS yourself (§6).
+
+### 4.3 Parse-back: the updater
+
+The UI's Save posts a **flat object with only the changed keys**
+(`ui/src/components/dynamic-component/DynamicSettings.tsx:276-284`) to
+`/api/v1/<id>/state`. Your updater must therefore accept partial dicts.
+Use `FormBuilder::updateValue(src, "key", field)` for each key; it's a
+no-op when the key is absent. Accept the `{settings:{...}}` envelope as
+well, like `NTPSettings::update` does (`NTPSettingsService.h:177-190`).
+
+**Field types matter** (`lib/ESPRack/include/FormBuilder.h:467-562`):
+
+- `bool` accepts only a real JSON bool.
+- `uint8_t`, `uint16_t`, `int`, `float` and `double` coerce from numbers
+  **and numeric strings**, with clamping or rounding.
+- **Any other type** (`uint32_t`, `int32_t`, `long`, `String`, ...) uses a
+  strict template that requires `is<T>()`. A numeric string sent for a
+  `uint32_t` is **silently ignored**.
+
+So use the coercing types for UI-editable numbers. Clamp after parsing,
+because REST and WS callers bypass the UI's min/max (template `update()`,
+or `LightState::updFs` at `esp-rack-light-demo/src/LightStateService.cpp:94-96`).
+
+### 4.4 Secrets (encryption at rest)
+
+Mark a field as `web::Secret("pwd", s.password.c_str())` in the form and
+pass the form reader as the **last** `ConfigDelegate` argument. At
+registration, `discoverSecretKeysFromForm` runs your form on a
+default-constructed `T` and collects every key whose option string starts
+with `secret;`. Those keys are written as `ENC:<hex>` on flash and
+decrypted on load (`ConfigManager.h:682-705`, `:441-447`, `:504-507`).
+
+Constraints:
+
+- The form key must equal the **top-level config key** (`"pwd"` in both
+  `readConfig` and `web::Secret`, as in mqtt/ap/wifi/ota).
+- The probe document is sized by **`bufferSize`**. If the form is bigger,
+  the probe overflows and secret keys after the overflow point are silently
+  missed. Size `bufferSize` for the form, not just the config file.
+- The **form GET returns secrets in plaintext** to anyone who passes the
+  feature's auth level. Never echo secrets in the state/WS reader. MQTT
+  currently does this; see the findings list in `ARCHITECTURE.md`.
+
+---
+
+## 5. UI: features, tabs and forms
+
+### 5.1 Register a typed feature
+
+From `onInstall`, via `ctx.web`. Use the fluent builder
+(`lib/ESPRack/include/WebFeatureBuilder.h`, umbrella include `<web/Web.h>`):
+
+```cpp
+_feature = web->registerFeature<TemplateState>(
+    WebFeature("template")
+        .title("UART monitor")
+        .version("0.1.0")                         // service rev (optional)
+        .component(WebComponent::DynamicSettings)
+        .authenticated()                          // feature-wide auth
+        .menu(WebMenu("UART monitor").icon("Cable").order(60))
+        .ws("/ws/template")                       // marks the feature LIVE
+        .tab(WebTab("status", "Status").icon("Monitor").live())
+        .tab(WebTab("settings", "Settings").icon("Tune").postable().adminOnly())
+        .build(),
+    this,
+    TemplateState::buildForm, TemplateState::update,   // form face
+    TemplateState::readState, TemplateState::update,   // state / WS face
+    WEBFEATURE_BUFFER_AUTO,                            // REST buffer: measured at boot
+    1024);                                             // WS frame buffer
+```
+
+This mounts the following, with paths **derived from the id**
+(`WebFeatureDelegate.h:60-121`, `WebFeatureSpec.h:20`):
+
+| Path | Served by | Gate |
+|---|---|---|
+| `GET /api/v1/<id>/form` | form reader (`buildForm`), the UI schema | feature `auth` |
+| `GET /api/v1/<id>/state` | state reader (`readState`); with the 2-reader overloads, the **form reader** otherwise | feature `auth` |
+| `POST /api/v1/<id>/state` | updater, then echo | feature `auth` **and** operator role, i.e. not a `reader` token (`:98-106`) |
+| WS channel `<id>` on the single socket | state reader + WS updater | any authenticated socket; see the WS warning in §6 |
+
+`.rest(...)`, `.readOnly(...)` and `WebAction::rest(...)` are **deprecated
+no-ops** (`WebFeatureBuilder.h:194-212`, `142-144`). Don't author paths.
+
+`registerFeature` overloads (`WebManager.h:118-161`):
+- `(spec, svc, reader, updater, buf)` uses one reader for everything.
+- `(spec, svc, restR, restU, wsR, wsU, buf)` separates the form and state
+  readers, with one buffer size.
+- The 8-argument form takes separate REST and WS buffer sizes.
+
+Prefer separate readers: the form reader builds UI schema, and the state
+reader emits flat values.
+
+`WEBFEATURE_BUFFER_AUTO` (= 0, `HttpEndpoint.h:29`) runs your form reader
+once at mount time into a 24 KB probe and sizes the buffer to the measured
+usage + 512 B (`WebFeatureDelegate.h:310-334`). Use it. Forms that are bigger
+than ~8 KB don't fit the no-PSRAM C3's `max_alloc` and need streaming.
+
+### 5.2 Menu and tabs
+
+`WebMenu` (`WebFeatureBuilder.h:73-104`):
+
+| Method | Effect |
+|---|---|
+| `.icon(name)` | MUI icon name. `WebIcon::` holds typo-safe constants; any MUI name works. |
+| `.order(n)` | Sort key. The System shell uses 900 (`App.cpp:126`). |
+| `.nestUnder(id)` | Nest under another feature/group in the tree menu. |
+| `.expandTabs(bool)` | Tabs become tree leaves (default **on**). |
+| `.role()` | Marks the device's main-role feature for the discovery menu. |
+| `.hidden()` | Keeps the feature off the menu. |
+| `.auth(...)`, `.adminOnly()`, ... | Menu **visibility** only. |
+
+`WebTab` (`:107-130`):
+
+| Method | Effect |
+|---|---|
+| `key` | Must match a `web::Form` name emitted by the form reader. |
+| `.live()` | The tab subscribes to the feature's WS channel. |
+| `.postable()` | The tab shows Save and POSTs to `/state`. |
+| `.order(n)` | Sorting, used when tabs are contributed by several modules. |
+| `.icon(name)` | Icon for the tree leaf. |
+| `.auth(...)` | **UI hint only.** The server enforces the *feature* auth level for both GET and POST, so an admin-only Settings tab on an `Authenticated` feature can still be POSTed by any non-reader user. To really protect writes, make the whole feature `adminOnly()` or split it into two features. |
+
+To contribute a tab to an existing feature, e.g. the framework's `system`
+shell (`App.cpp:120-130`):
+
+```cpp
+WebTabSpec tab; tab.key = "ota"; tab.title = "OTA"; tab.formOf = "ota"; ...
+web->addTabToFeature("system", tab);     // WebManager.h:276-285
+```
+
+`formOf = "<typedFeatureId>"` resolves to that feature's derived form path
+at manifest time (`WebFeatureSpec.h:72-77`). Use it instead of a literal
+path.
+
+Other registrations (`WebManager.h:164-193`):
+
+- `registerInfoFeature(spec, reader)` is a stateless read-only feature at
+  `spec.restRead`.
+- `registerCompoundFeature(spec)` is a menu shell whose tabs other modules
+  fill.
+- `registerPage(WebPageSpec)` is for bespoke React renderers (only
+  `FileSystem` and `Discovery` exist: `ui/src/AuthenticatedRouting.tsx:36-39`)
+  and for raw endpoints (§8).
+
+### 5.3 Form DSL reference
+
+A form reader writes one `web::Form` per tab key
+(`lib/ESPRack/include/web/Form.h`). Every field has a key, a value and an
+access flag: `rw` by default, `.readOnly()` for `r`.
+
+**Universal options** (all field types, `Form.h:41-58`):
+
+| Option | Effect |
+|---|---|
+| `.label(t)` | Label text. |
+| `.icon(muiName)` | Field icon. |
+| `.color(c)` | MUI color. |
+| `.card(groupId)`, `.cardTitle(t)`, `.cardDeletable()` | Group fields into cards. |
+| `.hideAvatar()` | Hides the field avatar. |
+| `.refetchForm()` | Refetches the form after a change. |
+| `.showIf("otherKey", "value")` | Shows the field only when another field has that value. |
+| `.loadingIf("field:prefix")` | Shows a loading state while a field has that prefix. |
+
+| Builder | Value type | Type-specific options |
+|---|---|---|
+| `web::Text(key, const char*)` | string | `.placeholder() .unit() .colorMap()` |
+| `web::Secret(key, const char*)` | string, **encrypted at rest** (§4.4) | `.placeholder() .colorMap()` |
+| `web::Textarea(key, String)` | string | `.placeholder() .colorMap()` |
+| `web::Ip(key, const char*)` | string | `.placeholder() .unit() .colorMap()` |
+| `web::TimeZones(key, label)` | string (tz label) | — |
+| `web::Checkbox / Switch / Button(key, bool)` | bool | `.placeholder() .colorMap()` |
+| `web::Number(key, double)` | **emitted as a string** at the format's precision (`:192`) | `.min() .max()` (**default 0..100, always emitted, so set them**), `.format("0.00")` (decimals), `.unit() .placeholder() .colorMap()`. No `step`. |
+| `web::Slider(key, double)` | number | `.min() .max() .step()` (defaults 0/100/1) |
+| `web::Dropdown / Radio(key, int)` | int | `.option("Label", value)` repeated |
+| `web::DateTime(key, int32_t seconds)` | epoch seconds | `.dateOnly() .timeOnly() .dateTime()` |
+| `web::Trend(key)` | read-only chart | `.mode("lineChart"/"barChart"/"pieChart")`, `.xAxis("timestamp")`, `.line(key, color, type)`, `.legend() .tooltip() .maxPoints(n)` |
+| `web::Table(key)` | rows (initially `[]`) | `.col(key, label, type[, fmt])`, `.mode("append"/"upsert"/"replace")`, `.maxRows(n)`, `.layout("grid"/"cards")`, `.primary() .secondary() .avatar() .badge()`, `.rowFill() .rowFillFallback() .rowNav()`; seed rows with `form.rowsOf(key)` |
+| `web::Files(key, restBase)` | path | `.initial(path) .uploadBase(path)` |
+| `web::Upload(key, url)` | — | `.accept(mime)` |
+| `web::Action(key[, label])` | button | `.ref("action.id")` (manifest action), or `.url() .method() .confirm() .withFields("param=field,...")` |
+| `web::Message(key, text)` | static alert, always read-only | `.level("info"/"warning"/"error"/"success")` |
+
+Rules worth knowing:
+
+- The value key is emitted **before** `"o"` because the live renderer reads
+  the first key as the value (`Form.h:84-94`). Use the builders and never
+  hand-roll fields.
+- A form reader also runs at boot on a **default-constructed** state, once
+  for the buffer probe and once for the secret probe. Keep it a pure
+  function of `s`: no service members, no hardware I/O. The demo mirrors
+  provider data into state for exactly this reason
+  (`LightStateService.cpp:336-340`).
+- The wire vocabulary lives in `web/FieldVocab.h` and is mirrored by
+  `ui/src/components/dynamic-component/utils/fieldParser.ts`. A new field
+  type needs both sides.
+- Colors baked into the form (`.color()`) only change on refetch. WS ticks
+  update values only (`NTPSettingsService.h:153-157`).
+- Editable (`rw`) fields on a **live** tab are written over WS on blur
+  (`DynamicStatus.tsx:198`, a `{"type":"p", ch, p:{key:val}}` frame).
+  They reach the **WS updater**, not the REST one.
+
+---
+
+## 6. Live status over WebSocket
+
+- **One socket per browser tab**, `WS_MUX_PATH` (default `/ws/app`,
+  `WsManager.h:50-52`), multiplexed by channel. The **channel name is the
+  feature id**. `spec.wsPath` is only an on/off flag now
+  (`WebFeatureDelegate.h:112-118`, `174`); any non-empty string works.
+- Envelope (`WsManager.h:11-17`):
+  - client → server: `sub`, `unsub`, `p` (write)
+  - server → client: `id`, `p` (push and snapshot)
+  - The server sends a snapshot to a client when it subscribes. There is no
+    replay buffer.
+- **What gets pushed** is your state reader's output: a flat object.
+  - **Trend:** emit an array under the trend's key with one point
+    `{timestamp, <lineKey>: value}` per push (template `readState`;
+    `LightStateService.cpp:123-131`).
+  - **Table:** emit an array of new rows under the table key; the frontend
+    appends, upserts or replaces according to `.mode()`
+    (`LightStateService.cpp:144-188`).
+- **When it gets pushed:**
+  - **Automatically after every propagated `update()`.** The feature's
+    `WsManager::Binding` registers its own update handler (`WsManager.h:146-156`).
+    Don't call `broadcastWs()` from your update handler too: NTP does
+    (`NTPSettingsService.cpp:252`) and sends every change twice.
+  - **Manually** with `_feature->broadcastWs(origin)` for runtime values
+    you changed with `updateWithoutPropagation()`.
+- **Cadence and throttling are the module's job.** The framework has no
+  rate limiter. Gate periodic work on `_feature->hasSubscribers()`
+  (`WebFeatureDelegate.h:296-299`) and a millis() period from settings
+  (template `pushLive()`, `NTPSettingsService::loop()` at `:306-317`).
+  The only server-side protection is per-client back-pressure, which drops
+  frames for slow clients (`WS_BACKPRESSURE_THRESHOLD`, `WsManager.h:61-63`,
+  `604-612`). `broadcastCurrentState` also skips serialization when a
+  channel has no subscribers (`:308-317`).
+- `broadcastWs()` from `onBegin()` does nothing, because the WS binding is
+  created later in `WebManager::begin()` (`WebFeatureDelegate.h:115`).
+  The `broadcastWs("boot")` calls in NTP and the demo are harmless no-ops.
+- Frame size: the `wsBufferSize` you pass (the 8-argument overload). WS
+  frames are built in one shared document sized to the largest channel's
+  capacity (`WsManager.h:236-238`).
+
+> ⚠️ **WS access control is coarse today.** The upgrade requires only
+> `IS_AUTHENTICATED` (`modules/security/include/SecurityModule.h:55-58`).
+> After that, `processRx` accepts `sub` and `p` writes for **any channel**
+> without checking the feature's auth level or the operator role
+> (`WsManager.h:646-667`). A non-admin user or a `reader` token can
+> therefore read and write admin-only live features. Until this is fixed in
+> the core, don't make a feature live if its state reader or WS updater
+> exposes something only admins may see or change.
+
+---
+
+## 7. Actions (buttons)
+
+```cpp
+web->registerAction(
+    WebAction("template.resetCounters", "Reset counters")
+        .icon(WebIcon::Refresh).color("secondary")
+        .authenticated()                    // default is Admin (WebFeatureSpec.h:102)
+        .confirm("Reset the RX counters?")  // confirm dialog; omit to fire immediately
+        .success("Counters reset")          // toast text
+        .handler([this](AsyncWebServerRequest* r) {
+          updateWithoutPropagation([](TemplateState& s) { s.bytesRx = 0; /*...*/ return StateUpdateResult::CHANGED; });
+          r->send(200, "application/json", "{\"ok\":true}");
+        }));
+```
+
+- Mounted at **`POST /api/v1/actions/<id>`** (`WebFeatureSpec.h:22-32`).
+- Gated by the action's auth level **plus the operator floor**, so `reader`
+  tokens get 403 (`WebActionEntry.h:31-33`).
+- Put the button in a form with `web::Action("a_reset").ref("template.resetCounters")`.
+  Framework actions can be referenced the same way: `system.restart`,
+  `system.factoryReset` (`LightStateService.cpp:235-239`).
+- The handler runs on the AsyncTCP task: use the service mutex, and never
+  drive hardware directly.
+- Optional `.internalHandler([](JsonVariant in, JsonVariant out, int& status){...})`
+  makes the action callable in-process by the mothership `rest.proxy` (no
+  HTTP, no JWT; `WebFeatureSpec.h:107-120`).
+
+---
+
+## 8. Custom REST endpoints
+
+For anything that isn't a form/state pair, wrap raw handlers in a
+`WebPageSpec`. The registry mounts them with auth wrapping and publishes them
+in the manifest, the Endpoints tab and OpenAPI (`WebPageEntry.h:32-73`):
+
+```cpp
+WebPageSpec page;
+page.id    = "templateLines";            // no menu.label => not in the side nav
+page.title = "UART monitor: recent lines";
+page.auth  = WebAuthLevel::Authenticated;
+WebEndpointMeta e;
+e.method  = "GET";
+e.path    = TEMPLATE_LINES_PATH;         // "/api/v1/template/lines" — a literal
+e.auth    = WebAuthLevel::Authenticated;
+e.handler = [this](AsyncWebServerRequest* r) { serveLines(r); };
+page.endpoints.push_back(std::move(e));
+web->registerPage(std::move(page));
+```
+
+- **Handler shapes:**
+  - `handler(req)` for GET or simple POST.
+  - `jsonHandler(req, JsonVariant&)` for a JSON body (POST/PUT/PATCH/DELETE).
+  - `internalHandler(in, out, status)` for the mothership proxy.
+  - Don't set both `handler` and `jsonHandler` (`WebFeatureSpec.h:129-160`).
+- **Responses:**
+  - JSON bodies go through `sendAdaptiveJson(req, fill, startBytes)`
+    (`AdaptiveJson.h:34`). It sizes the document to the payload and sheds a
+    retryable `503 heap_pressure` instead of failing an allocation. `fill`
+    may run more than once, so keep it free of side effects.
+  - Errors go through `sendProblem(req, status, title, detail)`
+    (`ProblemJson.h:28`, RFC 9457 `application/problem+json`).
+- **Paths:**
+  - Keep paths under `/api/v1/<your-id>/...`.
+  - AsyncWebServer treats a handler at `/x` as also matching `/x/...`.
+    Never mount a path that is a prefix of another module's path (see
+    "prefix-collision" in `ARCHITECTURE.md`).
+  - Unknown `/api/*` paths return a problem+json 404 (`App.cpp:332-336`).
+- **ArduinoJson 6 string semantics:** assigning a `const char*` *links* the
+  pointer, while `char*` and `String` are *copied*. Responses are serialized
+  after your lock is released (chunked, per TCP ack), so copy anything that
+  points into mutable state (template `serveLines()` / `readState()`).
+- ⚠️ **Page endpoints don't get the operator floor.** `WebPageEntry`
+  applies only `webAuthLevelToPredicate(e.auth)` (`WebPageEntry.h:38-66`),
+  so a `reader` token passes the gate on a mutating POST. Check
+  `AuthenticationPredicates::IS_OPERATOR` yourself, or use an action for
+  mutations.
+- **History and series data:** register a paged series with
+  `DataApi::instance().registerSeries({id, title, unit}, fill)`.
+  - It's served at `GET /api/v1/data/<id>?limit&cursor` (newest first,
+    `limit` ≤ 100) and readable by `reader` tokens (`DataApi.h:11-60`).
+  - Reference: the `light.events` ring in
+    `esp-rack-light-demo/src/LightStateService.cpp:558-592`.
+  - It's a good fit for energy or position history.
+
+---
+
+## 9. Messaging: Telegram and MQTT
+
+Providers are optional. Fetch them in `onBegin()`:
+
+```cpp
+#include <ITelegramProvider.h>   // pulls TelegramModule's headers: add it to lib_deps
+#include <IMqttProvider.h>       // likewise MqttModule
+
+ITelegramProvider* tg = app->telegram();   // nullptr when not installed
+IMqttProvider*     mq = app->mqtt();
+```
+
+**Telegram** (`modules/telegram/include/ITelegramProvider.h`,
+`TelegramSubscription.h`, `TelegramTypes.h:38-61`):
+
+```cpp
+TelegramSubscriptionConfig cfg;
+cfg.tagPrefix            = "UART: ";  // prepended to every message (Markdown-safe!)
+cfg.maxMessagesPerMinute = 2;         // per-subscription quota (default 60)
+// cfg.defaultChatId / cfg.defaultTopicId — empty = bot defaults
+_tg = tg->subscribe("template", cfg);         // keep the handle as a member
+...
+if (_tg.active()) _tg.send("line rate high");  // active() = valid && unmuted && bot enabled
+```
+
+`sendTo(recipient, text, opts)` overrides the destination for one message.
+`send` returns `InvalidMessagingSendId` when the quota is used up, the queue
+is full or the subscription is muted.
+
+**MQTT** (`modules/mqtt/include/IMqttProvider.h`, `MqttSubscription.h`,
+`MqttTypes.h:20-53`):
+
+```cpp
+MqttSubscriptionConfig cfg;
+cfg.defaultTopicPrefix    = "home/uart/";  // joined verbatim — keep the trailing '/'
+cfg.defaultQos            = 0;
+cfg.defaultRetain         = true;          // for "current state" topics
+cfg.maxPublishesPerMinute = 4;             // 0 = unlimited
+_mq = mq->subscribe("template", cfg);
+if (_mq.active()) _mq.publish("rate", "12.5");          // -> home/uart/rate
+_mq.onMessage("cmd/#", [this](const String& topic, const String& payload) { /*...*/ });
+```
+
+Live demo of both: `LightStateService::begin()` and `loop()`
+(`esp-rack-light-demo/src/LightStateService.cpp:487-508`, `594-646`).
+
+Including `ITelegramProvider.h`/`IMqttProvider.h` makes the provider module a
+**compile-time dependency**: its library must be in the consumer's
+`lib_deps` even when it isn't installed. The core's
+`messaging/IMessagingProvider.h` only exposes telemetry (`providerId`,
+`connectionState`, `subscriberCount`), so it can't send.
+
+---
+
+## 10. Hardware modules
+
+The SES rule: hardware drivers are modules, and the module never decides
+which peripheral or pins to use.
+
+1. **Inject the peripheral through the constructor.**
+   `explicit TemplateModule(HardwareSerial& port = Serial1)`. The consumer
+   writes `.install<TemplateModule>(Serial2)`. Do the same for `TwoWire&`
+   and `SPIClass&`.
+2. **Pins, baud and addresses are settings, not constants.**
+   - Factory defaults come from `#ifndef FACTORY_<MOD>_RX_PIN` macros that
+     the consumer overrides in `factory_settings.ini`.
+   - They're persisted through `ConfigDelegate` and editable in the UI.
+   - `-1` means "the UART's board default" (`HardwareSerial::begin(baud,
+     SERIAL_8N1, rx, tx)` keeps the default pin for `-1`).
+3. **Touch hardware only from `onLoop()`/`onBegin()`.** An update handler
+   (AsyncTCP or WS context) sets an atomic flag, and `loop()` re-opens the
+   port (`TemplateService::applyPort()`).
+4. **Never block.**
+   - Drain a bounded number of bytes per tick (`kBudget = 256` in
+     `drainPort()`).
+   - Run Modbus request/response as a state machine with a millis()
+     timeout. No `delay()` and no blocking `readBytes()` with long timeouts.
+   - If something truly blocks, give it its own FreeRTOS task and hand
+     results over through the service mutex.
+5. **Fixed memory.** Line buffers and rings are fixed arrays in state (the
+   template's `ring[8][64]`). Avoid growing `String`s and `std::vector`s in
+   hot paths. Discovery's `PeerRow` table is the in-tree example
+   (commit `afd1150`).
+6. **UART budget per chip** (Arduino `Serial1`/`Serial2`):
+   - ESP32-C3 has 2 UARTs. UART0 is the console unless USB-CDC is on.
+   - ESP32-C6 has 2 HP UARTs plus 1 LP UART.
+   - ESP32-S3 has 3 UARTs: GPS on `Serial1` and PZEM on `Serial2` fit next
+     to the console.
+   - The module mustn't assume any of this. The consumer passes the port.
+7. **Shared concepts belong in the core as interfaces.** A GPS module that
+   provides time and location should implement the core time-source and
+   location-provider interfaces (planned in SES-LIB-002) instead of calling
+   `settimeofday()` on its own. Note that the NTP module's
+   `configTzTime()` keeps SNTP running, and SNTP overwrites any clock that
+   someone else sets (`NTPSettingsService.cpp:337-358`).
+
+---
+
+## 11. Memory rules of thumb
+
+- **The no-PSRAM C3 is the binding target.** Steady `max_alloc` is about
+  9–10 KB (`WebFeatureDelegate.h:322-328`). Any single allocation near that
+  size (a big form buffer, a `DynamicJsonDocument`) can trigger
+  `503 heap_pressure` or fail.
+- **Use measured buffers:** `WEBFEATURE_BUFFER_AUTO` for forms, a small WS
+  buffer (1–2 KB) and `sendAdaptiveJson` for custom responses.
+- **Watch `[boot] post-<id>`.** It logs free/max_alloc after your
+  `onBegin()`. With `FT_LOOP_PROFILE=1` in `features.ini`, `App::loop`
+  logs per-module time, heap and stack deltas every 60 s
+  (`App.cpp:420-459`).
+- **Keep tasks and stacks lean.** Every FreeRTOS task's stack is a
+  contiguous heap block. See the AsyncTCP stack note in the demo's
+  `platformio.ini`.
+
+---
+
+## 12. Checklist before you ship a module
+
+- [ ] `library.json` name/deps/frameworks/platforms set, and the library
+      is added to the consumer's `lib_deps`
+- [ ] `describe()`: unique id, version, `requires_` for hard deps,
+      sensible priority
+- [ ] `onInstall`: construct and register only; config loaded in `onBegin`
+- [ ] Update handler calls `_cfg.saveIfChanged(origin)`, sets flags and
+      does **no** extra `broadcastWs`
+- [ ] Runtime values use `updateWithoutPropagation` + gated `broadcastWs`
+- [ ] Updater accepts partial flat dicts, uses coercing field types and
+      clamps
+- [ ] Number fields have explicit `min/max`
+- [ ] No secrets in the state/WS reader; secrets are `web::Secret` and
+      `formReader` is passed with enough `bufferSize`
+- [ ] Hardware is touched only from `onBegin/onLoop`, reads are bounded,
+      there's no `delay()`, and no pin is hardcoded
+- [ ] Mutating endpoints are actions or check `IS_OPERATOR`
+- [ ] Builds for the demo envs (C3 at least, plus your target chip)
