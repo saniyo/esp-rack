@@ -1,6 +1,7 @@
 #include <OTASettingsService.h>
 
 #include <App.h>  // ESPRack::restartDevice (SES-LIB-007)
+#include <system/LoopWdt.h>
 #include <web/Form.h>
 #include <WebManager.h>
 
@@ -114,7 +115,12 @@ void OTASettingsService::configureArduinoOTA() {
     _arduinoOTA->setMdnsEnabled(false);
     _arduinoOTA->setPort(_state.port);
     _arduinoOTA->setPassword(_state.password.c_str());
-    _arduinoOTA->onStart([]() { Serial.println(F("Starting")); });
+    // The transfer blocks the loop for the whole upload: pause the loop
+    // watchdog (SES-LIB-014) until it ends or fails.
+    _arduinoOTA->onStart([]() {
+      Serial.println(F("Starting"));
+      ESPRack::LoopWdt::pause();
+    });
     // Reboot through the framework (SES-LIB-007): the modules' onShutdown()
     // runs on the loop task and the next boot reports lastRestartReason()
     // "ota". ArduinoOTA has already answered OK when onEnd runs.
@@ -127,6 +133,7 @@ void OTASettingsService::configureArduinoOTA() {
       log_d("Progress: %u%%", (progress / (total / 100)));
     });
     _arduinoOTA->onError([](ota_error_t error) {
+      ESPRack::LoopWdt::resume();
       log_d("Error[%u]: ", error);
       if (error == OTA_AUTH_ERROR)
         log_d("Auth Failed");

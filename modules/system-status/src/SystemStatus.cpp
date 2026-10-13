@@ -17,6 +17,8 @@
 // (LIB-FIX-012). Without mothership the "Heap @ last checkin" row is skipped.
 #include <App.h>
 #include <IMothershipProvider.h>
+#include <system/BootGuard.h>
+#include <system/LoopWdt.h>
 
 SystemStatus::SystemStatus(AsyncWebServer* server, SecurityManager* securityManager, WebManager* web)
     : _server(server), _sec(securityManager), _web(web) {
@@ -134,6 +136,17 @@ void SystemStatus::buildForm(JsonObject& root,
   // hardware reset reason.
   sta.add(web::Text("last_restart", ESPRack::lastRestartReason()).readOnly()
               .label("Last restart").icon("History"));
+  // Boot-loop guard + loop watchdog (SES-LIB-014).
+  {
+    const ESPRack::BootInfo& bi = ESPRack::BootGuard::info();
+    String boot = String("#") + bi.bootCount + " · crash run " + (unsigned)bi.quickReboots +
+                  (bi.safeMode ? " · SAFE MODE" : "") + " · loop WDT " +
+                  (ESPRack::LoopWdt::armed() ? (ESPRack::LoopWdt::paused() ? "paused" : "armed") : "off");
+    sta.add(web::Text("boot", boot.c_str()).readOnly()
+                .label("Boot").icon(bi.safeMode ? "ReportProblem" : "Update")
+                .color(bi.safeMode ? "error" : "info"));
+    if (bi.safeMode) sta.add(web::Action("a_clear_safe").ref("system.clearSafeMode"));
+  }
 
   // ── Three heap views, each captured at a different observer cost ──
   //
@@ -281,6 +294,8 @@ void SystemStatus::systemStatus(AsyncWebServerRequest* request) {
     root["free_psram"]      = ESP.getFreePsram();
     root["cpu_freq_mhz"]    = ESP.getCpuFreqMHz();
     root["last_restart"]    = ESPRack::lastRestartReason();
+    root["boot_count"]      = ESPRack::BootGuard::info().bootCount;
+    root["safe_mode"]       = ESPRack::BootGuard::info().safeMode;
     root["free_heap"]       = fh_entry;
     root["sketch_size"]     = ESP.getSketchSize();
     root["free_sketch_space"] = ESP.getFreeSketchSpace();
