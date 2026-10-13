@@ -449,15 +449,20 @@ void FileSystemService::handleUpload(AsyncWebServerRequest* request,
       return;
     }
 
+    // Write to <target>.partial and promote on success (LIB-FIX-007): an
+    // interrupted upload (TCP drop, reboot, crash) can only ever leave a
+    // *.partial behind - never a truncated file under the real name - and
+    // an existing target survives a failed upload untouched. Boot-time
+    // purgeUploadDebris() then only needs to sweep *.partial.
     FsResult r;
-    _uploadFile = _manager->openWrite(target, r);
+    _uploadFile = _manager->openWrite(target + ".partial", r);
     if (!_uploadFile) {
       sendError(request, httpCodeFor(r), r);
       _uploadFailed = true;
       return;
     }
     _uploadTarget = target;
-    log_d("[upload] start: %s", target.c_str());
+    log_d("[upload] start: %s (.partial)", target.c_str());
 
     // Optional integrity validation (opt-in via headers).
     _expectedSha256 = toLowerHex(headerValue(request, "X-File-SHA256"));
@@ -491,12 +496,8 @@ void FileSystemService::handleUpload(AsyncWebServerRequest* request,
       }
       _hashEnabled = false;
       _uploadTarget = "";
-
-      String partial = capturedTarget + ".partial";
-      _manager->remove(partial, false);
-      FsResult rr = _manager->rename(capturedTarget, partial);
-      log_d("[upload] salvage rename %s -> .partial : %s",
-                    capturedTarget.c_str(), FileSystemManager::resultString(rr));
+      // The bytes are already in <target>.partial; the target is untouched.
+      log_d("[upload] kept %s.partial", capturedTarget.c_str());
     });
   }
 
@@ -505,6 +506,8 @@ void FileSystemService::handleUpload(AsyncWebServerRequest* request,
   if (len && _uploadFile) {
     if (_uploadFile.write(data, len) != len) {
       _uploadFile.close();
+      _manager->remove(_uploadTarget + ".partial", false);
+      _uploadTarget = "";
       sendError(request, 500, FsResult::IO_ERROR);
       _uploadFailed = true;
       return;
@@ -536,7 +539,7 @@ void FileSystemService::handleUpload(AsyncWebServerRequest* request,
         // Preserve the corrupt upload for inspection rather than silently deleting.
         String corruptPath = _uploadTarget + ".corrupt";
         _manager->remove(corruptPath, false);  // clear any stale .corrupt from prior attempt
-        _manager->rename(_uploadTarget, corruptPath);
+        _manager->rename(_uploadTarget + ".partial", corruptPath);
 
         DynamicJsonDocument doc(384);
         doc["ok"] = false;
@@ -558,6 +561,17 @@ void FileSystemService::handleUpload(AsyncWebServerRequest* request,
       }
       _hashEnabled = false;
     }
+    // Promote: <target>.partial -> <target>. Remove first: FAT (SD) refuses
+    // a rename onto an existing file.
+    const String partial = _uploadTarget + ".partial";
+    _manager->remove(_uploadTarget, false);
+    FsResult pr = _manager->rename(partial, _uploadTarget);
+    if (pr != FsResult::OK) {
+      log_e("[upload] promote %s failed: %s", _uploadTarget.c_str(),
+            FileSystemManager::resultString(pr));
+      sendError(request, httpCodeFor(pr), pr);
+      _uploadFailed = true;
+    }
     _uploadTarget = "";
   }
 }
@@ -577,10 +591,7 @@ void FileSystemService::handleUploadDone(AsyncWebServerRequest* request) {
       _sha256CtxInit = false;
     }
     _hashEnabled = false;
-    String partial = _uploadTarget + ".partial";
-    _manager->remove(partial, false);
-    FsResult rr = _manager->rename(_uploadTarget, partial);
-    log_d("[upload] safety-net rename: %s", FileSystemManager::resultString(rr));
+    log_d("[upload] incomplete, kept %s.partial", _uploadTarget.c_str());
     _uploadTarget = "";
     sendError(request, 500, "incomplete_upload");
     return;

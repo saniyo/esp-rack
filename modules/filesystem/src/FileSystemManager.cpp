@@ -196,7 +196,10 @@ void FileSystemManager::purgeUploadDebris(fs::FS& fs, const char* root) {
                                        : (path.endsWith("/") ? (path + n) : (path + "/" + n));
       if (child.isDirectory()) {
         queue.emplace_back(full);
-      } else if (full.endsWith(".partial") || child.size() == 0) {
+      } else if (full.endsWith(".partial")) {
+        // ONLY upload debris (LIB-FIX-007). Uploads write <target>.partial
+        // and promote on success, so a crash leaves nothing else behind;
+        // zero-byte files are legitimate (markers, empty logs, configs).
         victims.emplace_back(full);
       }
       child.close();

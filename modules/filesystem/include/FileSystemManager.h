@@ -58,9 +58,10 @@ class FileSystemManager {
 
   static const char* resultString(FsResult r);
 
-  // Recursively delete upload debris: any file ending in ".partial" or any
-  // zero-byte regular file (orphans from aborted uploads). Called at boot
-  // for flash and after async SD mount.
+  // Recursively delete upload debris: files ending in ".partial" ONLY.
+  // Uploads write <target>.partial and promote it on success, so an
+  // aborted upload leaves nothing else; zero-byte files are legitimate.
+  // Called at boot for flash and after async SD mount.
   static void purgeUploadDebris(fs::FS& fs, const char* root = "/");
 
  private:
