@@ -32,7 +32,7 @@ class SecurityModule : public ESPRack::Module {
  public:
   void describe(ESPRack::ModuleDescriptor& d) override {
     d.id       = "security";
-    d.version  = "1.0.0";
+    d.version  = "1.0.1";
     d.priority = 8;
     d.requires_ = {"presence"};   // setPresenceService needs the real ptr
   }

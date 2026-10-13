@@ -6,12 +6,12 @@
 #include <WebManager.h>
 #include <esp_random.h>  // esp_fill_random for machine-token ids
 #include <time.h>
+#include <time/TimeSync.h>
 
 #if FT_ENABLED(FT_SECURITY)
 
-// Wall clock is "synced" once NTP pushed us past this (2023-11-14) —
-// before that the RTC still reads epoch-1970 and exp math is meaningless.
-static constexpr time_t kClockSaneAfter = 1700000000;
+// Token iat/exp need a trustworthy wall clock: ESPRack::TimeSync::clockSane()
+// (a time source made the clock valid). Before that exp math is meaningless.
 
 // Human-session token lifetime (api-standardization C0). Machine tokens
 // (C3) are minted with their own ~10-year exp in mintMachineToken; this
@@ -423,11 +423,10 @@ Authentication SecuritySettingsService::authenticateJWT(String& jwt) {
     const char* tid = parsedPayload["tid"] | (const char*)nullptr;
     if (tid && *tid) {
       const uint32_t exp = parsedPayload["exp"] | 0UL;
-      if (exp) {
+      // clockSane() first, then read the clock it vouched for.
+      if (exp && ESPRack::TimeSync::clockSane()) {
         const time_t now = time(nullptr);
-        if (now > kClockSaneAfter && (uint32_t)now > exp) {
-          return Authentication();
-        }
+        if ((uint32_t)now > exp) return Authentication();
       }
       for (const SecuritySettings::ApiToken& t : _state.apiTokens) {
         if (t.tid == tid) {
@@ -463,8 +462,8 @@ String SecuritySettingsService::mintMachineToken(const String& name, const Strin
   JsonObject payload = doc.to<JsonObject>();
   payload["tid"]  = tid;
   payload["role"] = role;
-  const time_t now = time(nullptr);
-  if (now > kClockSaneAfter) {
+  if (ESPRack::TimeSync::clockSane()) {
+    const time_t now = time(nullptr);
     payload["iat"] = (uint32_t)now;
     // ~10 years; the registry's revoked bit is the real kill switch.
     payload["exp"] = (uint32_t)now + 315360000UL;
@@ -508,8 +507,8 @@ inline void populateJWTPayload(JsonObject& payload, User* user) {
   // role gates (reader/operator/admin, phase C3) will consume.
   payload["admin"] = user->admin;
   payload["role"] = user->admin ? "admin" : "user";
-  const time_t now = time(nullptr);
-  if (now > kClockSaneAfter) {
+  if (ESPRack::TimeSync::clockSane()) {
+    const time_t now = time(nullptr);
     payload["iat"] = (uint32_t)now;
     payload["exp"] = (uint32_t)now + kHumanJwtTtlSec;
   }
@@ -535,11 +534,9 @@ boolean SecuritySettingsService::validatePayload(JsonObject& parsedPayload, User
   // is sane. Legacy tokens (no exp) stay valid — no forced re-login on
   // this firmware upgrade; they age out as users re-authenticate.
   const uint32_t exp = parsedPayload["exp"] | 0UL;
-  if (exp) {
+  if (exp && ESPRack::TimeSync::clockSane()) {
     const time_t now = time(nullptr);
-    if (now > kClockSaneAfter && (uint32_t)now > exp) {
-      return false;
-    }
+    if ((uint32_t)now > exp) return false;
   }
   return true;
 }

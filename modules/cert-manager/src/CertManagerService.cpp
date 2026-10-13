@@ -30,6 +30,7 @@
 #include <WiFi.h>
 #include <ArduinoJson.h>
 #include <time.h>
+#include <time/TimeSync.h>
 
 #if defined(ESP32)
 #include <esp_mac.h>   // esp_read_mac for MAC-based CN derivation
@@ -522,14 +523,14 @@ void CertManagerService::loop() {
 
 int32_t CertManagerService::daysUntilExpiry() const {
   if (_state.not_after_ts == 0) return INT32_MIN;
-  uint32_t now_s = (uint32_t)(time(nullptr));
-  // Clock-not-set sanity: anything before 2023-11-15 means NTP
-  // hasn't synced yet on this boot. Return MAX rather than 0 so the
+  // Clock-not-set sanity: until a time source made the clock valid
+  // (TimeSync::clockSane) the expiry math is meaningless. Return MAX rather than 0 so the
   // refreshRuntimeState path doesn't slam a still-valid cert into
   // GrayZone on the boot-time race window (cert loaded from disk
   // before SNTP brought the wall clock forward). Once NTP syncs the
   // periodic refresh in loop() recomputes against real time.
-  if (now_s < 1700000000) return INT32_MAX;
+  if (!ESPRack::TimeSync::clockSane()) return INT32_MAX;
+  const uint32_t now_s = (uint32_t)(time(nullptr));  // read after the check
   int64_t diff_s = (int64_t)_state.not_after_ts - (int64_t)now_s;
   return (int32_t)(diff_s / 86400);
 }

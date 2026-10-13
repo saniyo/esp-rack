@@ -3,6 +3,8 @@
 
 #include <time.h>
 
+#include "time/TimeSync.h"
+
 namespace ESPRack {
 
 PersistentTlsClient::PersistentTlsClient() {
@@ -135,11 +137,12 @@ bool PersistentTlsClient::ensureConnected() {
   // NotBefore/NotAfter. In insecure mode (no peer validation) skip the
   // gate so bootstrap enroll can run before SNTP has landed.
   if (!_insecure) {
-    if (now < 1700000000) {  // 2023-11-14
+    if (!ESPRack::TimeSync::clockSane()) {
       log_w("[tls.persist] skipping handshake — wall clock not yet "
             "synced (epoch=%lu, need NTP)", (unsigned long)now);
       return false;
     }
+    now = time(nullptr);  // the clock clockSane() vouched for (it may just have been stepped)
     _ssl.setX509Time((uint32_t)now);
   }
   _stats.lifetime_handshakes++;
