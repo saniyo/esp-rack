@@ -311,6 +311,7 @@ class WsManager {
 
     JsonArray eps = root.createNestedArray("endpoints");
     uint32_t totalBroadcastsDropped = 0;
+    uint32_t totalOverflow = 0;
     for (auto& chPair : _channels) {
       ChannelBase* ch = chPair.second;
       if (!ch) continue;
@@ -318,6 +319,8 @@ class WsManager {
       j["path"] = ch->name;
       totalBroadcastsDropped += ch->droppedBroadcasts;
       j["dropped_broadcasts"] = ch->droppedBroadcasts;
+      totalOverflow += ch->overflowFrames;
+      j["overflow_frames"] = ch->overflowFrames;
       JsonArray cl = j.createNestedArray("clients");
       size_t cnt = 0;
       for (auto& kv : _clients) {
@@ -343,6 +346,7 @@ class WsManager {
     root["pong_timeout_ms"] = _pongTimeoutMs;
     root["total_dropped"]  = totalDropped;
     root["total_broadcasts_dropped"] = totalBroadcastsDropped;
+    root["total_overflow_frames"]    = totalOverflow;
     root["backpressure_threshold"]   = (uint32_t)WS_BACKPRESSURE_THRESHOLD;
     root["backpressure_max"]         = (uint32_t)WS_MAX_QUEUED_MESSAGES;
   }
@@ -468,6 +472,7 @@ class WsManager {
     std::function<WebAuthLevel(JsonObjectConst)> writeLevel;
     size_t jsonCapacity{MWS_DEFAULT_JSON_CAP};
     uint32_t droppedBroadcasts{0};            // skipped because no subscriber was ready
+    uint32_t overflowFrames{0};               // dropped: the state didn't fit the frame doc
 
     virtual ~ChannelBase() {}
     virtual void readInto(JsonObject& out) = 0;
@@ -701,6 +706,16 @@ class WsManager {
     root["origin_id"] = origin;
     JsonObject p = root.createNestedObject("p");
     base->readInto(p);
+    // A reader that outgrew the doc leaves a silently truncated tree: drop
+    // the frame instead of sending half a state (SES-LIB-018, as DataApi).
+    if (_txDoc->overflowed()) {
+      const uint32_t n = ++base->overflowFrames;
+      if ((n & (n - 1)) == 0) {  // 1st, 2nd, 4th, 8th...: no log flood at 10 Hz
+        log_w("[ws] frame overflow on '%s' (doc %u B), dropped (%u so far)", base->name.c_str(),
+              (unsigned)_txDoc->capacity(), (unsigned)n);
+      }
+      return false;
+    }
     serializeJson(*_txDoc, out);
     return true;
   }

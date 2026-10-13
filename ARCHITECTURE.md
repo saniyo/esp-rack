@@ -511,6 +511,11 @@ There's no replay buffer.
 
 ### 5.2 Push pipeline
 
+A state frame whose reader outgrows the shared frame doc is dropped, not sent
+truncated (SES-LIB-018). The channel's `overflow_frames` counter goes up, a
+`[ws] frame overflow` warning is logged on the 1st, 2nd, 4th… drop, and System
+→ Endpoints shows the total ("oversized").
+
 1. **Trigger.**
    - Implicit: the binding registers an update handler that broadcasts on
      every propagated `CHANGED` update (`:146-156`).

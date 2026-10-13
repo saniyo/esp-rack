@@ -156,6 +156,7 @@ void buildEndpointsHeader(JsonArray& ep, WebManager* wm, WsManager* ws) {
   const uint32_t pongTo         = statsRoot["pong_timeout_ms"] | 0;
   const uint32_t totalDrops     = statsRoot["total_dropped"] | 0;
   const uint32_t totalBcstDrops = statsRoot["total_broadcasts_dropped"] | 0;
+  const uint32_t totalOverflow  = statsRoot["total_overflow_frames"] | 0;
   const uint32_t thr            = statsRoot["backpressure_threshold"]   | 0;
   const uint32_t maxQ           = statsRoot["backpressure_max"]         | 0;
 
@@ -172,9 +173,10 @@ void buildEndpointsHeader(JsonArray& ep, WebManager* wm, WsManager* ws) {
   FormBuilder::addTextField(ep, "ws_keepalive", AF::R, keepaliveStr.c_str(), icon("Sync"));
 
   String bpStr = String(totalDrops) + " per-client / " + String(totalBcstDrops) +
-                 " whole-broadcast, threshold " + String(thr) + "/" + String(maxQ);
-  FormBuilder::addTextField(ep, "ws_backpressure", AF::R, bpStr.c_str(),
-                            icon("Warning"), color((totalDrops || totalBcstDrops) ? "warning" : "info"));
+                 " whole-broadcast / " + String(totalOverflow) + " oversized, threshold " +
+                 String(thr) + "/" + String(maxQ);
+  FormBuilder::addTextField(ep, "ws_backpressure", AF::R, bpStr.c_str(), icon("Warning"),
+                            color((totalDrops || totalBcstDrops || totalOverflow) ? "warning" : "info"));
 
   JsonObject clTbl = FormBuilder::addTableField(ep, "ws_clients_table", AF::R,
       col("path",      "Endpoint",   "text"),

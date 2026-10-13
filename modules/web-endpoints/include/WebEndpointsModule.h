@@ -9,7 +9,7 @@
 class WebEndpointsModule : public ESPRack::Module {
  public:
   void describe(ESPRack::ModuleDescriptor& d) override {
-    d.id = "webEndpoints"; d.version = "1.0.0"; d.priority = 85;
+    d.id = "webEndpoints"; d.version = "1.0.1"; d.priority = 85;
   }
   void onInstall(ESPRack::ModuleContext& ctx) override {
     svc_.reset(new WebEndpointsService(ctx.server, ctx.security, ctx.web, ctx.ws));

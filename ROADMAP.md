@@ -41,6 +41,8 @@ Work beyond the plan that has landed:
     clock validity), SNTP routed through it, `system.setTime`, the
     `ILocationProvider` interface; `clockSane()` replaces the three
     hard-coded clock checks. Plan: `docs/plans/ses-lib-002-timesync.md`.
+  - SES-LIB-018: a WS state frame that overflows the frame doc is dropped and
+    counted (`overflow_frames`), never sent truncated.
   - LIB-FEAT-001 (core 0.5.0): external HW module instances
     (`Builder::installExtHw`), hardware claims checked against the board's
     pin profile and each other (`app->hw()`), System → Hardware,
