@@ -320,7 +320,7 @@ class ConfigManager {
   // key was found in plaintext form during a decrypt pass — caller
   // uses that to trigger a one-shot migration save so the file is
   // re-written in encrypted form on the next tick.
-  static void encryptSecretsInPlace(JsonObject root, const std::vector<String>& keys);
+  static bool encryptSecretsInPlace(JsonObject root, const std::vector<String>& keys);
   static bool decryptSecretsInPlace(JsonObject root, const std::vector<String>& keys);
 
   // Probe-mode signal: returns true while ConfigManager is calling a
@@ -438,10 +438,10 @@ class ConfigManager {
         JsonObject in = inDoc.to<JsonObject>();
         in.set(dataConst);
 
-        // Decrypt every declared secretKey IN PLACE before the updater
-        // sees the JSON. Returns true if at least one secretKey was
-        // plaintext on disk — that's the legacy / first-boot upgrade
-        // path that needs a normalize-save to encrypt the file.
+        // Decrypt secrets IN PLACE before the updater sees the JSON (also
+        // any top-level ENC: record left by the probe's fail-safe). Returns
+        // true when the file needs a normalize-save: a secret was plaintext
+        // on disk, or a non-secret was stored encrypted.
         bool foundPlaintext = ConfigManager::decryptSecretsInPlace(in, _d.secretKeys);
 
         _d.service->updateWithoutPropagation(in, _d.updater);
@@ -503,8 +503,13 @@ class ConfigManager {
 
       // Encrypt secret fields IN PLACE just before atomicWrite — the
       // file on disk gets the ENC:<hex> form, but the in-memory state
-      // (and any subsequent reader() call) stays plaintext.
-      ConfigManager::encryptSecretsInPlace(data, _d.secretKeys);
+      // (and any subsequent reader() call) stays plaintext. A ciphertext
+      // that doesn't fit the buffer would leave a null in the document:
+      // never write that (the previous file stays).
+      if (!ConfigManager::encryptSecretsInPlace(data, _d.secretKeys)) {
+        mgr.unlock();
+        return false;
+      }
 
       // Was a primary file already on disk before this save? If so,
       // atomicWrite() rotates it into <primary>.snapshot, which counts
@@ -732,6 +737,11 @@ inline void ConfigManager::discoverSecretKeysFromForm(ConfigDescriptor<T>& desc)
     for (JsonPair kv : root) {
       if (kv.value().is<const char*>()) desc.secretKeys.emplace_back(kv.key().c_str());
     }
+    // Every string now travels as "ENC:" + IV + blocks in hex (~2x + 68
+    // chars): give the save/load documents room for that, or saves would
+    // abort (see encryptSecretsInPlace). Best effort, capped.
+    const size_t grown = desc.bufferSize * 2 + 128 * desc.secretKeys.size();
+    desc.bufferSize = grown > 16384 ? 16384 : grown;
   }
 
   if (!desc.secretKeys.empty()) {

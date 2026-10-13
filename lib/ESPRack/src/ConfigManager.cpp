@@ -444,37 +444,61 @@ bool ConfigManager::hexToCrc32(const char* hex, uint32_t& out) {
 // because UI logic distinguishes "no password set" from "password
 // configured" via emptiness checks.
 
-void ConfigManager::encryptSecretsInPlace(JsonObject root, const std::vector<String>& keys) {
+// false: a ciphertext didn't fit the document (the value is then null) —
+// the caller must not write this document to flash.
+bool ConfigManager::encryptSecretsInPlace(JsonObject root, const std::vector<String>& keys) {
 #if FT_ENABLED(FT_SECRETS_VAULT)
+  bool ok = true;
   for (const String& k : keys) {
     if (k.isEmpty() || !root.containsKey(k)) continue;
     String v = root[k].as<String>();
     if (v.isEmpty()) continue;
     if (SecretsVault::isEncrypted(v)) continue;  // already ENC: — idempotent
     String enc = SecretsVault::encrypt(v);
-    root[k] = enc;
+    if (!root[k].set(enc)) {
+      log_e("[CFG] secret '%s' doesn't fit the save buffer once encrypted — save aborted", k.c_str());
+      ok = false;
+    }
   }
+  return ok;
 #else
   // Encryption compiled out — settings classes still declare secretKeys
   // (auto-discovered via the form probe) but the walk is a no-op.
   // Passwords land on disk as plaintext.
   (void)root; (void)keys;
+  return true;
 #endif
 }
 
+namespace {
+bool listedKey(const std::vector<String>& keys, const char* k) {
+  for (const String& x : keys) {
+    if (x == k) return true;
+  }
+  return false;
+}
+}  // namespace
+
+// Returns true when the file must be rewritten (normalize-save):
+//  * a secret key was plaintext on disk (legacy / first boot) -> encrypt it;
+//  * a NON-secret key was in ENC: form. The probe's fail-safe encrypts every
+//    top-level string when it can't prove which keys are secret; a later boot
+//    whose probe succeeds knows only the real secrets, so those values must
+//    still be decrypted here (by shape, not by the key list) or the service
+//    would get the literal "ENC:..." text (e.g. as its SSID). The rewrite
+//    stores them plain again.
 bool ConfigManager::decryptSecretsInPlace(JsonObject root, const std::vector<String>& keys) {
 #if FT_ENABLED(FT_SECRETS_VAULT)
-  bool foundPlaintext = false;
-  for (const String& k : keys) {
-    if (k.isEmpty() || !root.containsKey(k)) continue;
-    String v = root[k].as<String>();
+  bool needRewrite = false;
+  for (JsonPair kv : root) {
+    if (!kv.value().is<const char*>()) continue;
+    const String v = kv.value().as<String>();
     if (v.isEmpty()) continue;
-    if (!SecretsVault::isEncrypted(v)) {
-      // Legacy plaintext on disk — leave the value as-is so the
-      // service still gets its password, but flag the migration so
-      // the caller forces a normalize-save (which will run encryptInPlace
-      // and rewrite the file in ENC: form on the next tick).
-      foundPlaintext = true;
+    const bool secret = listedKey(keys, kv.key().c_str());
+    if (secret ? !SecretsVault::isEncrypted(v) : !SecretsVault::looksEncrypted(v)) {
+      // Legacy plaintext secret on disk: leave it so the service still gets
+      // its password, and have the caller rewrite the file encrypted.
+      if (secret) needRewrite = true;
       continue;
     }
     String dec = SecretsVault::decrypt(v);
@@ -482,31 +506,39 @@ bool ConfigManager::decryptSecretsInPlace(JsonObject root, const std::vector<Str
     // mismatch from device swap). Surface that as an empty value to
     // the service: WiFi will fail to connect, MQTT will refuse auth,
     // operator notices and retypes the credential. The ENC: record on
-    // disk stays untouched (cleared in RAM only) so flashing the
-    // firmware that owns the key back onto this flash still recovers
-    // the original secret.
+    // disk stays untouched (cleared in RAM only, no rewrite for this key)
+    // so flashing the firmware that owns the key back onto this flash
+    // still recovers the original value.
     if (dec.isEmpty()) {
-      log_w("[CFG] secret '%s' failed to decrypt (foreign device key or corrupt record) — cleared; re-enter via UI",
-            k.c_str());
+      log_w("[CFG] '%s' failed to decrypt (foreign device key or corrupt record) — cleared; re-enter via UI",
+            kv.key().c_str());
+      kv.value().set("");  // a literal: stored by pointer, always fits
+      continue;
     }
-    root[k] = dec;
+    if (!kv.value().set(dec)) {  // the load document is full
+      log_e("[CFG] '%s' doesn't fit the load buffer once decrypted — cleared", kv.key().c_str());
+      kv.value().set("");
+      continue;
+    }
+    if (!secret) needRewrite = true;  // fail-safe residue: store it plain again
   }
-  return foundPlaintext;
+  return needRewrite;
 #else
   // Encryption compiled out — values load as plaintext, with ONE
-  // exception: ENC:<hex> residue written by a vault-enabled build. The
-  // literal blob must never reach a service as a live credential — the
-  // WiFi driver rejects >64-char passphrases in an endless connect loop
-  // and softAP silently truncates to a password nobody knows, either of
-  // which strands the device. Clear it in RAM only: the record stays on
-  // disk so a vault-enabled firmware flashed back later still recovers
-  // the secret. Operator re-enters credentials to use this build.
-  for (const String& k : keys) {
-    if (k.isEmpty() || !root.containsKey(k)) continue;
-    String v = root[k].as<String>();
-    if (SecretsVault::looksEncrypted(v)) {
-      log_w("[CFG] secret '%s' is vault-encrypted but FT_SECRETS_VAULT=0 — cleared; re-enter via UI", k.c_str());
-      root[k] = "";
+  // exception: ENC:<hex> residue written by a vault-enabled build (any
+  // top-level string, see above). The literal blob must never reach a
+  // service as a live credential — the WiFi driver rejects >64-char
+  // passphrases in an endless connect loop and softAP silently truncates to
+  // a password nobody knows, either of which strands the device. Clear it in
+  // RAM only: the record stays on disk so a vault-enabled firmware flashed
+  // back later still recovers the value. Operator re-enters it to use this
+  // build.
+  (void)keys;
+  for (JsonPair kv : root) {
+    if (!kv.value().is<const char*>()) continue;
+    if (SecretsVault::looksEncrypted(kv.value().as<String>())) {
+      log_w("[CFG] '%s' is vault-encrypted but FT_SECRETS_VAULT=0 — cleared; re-enter via UI", kv.key().c_str());
+      kv.value().set("");
     }
   }
   return false;
