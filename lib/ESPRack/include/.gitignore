@@ -1,0 +1,3 @@
+# UI bundles are generated into each consumer's .pio/www/ (SES-LIB-003);
+# one here is a leftover of the old scheme and fails the build.
+WWWData*.h

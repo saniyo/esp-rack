@@ -4,18 +4,22 @@ const MiniCssExtractPlugin = require('mini-css-extract-plugin');
 const ProgmemGenerator = require('./progmem-generator.js');
 const TerserPlugin = require('terser-webpack-plugin');
 
-// Where to write the baked WWWData.h. The consumer's sync_ui.py
-// resolves the active esp-rack library location (sibling clone vs
-// PIO-cloned at .pio/libdeps/<env>/ESPRack/) and exports the include
-// path via ESPRACK_INCLUDE_DIR. We honor that env var; the relative-
-// path fallback is the legacy local-dev hardcode and only fires when
-// somebody runs `npm run build` outside the PIO-driven flow (rare).
+// Where to write the baked WWWData.h (SES-LIB-003): the consumer's own
+// <project>/.pio/www/, exported by its sync_ui.py as ESPRACK_WWW_DIR (and
+// put on the include path there). ESPRACK_INCLUDE_DIR is the old scheme
+// (bundle inside the shared library) — still honoured so a consumer whose
+// scripts aren't migrated yet keeps building. A manual `npm run build` in
+// <project>/interface/ writes to ../.pio/www/.
 function resolveProgmemOutputPath() {
-  const fromEnv = process.env.ESPRACK_INCLUDE_DIR;
-  if (fromEnv) {
-    return path.join(fromEnv, 'WWWData.h');
+  if (process.env.ESPRACK_WWW_DIR) {
+    return path.join(process.env.ESPRACK_WWW_DIR, 'WWWData.h');
   }
-  return '../../esp-rack/lib/ESPRack/include/WWWData.h';
+  if (process.env.ESPRACK_INCLUDE_DIR) {
+    console.warn('[progmem] ESPRACK_INCLUDE_DIR (old scheme): writing into the shared library. '
+      + 'Update scripts/ from esp-rack/scripts/consumer (SES-LIB-003).');
+    return path.join(process.env.ESPRACK_INCLUDE_DIR, 'WWWData.h');
+  }
+  return '../.pio/www/WWWData.h';
 }
 
 module.exports = function override(config, env) {
@@ -36,9 +40,9 @@ module.exports = function override(config, env) {
     const terserPlugin = config.optimization.minimizer.find((plugin) => plugin instanceof TerserPlugin);
     terserPlugin.options.extractComments = false;
 
-    // build progmem data files — written into ESPRack's include path so
-    // App.cpp's `#include <WWWData.h>` resolves. The library's .gitignore
-    // excludes WWWData.h so it never gets committed.
+    // build progmem data files — into the consumer's .pio/www/, which its
+    // sync_ui.py prepends to the include path for App.cpp's
+    // `#include <WWWData.h>`.
     config.plugins.push(new ProgmemGenerator({
       outputPath: resolveProgmemOutputPath(),
       bytesPerLine: 20,
