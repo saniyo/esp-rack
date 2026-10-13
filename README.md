@@ -56,11 +56,11 @@ also has to list it in `lib_deps`. See
 | Path | What |
 |---|---|
 | `lib/ESPRack/` | Core library (`ESPRack`). Hardware-independent: Module/Builder/App lifecycle, ConfigManager, the web layer (manifest, form DSL, REST, WS), security primitives, provider interfaces. |
-| `modules/<name>/` | One PlatformIO library per feature: wifi, ap, security, mqtt, telegram, ntp, ota, discovery, mothership, wireguard, … Full list in [`docs/module-catalog.md`](docs/module-catalog.md). `modules/template/` is the skeleton to copy for new modules. |
+| `modules/<name>/` | One PlatformIO library per feature: wifi, ap, security, mqtt, telegram, ntp, ota, discovery, mothership, wireguard, … Full list in [`docs/module-catalog.md`](docs/module-catalog.md). `modules/template/` is the skeleton to copy for new modules; `modules/template-ext-hw/` for hardware drivers installed as instances. |
 | `ui/` | The React UI. A consumer's build copies it in and embeds it into the firmware as `WWWData.h`. |
 | `api/` | Generated OpenAPI spec + manifest dump (`scripts/gen_openapi.py`). |
 | `scripts/` | Dev tools: OpenAPI generator, mock mothership server, serial-log converter, `check_versions.py` (version/bundle drift), `check_module_deps.py` (cross-module includes vs declared dependencies), `check_security.py` (on-device auth regression). |
-| `test-host/` | Host unit tests for the Arduino-free parts of the core (`time/TimeArbiter`): CMake + a Unity-compatible shim, any C++17 compiler; `run-host-tests.ps1` on Windows. |
+| `test-host/` | Host unit tests for the Arduino-free parts of the core (`time/TimeArbiter`, `hw/HwClaims`): CMake + a Unity-compatible shim, any C++17 compiler; `run-host-tests.ps1` on Windows. |
 | `docs/` | Guides (below) and `docs/plans/`, the design notes and audits behind past work. |
 
 ## Documentation

@@ -768,6 +768,63 @@ which peripheral or pins to use.
    runs the hooks through the shutdown handler, but on whatever task called
    it.
 
+### 10.1 External HW modules (instances)
+
+A driver that may be installed more than once (two energy meters, three
+relay boards) is an **external HW module**. It derives from
+`ESPRack::ExtHwModule` (`hw/ExtHwModule.h`) and the consumer installs named
+instances:
+
+```cpp
+.installExtHw<TemplateExtHwModule>("relay1", /*outPin=*/4, /*buttonPin=*/9)
+.installExtHw<TemplateExtHwModule>("relay2", /*outPin=*/5)
+```
+
+Start from `modules/template-ext-hw/`. Its pieces:
+
+1. **The id names everything.** The module id is `instanceId()` (Builder
+   uses it whatever `describe()` says). The feature id and WS channel are
+   `featureId()`. The config is `configId()` / `configPath()` (`hw-<id>`,
+   `/config/hw-<id>.json`). Actions are `"<id>.<verb>"`. Registrations keep
+   pointers, so build those strings into member buffers.
+2. **`describeHw(d)`** lists what the instance uses now, from its settings:
+   `d.add(HwKind::Gpio, outPin, "out", kHwOutput)`. Use −1 for "not set" and
+   `kHwOptional` for a resource the instance works without. Set
+   `d.disabled` when the settings switch the instance off. The boot pass
+   calls it before `onBegin`, so load the config there
+   (`_cfg.ensureLoaded()`). Bus pins are shared claims with the bus number
+   and a role: `d.add(HwKind::Gpio, sda, "sda", kHwShared, bus)`, next to
+   `HwKind::I2cBus` (shared) and the device's `HwKind::I2cAddr`.
+3. **Load verbatim, check web writes.** Give `ConfigDelegate` the plain
+   updater, so a saved clash shows up as `Conflict` instead of losing the
+   file. Make it fill in the factory pins when the payload is empty (no
+   file yet, or a reset to defaults, which starts from `T{}`). Give `registerFeature` an updater that applies to a copy, calls
+   `hw()->validate(*this, proposed)` and, when that isn't ok, calls
+   `ESPRack::setUpdateError(c.reason)` and returns
+   `StateUpdateResult::ERROR`. The UI then shows the reason, e.g. "GPIO35
+   reserved: octal PSRAM/flash".
+4. **After a change, `hw()->update(*this)`.** Call it in the update handler,
+   then switch pins in `loop()`.
+5. **`hwState()` other than `Ok` means: hands off.** Don't drive the pins
+   of an instance in `Conflict`, and release the pins it drove before, but
+   only if `hw()->heldByOther(*this, HwKind::Gpio, pin)` is false: the pin
+   may already belong to another instance that drives it.
+6. **Interfaces.** Other code finds the instance with
+   `app->hw()->find<IThing>("relay1")`. Implement
+   `queryInterface()` with `ESPRack::ifaceIs(ifaceId, IThing::kIfaceId)`.
+   The interface carries a versioned id (`"thing.v1"`). Shared interfaces go
+   in a header that the drivers implementing them share, not in the core.
+7. **`restoreFactoryHw()`.** Put the ctor pins back and save. System →
+   Hardware's "Restore factory pins" calls it, then restarts.
+8. **Framework modules** that own pins don't become instances. They call
+   `ctx.app->hw()->reserveGpio(pin, "reason")` in `onInstall`, as the
+   filesystem module does for the SD card.
+
+`install<M>()` on an `ExtHwModule` and `installExtHw<M>()` on a plain module
+both fail to compile with a message saying which one to use. An invalid id
+(only `[a-z0-9_-]`, 1–23 chars) or a duplicate id is logged. That instance
+isn't installed, and System → Hardware lists it as "Not installed".
+
 ---
 
 ## 11. Memory rules of thumb

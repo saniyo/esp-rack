@@ -106,6 +106,8 @@ App**. `App::begin()` hard-codes `beginPingPong(20, 60000)` (`App.cpp:270`).
 - Registers the framework-owned compound feature **`system`**, the "System"
   menu shell at order 900. Modules add tabs to it with
   `addTabToFeature("system", …)`.
+- Builds the `HwRegistry` (`app->hw()`, §2.8) with the running board's pin
+  profile.
 
 ### 2.3 `App::begin()`
 
@@ -117,6 +119,7 @@ App**. `App::begin()` hard-codes `beginPingPong(20, 60000)` (`App.cpp:270`).
 | 1 | Mount LittleFS **without format**, retry once, and format only as a last resort, logging loudly (`:218-230`). |
 | 2 | `ConfigManager::begin()` sets up the `/config` work directories. |
 | 3 | `WiFi.mode(WIFI_AP_STA)`: lwIP comes up before any module touches sockets. |
+| 3.5 | `HwRegistry::boot()` (§2.8): every external HW instance describes its pins, in install order; the first claimer wins. |
 | 4 | `onBegin()` for every module in install order, logging `[boot] post-<id>: free=… max_alloc=…` after each (`:250-260`). |
 | 5 | `WebManager::begin()` mounts `/api/v1/ui/manifest` and calls `registerEndpoints()` on every registered entry. **This is when module HTTP routes and WS channels come into existence.** |
 | 6 | `WsManager::beginPingPong(20, 60000)`. |
@@ -232,6 +235,68 @@ and `App::loop()` ticks it first.
 - **Events.** `subscribe()` listeners get `BecameValid`, `BecameInvalid`,
   `Stepped` (valid before and after), `SourceChanged`, `Stale`, `Disputed`,
   `TzChanged`, always on the loop task.
+
+### 2.8 Hardware (`hw/`, LIB-FEAT-001)
+
+`HwRegistry` (`app->hw()`) is a core object, always present. It knows the
+board's pins and the hardware every external HW module instance uses. It
+knows no driver.
+
+- **Board profile** (`hw/BoardProfile.h`, tables in `hw/BoardTables.h`).
+  Built for ESP32, S3, C3 and C6 from `CONFIG_IDF_TARGET_*`, sdkconfig and
+  the runtime (`psramFound()`). `BoardProfile.cpp` `static_assert`s the
+  tables against the SoC headers (`spi_pins.h`, `uart_pins.h`,
+  `usb_pins.h`, `adc_channel.h`, `soc_caps.h`), so a wrong pin fails the
+  build. Other targets get no pin table; only conflicts between instances
+  are checked.
+  - **Reserved** (a claim fails): flash; PSRAM (ESP32 16/17, S3 CS 26);
+    S3 octal PSRAM/flash 33–37; USB D−/D+ when USB-Serial-JTAG or USB CDC
+    is in use (the prebuilt libs run a secondary USB-JTAG console);
+    UART0 when it's the console; `Builder::reserveGpio()` pins; the SD
+    card's `BOARD_SD_MMC_*` pins (reserved by the filesystem module).
+  - **Caution** (ok, with a warning): strapping pins (ESP32 0/2/5/12/15,
+    S3 0/3/45/46, C3 2/8/9, C6 4/5/8/9/15), UART0 pins when Serial is USB
+    CDC (ROM boot log), and ADC2 pins for an `Adc` claim (unreliable while
+    Wi-Fi is on).
+  - Classic ESP32: GPIO34–39 are input-only, so an output claim on them
+    fails.
+  - Overrides: `-D ESPRACK_HW_USB_IN_USE=0/1`, `-D ESPRACK_HW_UART0_CONSOLE=0/1`.
+- **Claims** (`hw/HwClaims.h`, Arduino-free, host-tested). An instance
+  claims GPIOs, UARTs, I2C buses and addresses, SPI buses and CS pins,
+  RMT/LEDC/PCNT channels and ADC pins (`HwResource`). `kHwShared` lets
+  several instances hold one bus and its pins. A bus has one set of pins:
+  a shared pin is shared only with the same bus number and role ("sda" of
+  bus 0), and a second device can't put that bus on other pins. I2C
+  addresses (per bus) and CS pins stay unique. RMT/LEDC/PCNT may be claimed
+  as `kHwAnyChannel` and are then counted against the chip's budget. On the
+  classic ESP32, TX and RX channel n are the same channel.
+- **Boot pass** (`App::begin()` step 3.5). The registry runs it after
+  `ConfigManager::begin()` and before any `onBegin`, in install order
+  (Builder's order: dependencies, priority, then id; not the order of the
+  `installExtHw` calls). An
+  instance whose resource is taken or reserved becomes `Conflict` and must
+  leave its hardware alone; the rest keep running. A required resource at
+  −1 makes it `NotConfigured`; a disabled instance holds nothing.
+- **Changes.** A settings updater calls `validate()` and refuses with
+  `setUpdateError(reason)` (`UpdateError.h`); the REST write paths return
+  that reason in the 400 problem. After a change the instance calls
+  `update()`.
+- **Instance names.** The instance id is the module id, the feature id and
+  the WS channel. Its file is `/config/hw-<id>.json` (ConfigManager id
+  `hw-<id>`), so it never shares a framework module's file. `system` isn't
+  allowed. WebManager logs a duplicate entry id of the same kind.
+- **Lookup.** `find<I>(id)` and `forEach<I>(fn)` go through
+  `ExtHwModule::queryInterface(I::kIfaceId)`. Ids are versioned strings
+  compared by content; there's no RTTI.
+- **UI.** System → Hardware tab (`GET /api/v1/system/hardware/form`): the
+  chip, the peripheral claims against the budget, every instance
+  (`typeName@version`, its resources, its state and reason, plus rejected
+  ids), and the reserved/caution pins. The admin action
+  `system.restoreFactoryHw` ("Restore factory pins") calls
+  `restoreFactoryHw()` on every instance on the loop task, then restarts.
+- **Threading.** `validate()`/`update()`/`state()` may run on any task. The
+  registry mutex is a leaf lock: module code (`describeHw()`) is never called
+  while it's held.
 
 ---
 

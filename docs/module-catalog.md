@@ -75,6 +75,7 @@ This is an audit snapshot of `feature/ses-light-support`, dated 2026-10-13:
 | wireguard | `WireGuardModule` | 14 | wifi, cert-manager | On-demand WireGuard tunnel to the mothership |
 | ws-diag | `WsDiagModule` | 80 | presence | System → Clients tab (presence table) |
 | template | `TemplateModule` | 60 | none | Skeleton to copy for new modules: UART line monitor (see module-guide) |
+| template-ext-hw | `TemplateExtHwModule` | 60 | none | Skeleton for external HW modules installed as instances: output pin + button (module-guide §10.1) |
 
 ---
 
@@ -239,8 +240,8 @@ This is an audit snapshot of `feature/ses-light-support`, dated 2026-10-13:
   - background tar archive and per-file hash jobs; SD format, mount and unmount.
   - `/flash/config` is write-protected.
 - **Install:** `.install<FileSystemModule>()`. SD support is compile-time (`BOARD_HAS_SD` and `BOARD_SD_*` macros in `modules/filesystem/include/FileSystemSd.h`). Preset: listed for `.core()`, stub.
-- **Module identity:** id `"filesystem"`, version `"1.0.0"`, priority 20, no deps (`modules/filesystem/include/FileSystemModule.h:21-23`). Hooks:
-  - `onInstall`;
+- **Module identity:** id `"filesystem"`, version `"1.0.1"`, priority 20, no deps (`modules/filesystem/include/FileSystemModule.h`). Hooks:
+  - `onInstall` reserves the SD card's `BOARD_SD_MMC_*` pins in `app->hw()` (LIB-FEAT-001);
   - `onBegin` registers the backends, purges debris and adds the read-only prefix (`:29-40`).
 - **Public API:**
   - `FileSystemManager` (`modules/filesystem/include/FileSystemManager.h:154-198`) and the `FileSystemBackend` interface (`modules/filesystem/include/FileSystemBackend.h:6-37`).
@@ -638,6 +639,31 @@ This is an audit snapshot of `feature/ses-light-support`, dated 2026-10-13:
 - **Caveats:**
   - It inherits the framework-level issues: the UI Save path and WS
     authorization (see ROADMAP §0).
+
+### `template-ext-hw` — TemplateExtHwModule
+- **Purpose:** The starting point for an external HW module installed as
+  instances (LIB-FEAT-001): an output pin (relay, LED) and an optional push
+  button that toggles it. Not meant for production.
+- **Install:** `#include <TemplateExtHwModule.h>`, then
+  `.installExtHw<TemplateExtHwModule>("relay1", outPin, buttonPin)`. The
+  button pin defaults to −1. Add `TemplateExtHwModule` to `lib_deps`. Not
+  part of the root bundle.
+- **Module identity:** id = the instance id, version `"0.1.0"`, priority 60.
+  `typeName()` is `"template-ext-hw"`.
+- **Hardware:** `describeHw()` claims `Gpio out` (`kHwOutput`) and
+  `Gpio button` (`kHwOptional`). Settings writes are checked with
+  `hw()->validate()`. In any state other than `Ok` the pins are released.
+- **Public API:** `ITemplateOutput` (`"templateOutput.v1"`): `setOutput()`,
+  `output()`, found with `app->hw()->find<ITemplateOutput>(id)`.
+- **Web/REST/WS:**
+  - Typed feature `<id>`, Authenticated: `/api/v1/<id>/form`, `/state`, WS
+    channel `<id>`.
+  - Tabs: `status` (live) and `settings` ("Pins", postable, admin-only).
+  - Action `<id>.toggle`.
+- **Persistence:** `/config/hw-<id>.json`, ConfigDelegate id `hw-<id>`,
+  keys `enabled, out_pin, button_pin, active_low, on`. With no file, or
+  after a reset to defaults, the ctor pins apply.
+- **library.json deps:** `ESPRack`.
   - The template keeps its secret-free state reader and its operator-safe
     action exactly so that it works around those issues.
 

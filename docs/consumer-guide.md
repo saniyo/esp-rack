@@ -403,6 +403,32 @@ consumer's `src/`, like the demo's, or as a module library.
 - Without network time an admin can set the clock on the NTP status tab
   ("Set time") or with `POST /api/v1/actions/system.setTime?epoch=<UTC s>`.
 
+### 9.4 External hardware
+
+- **Instances.** Install external HW modules (from `esp-rack-modules`, or
+  your own based on `modules/template-ext-hw`) with their factory pins:
+
+  ```cpp
+  .installExtHw<MeterModule>("meter1", Serial1, /*rx=*/4, /*tx=*/5)
+  .installExtHw<MeterModule>("meter2", Serial2, /*rx=*/6, /*tx=*/7)
+  ```
+
+  Ids are `[a-z0-9_-]`, 1–23 chars, unique among all modules, and not
+  `system`. When two instances want the same pin, the first in Builder's
+  install order (priority, then id) gets it.
+- **Your own pins.** `.reserveGpio(pin, "reason")` keeps every instance off
+  a pin that you drive yourself or that the board uses (a status LED, a
+  sensor on the PCB). The SD card's `BOARD_SD_MMC_*` pins are reserved by
+  the filesystem module.
+- **Lookup.** Use `app->hw()->find<IMeter>("meter1")` or
+  `app->hw()->forEach<IMeter>(fn)` after `build()`. A returned instance may
+  be in `Conflict`; it reports that itself.
+- **System → Hardware** shows the chip, every instance and its state, and
+  the reserved and caution pins. Its "Restore factory pins" action (admin)
+  puts every instance back on the pins given here and restarts. A pin
+  change in an instance's UI that hits a reserved or taken pin is refused
+  with the reason.
+
 ---
 
 ## 10. Checklist: a new consumer from scratch

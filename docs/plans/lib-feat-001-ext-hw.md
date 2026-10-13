@@ -1,8 +1,8 @@
 # LIB-FEAT-001 — External HW module instances, resource claims, board pin profile
 
-Status: **agreed** with the SES firmware session (answers Q1–Q6, additions A1–A5)
-and with the owner (2026-10-13). External HW modules live in
-`esp-rack-modules`.
+Status: **implemented** (core 0.5.0, see "Implementation notes"). Agreed
+with the SES firmware session (answers Q1–Q6, additions A1–A5) and with the
+owner (2026-10-13). External HW modules live in `esp-rack-modules`.
 
 ## 1. Motivation
 
@@ -247,3 +247,57 @@ omitted when there are no instances: Q5).
 - **Q6 `describe()` for instances**: `id = instanceId`; requires_/priority stay the
   module's. Should the Hardware tab also show the module type's version
   (`typeName()@version`)?
+
+## Implementation notes
+
+What differs from, or adds to, the proposal above:
+
+- **Pin facts verified** against the pioarduino 54.03.21-2 SoC headers and
+  enforced by `static_assert` in `BoardProfile.cpp` (flash/MSPI, UART0,
+  S3 USB, ADC2, GPIO masks, UART/I2C/SPI/RMT/LEDC/PCNT budgets). S3 flash
+  is 27–32; GPIO26 (MSPI CS1) is reserved only with PSRAM. C3/C6 USB pins
+  come from the datasheets (no header defines them). Classic ESP32 is
+  included: flash 6–11, PSRAM 16/17, input-only 34–39, 16 LEDC channels,
+  one shared pool of 8 RMT channels.
+- **USB pins** count as in use when USB-Serial-JTAG is a console (the
+  prebuilt libs run it as a secondary console) or `ARDUINO_USB_CDC_ON_BOOT`.
+  **UART0** is the console unless Serial is USB CDC; then its pins are
+  only a caution (ROM boot log). Overrides: `ESPRACK_HW_USB_IN_USE`,
+  `ESPRACK_HW_UART0_CONSOLE`.
+- **Unknown targets**: no pin table, only conflicts between instances.
+- **`HwDescriptor::disabled`**: an instance switched off by its settings
+  holds nothing and shows `Disabled`.
+- **Reasons for refused writes**: `UpdateError.h`
+  (`setUpdateError()`/`takeUpdateError()`, one slot owned by the setting
+  task). Feature `POST /state`, `HttpPostEndpoint` and rest.proxy put the
+  reason into the 400 problem. Before this change they returned a generic
+  text or an empty 400.
+- **Registry lock is a leaf**: `describeHw()` is always called outside it.
+- **Rejected instances** (invalid id, duplicate id, disabled at build
+  time) aren't installed and are listed as "Not installed" in the tab.
+  External instances are indexed after framework modules, so an instance id
+  can't displace a framework module.
+- **The filesystem module** reserves `BOARD_SD_MMC_CLK/CMD/D0` (and D1–D3
+  when 4-bit and defined) in `onInstall` (Q3).
+- `modules/template-ext-hw` is excluded from the root bundle, like
+  `modules/template` (`scripts/check_versions.py`).
+- **Instance files** are `/config/hw-<id>.json` (id `hw-<id>`) rather than
+  `/config/<id>.json`, so an instance can't share a framework module's
+  file (e.g. `cert` and cert-manager's `/config/cert.json`). `system` isn't
+  a valid instance id. Builder uses `instanceId()` as the module id
+  whatever `describe()` says. WebManager logs duplicate entry ids.
+- **Bus pins**: shared pin claims carry the bus number and a role. They're
+  shared only on the same bus and in the same role, and a bus can't be put
+  on other pins by a second device. I2C addresses with bus −1 are on bus 0.
+  Bus numbers are range-checked. On the classic ESP32, fixed RMT TX and RX
+  channels with the same number collide.
+- **`heldByOther()`**: an instance releases a pin it drove only if no other
+  instance claims it now.
+- **Measured cost** (pioarduino 54.03.21-2, light-demo, no instances,
+  against `feature/ses-light-support` 4fcdd68): C3 flash +15,612 B
+  (2,582,790), static RAM +104 B; about 0.45 KB heap for the registry. That
+  is over the §6 estimate of 3 KB. The main parts: the Hardware tab
+  (≈4.3 KB of code), the claim rules (≈2.5 KB), the registry and the
+  Builder/App wiring (≈3 KB), and the reason texts and pin tables
+  (≈2 KB). Only the running chip's pin table is compiled. The probe with
+  two `template-ext-hw` instances is 2,611,020 B on C3.

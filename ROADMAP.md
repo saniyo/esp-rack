@@ -41,6 +41,10 @@ Work beyond the plan that has landed:
     clock validity), SNTP routed through it, `system.setTime`, the
     `ILocationProvider` interface; `clockSane()` replaces the three
     hard-coded clock checks. Plan: `docs/plans/ses-lib-002-timesync.md`.
+  - LIB-FEAT-001 (core 0.5.0): external HW module instances
+    (`Builder::installExtHw`), hardware claims checked against the board's
+    pin profile and each other (`app->hw()`), System → Hardware,
+    `modules/template-ext-hw`. Plan: `docs/plans/lib-feat-001-ext-hw.md`.
   - **Scope rule (owner, 2026-10-13):** esp-rack takes framework fixes and
     improvements only. Product logic for SES Light (astro, energy counting,
     schedules: the former `ESPRackPure`, reverted in `33c07e6`) lives in
