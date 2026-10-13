@@ -32,6 +32,10 @@ otherwise.
 │   ProblemJson · DataApi · SecurityManager iface · SecretsVault       │
 │   DeviceIdentity · HeapMonitor · TLSContextService · provider ifaces │
 ├──────────────────────────────────────────────────────────────────────┤
+│ lib/ESPRackPure — pure C++17: no Arduino/IDF, no heap, host-tested   │
+│   civil · TimeArbiter · PosixTz · LocalCalendar · SunCalc (NOAA)     │
+│   TimeWindow · CounterTracker · LimitMonitor                         │
+├──────────────────────────────────────────────────────────────────────┤
 │ Arduino-ESP32 3.x / IDF 5 (pioarduino) · ESPAsyncWebServer/AsyncTCP  │
 │ (ESP32Async) · ArduinoJson 6 · LittleFS                              │
 └──────────────────────────────────────────────────────────────────────┘
@@ -47,6 +51,18 @@ Messaging already works this way: `lib/ESPRack/include/messaging/IMessagingProvi
 is the core interface, and `modules/telegram` and `modules/mqtt` implement
 it. Planned interfaces such as time-source arbitration and a location
 provider (SES-LIB-002+) follow the same pattern.
+
+Logic that needs neither hardware nor the framework lives one level lower,
+in `lib/ESPRackPure` (`"platforms": "*"`): civil-time math, the time-source
+arbiter, a libc-free POSIX TZ evaluator and local calendar keys, NOAA sun
+position and crossings, daily time windows, a counter-discontinuity tracker
+and a limit monitor with hysteresis. It has no globals, no static
+constructors, no heap and no Arduino includes, so the linker drops whatever
+a firmware doesn't call, and it builds on any C++17 compiler. The core
+declares it as a dependency; it is unit-tested on the host under
+`test-host/` (MSVC through CMake, or `pio test -e native` on GCC hosts)
+against fixtures generated from IANA tzdata and the NOAA equations
+(`scripts/gen_tz_fixture.py`, `scripts/gen_sun_fixture.py`).
 
 The React UI (`ui/`) is part of the library. Consumers don't write
 frontend code: every module describes its UI in C++, and the UI renders it

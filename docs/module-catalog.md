@@ -31,6 +31,25 @@ This is an audit snapshot of `feature/ses-light-support`, dated 2026-10-13:
 > The current list is [`ROADMAP.md` §0.4](../ROADMAP.md#04-known-issues).
 > Entries below are kept as audited.
 
+## Pure library: `lib/ESPRackPure`
+
+Not a module: a dependency of the core (`lib/ESPRack/library.json`), version
+0.1.0, `"frameworks": "*"`, `"platforms": "*"`. Headers are included as
+`<ESPRackPure/X.h>`, everything is in `namespace ESPRack`. No globals, no
+heap, no Arduino includes; unused parts are dropped by the linker. Tests:
+`test-host/test/test_*` (SES-LIB-006).
+
+| Header | What |
+|---|---|
+| `Civil.h` | `civil::` days ↔ Y-M-D (Hinnant), `utcFromCivil`, `weekdayMon0`, `isLeap`, `daysInMonth`, `epochFromBuildDate(__DATE__)`. |
+| `TimeArbiter.h` | Ranks time sources (NTP > GPS > ExtRtc > Manual > RtcHold) with freshness, plausibility, step thresholds, big-jump confirmation, 2-of-3 dispute, operator override, uncertainty-based validity, SNTP `externalSync`, `restoreHold`. Caller supplies "now". |
+| `PosixTz.h` | POSIX TZ rule (tzfile footer) without libc: `offsetAt`, `isDst`, `toLocal`, `toUtc` with gap/fold policy. |
+| `LocalCalendar.h` | `cal::` `monthKey` (YYYYMM), `monthBounds`, `dateKey` (YYYYMMDD), `eveningKey`, `atLocal`. |
+| `SunCalc.h` | `astro::` NOAA sun position (optional refraction), `solarNoon`, `nextCrossing` (hour-angle guess + secant, scan fallback; polar → false). |
+| `TimeWindow.h` | `tw::` half-open intervals; `forEvening` resolves a local daily window for one night (evening pivot, mask on the evening date, fold/gap endpoint rules). |
+| `CounterTracker.h` | Credits a hardware counter across resets, wraps and glitches (10-row decision table); never credits an unconfirmed jump. |
+| `LimitMonitor.h` | Threshold with hysteresis and trip/clear dwell; invalid samples restart the dwell. |
+
 ## Conventions used by all modules
 
 - **Lifecycle.** A module fills `describe()` (id, version, `requires_`, `priority`) and implements `onInstall`. It can also override `onBegin`, `onLoop` and `onShutdown` (`lib/ESPRack/include/Module.h:110-132`). `Builder::build()` runs Kahn's topological sort and always picks the lowest `(priority, id)` that is ready (`lib/ESPRack/src/Builder.cpp:97-133`). `App::begin()` calls `onBegin` in the same order (`lib/ESPRack/src/App.cpp:250-260`).

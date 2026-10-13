@@ -1,6 +1,6 @@
 {
   "name": "ESPRack",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Modular firmware framework for ESP32 (Arduino 3.x / IDF 5+) — plug-and-play modules, manifest-driven UI, encryption-at-rest. Core library; pair with modules/* peers to unlock features.",
   "keywords": [
     "esp32",
@@ -41,6 +41,10 @@
     {
       "name": "ArduinoJson",
       "version": "^6.21.6"
+    },
+    {
+      "name": "ESPRackPure",
+      "version": "^0.1.0"
     }
   ],
   "build": {

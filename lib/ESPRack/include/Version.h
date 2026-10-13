@@ -23,7 +23,7 @@
 // fails otherwise.
 
 #define ESPRACK_VERSION_MAJOR 0
-#define ESPRACK_VERSION_MINOR 3
+#define ESPRACK_VERSION_MINOR 4
 #define ESPRACK_VERSION_PATCH 0
 
 #define ESPRACK_VERSION_STR_HELPER(MA, MI, PA) #MA "." #MI "." #PA

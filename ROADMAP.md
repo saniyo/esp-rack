@@ -18,7 +18,7 @@
 | 1 — MVF | **Done**, with two deviations: the example lives in the sibling repo `esp-rack-light-demo`, not `examples/`, and the Builder presets `.core()/.networking()/.full()` are still empty stubs (`lib/ESPRack/src/Builder.cpp:28-38`). |
 | 2 — module parity | **Done, then exceeded.** All planned modules exist, plus features, ui-dyn, presence, restart, factory-reset, cert-manager, mothership, wireguard and discovery: 23 modules in total. |
 | 3 — UI as an npm package | **Not started.** The UI is copied into consumers by `sync_ui.py` and embedded as `WWWData.h`. |
-| 4 — release engineering | **Not started.** No CI, no CHANGELOG, no tags. Versions disagree: root `library.json` 0.1.8, `lib/ESPRack/library.json` 0.3.0, `Version.h` 0.2.5. The root single-library bundle omits cert-manager, discovery, mothership and wireguard, so git-URL consumers can't use them. |
+| 4 — release engineering | **Started.** `Version.h` is the single version source (0.4.0), checked against both `library.json` files and the root bundle's coverage of `lib/*` and `modules/*` by `scripts/check_versions.py` (LIB-FIX-010, SES-LIB-006). Host unit tests exist for `lib/ESPRackPure` (`test-host/`). Still no CI, no CHANGELOG, no tags. |
 | 5 — polish | **Started.** `modules/template/` (module skeleton) and the docs set: `ARCHITECTURE.md`, `docs/module-guide.md`, `docs/consumer-guide.md`, `docs/module-catalog.md`. Still open: Doxygen, `MIGRATION.md`, an external third-party module. |
 
 Work beyond the plan that has landed:
@@ -36,11 +36,15 @@ Work beyond the plan that has landed:
 
 - **SES series** on `feature/ses-light-support`, the library side of the
   `esp-rack-ses-light` consumer (ESP32-S3):
-  - SES-LIB-001 documentation (this update).
-  - Next: a time-source arbitration interface in the core (NTP/GPS/RTC
-    priority plus validity), replacing the three hard-coded "clock sane after
-    1700000000" checks in `PersistentTlsClient.cpp`,
-    `CertManagerService.cpp` and `SecuritySettingsService.cpp`.
+  - SES-LIB-001 documentation.
+  - SES-LIB-006: `lib/ESPRackPure` (civil, TimeArbiter, PosixTz,
+    LocalCalendar, SunCalc, TimeWindow, CounterTracker, LimitMonitor) and the
+    `test-host/` harness — [host] done, plan in
+    `docs/plans/ses-lib-006-esprack-pure.md`.
+  - Next (SES-LIB-002): core `TimeSync` on top of `TimeArbiter`, replacing
+    the three hard-coded "clock sane after 1700000000" checks in
+    `PersistentTlsClient.cpp`, `CertManagerService.cpp` and
+    `SecuritySettingsService.cpp`.
   - Next: a location-provider interface.
   - Next: `gps` (UART/NMEA) and `pzem` (PZEM-004T v3 Modbus) modules, and
     possibly `sun`/astro.
@@ -854,10 +858,11 @@ Packages (or npmjs.com if public). Consumer projects can `npm i` it.
 
 ## 11. Testing strategy
 
-* **Unit tests** (host-native, gtest-ish via PlatformIO Test): for
-  pure-C++ helpers — ConfigManager.crc32OfJson, SecretsVault round-trip,
-  SecurityHash verify, FormBuilder option-string emission, dependency
-  resolution algorithm in Builder.
+* **Unit tests** (host-native): `test-host/` runs the `lib/ESPRackPure`
+  suites (Unity API; MSVC via `run-host-tests.ps1`, GCC via
+  `pio test -e native`). Candidates to move there next: ConfigManager
+  crc32OfJson, SecretsVault round-trip, SecurityHash verify, FormBuilder
+  option-string emission, the Builder dependency resolution.
 * **Integration tests** (on-device, automated boot + assertions over WS):
   spin up `examples/light-control/` on a CI runner with a wired ESP32-C6,
   scripted assertions (login, save settings, flash factory reset, etc.).

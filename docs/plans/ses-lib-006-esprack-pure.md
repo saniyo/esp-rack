@@ -78,6 +78,22 @@ None (pure). Reentrant, no globals, no heap, stack only.
 - ≤ 12 KB flash with everything referenced (measured in §7 by a size probe).
 - C3 app-partition headroom: measured at the task's build step (demo, huge_app.csv).
 
+**Measured** (pioarduino 54.03.21-2, Arduino; probe = a minimal sketch that calls every
+public entry point with volatile inputs; ESPRackPure symbols only):
+
+| | C3 (RISC-V, soft double) | S3 (Xtensa) |
+|---|---|---|
+| unused (dependency declared, nothing called) | 0 B (identical image) | 0 B |
+| everything referenced, ESPRackPure code | 14.7 KB | 10.9 KB |
+| of which astro (SunCalc) | ~7.2 KB | ~4.2 KB |
+| libm added beyond what the demo firmware already links | ~2.5 KB (atan, atan2, sqrt) | ~2.1 KB |
+
+The 12 KB budget holds on S3 (the SES target) and is exceeded by ~2.7 KB on C3, where
+every double operation is a soft-float call. SunCalc already avoids tan/asin/acos/fmod/
+ceil (−6.8 KB of libm on C3). A C3 consumer that doesn't call `astro::` pays ~7.5 KB.
+Light-demo (no ESPRackPure calls): RAM unchanged on C3/C6/S3; C3 image 2 552 222 B, the
+same as a de3263d build from a path of equal length (19 `__FILE__` strings carry the path).
+
 ## 7. Acceptance
 
 1. [host] civil round-trip 1970–2100; `epochFromBuildDate`.
