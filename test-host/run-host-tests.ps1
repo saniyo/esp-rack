@@ -5,7 +5,9 @@
 #   powershell -File test-host/run-host-tests.ps1 [-Filter test_civil] [-Clean] [-BuildDir C:/esprack-tb]
 #
 # -BuildDir: MSBuild's file tracker fails past MAX_PATH (260); from a deep
-# checkout pass a short build directory.
+# checkout pass a short build directory. The tracker also ignores everything
+# under %TEMP% (MSB8029): a checkout there is always rebuilt from scratch, or
+# edited headers and fixtures would not trigger recompilation.
 param(
   [string]$Filter = "",
   [switch]$Clean,
@@ -23,7 +25,9 @@ $ctest = Join-Path (Split-Path -Parent $cmake) "ctest.exe"
 if ($Clean -and (Test-Path $build)) { Remove-Item -Recurse -Force $build }
 & $cmake -S $here -B $build -G "Visual Studio 17 2022" -A x64 | Out-Null
 if ($LASTEXITCODE) { throw "configure failed" }
-& $cmake --build $build --config Release -- /nologo /verbosity:minimal
+$rebuild = @()
+if ($here.StartsWith([IO.Path]::GetTempPath(), [StringComparison]::OrdinalIgnoreCase)) { $rebuild = @("--clean-first") }
+& $cmake --build $build --config Release @rebuild -- /nologo /verbosity:minimal
 if ($LASTEXITCODE) { throw "build failed" }
 $args = @("--test-dir", $build, "-C", "Release", "--output-on-failure")
 if ($Filter) { $args += @("-R", $Filter) }
