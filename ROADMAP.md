@@ -1,8 +1,151 @@
 # ESPRack — Roadmap & Architecture
 
-> **Status**: pre-v0.1 (planning). This document is the source of truth for
-> what we're building, in what order, and why. Update it as decisions land.
-> Created: 2026-05-06.
+> **Status**: pre-release, under active development. §0 below is the current
+> state. §1–§14 are the original plan from 2026-05-06, kept as the project
+> diary. Some details there, such as `.core()` presets, `/rest` paths and
+> `ESPRACK_*` flags, have been superseded; the code and
+> [`ARCHITECTURE.md`](ARCHITECTURE.md) are authoritative.
+
+---
+
+## 0. Status (2026-10-13)
+
+### 0.1 Phases
+
+| Phase | State |
+|---|---|
+| 0 — skeleton | **Done.** Both repos exist, are on GitHub, and have README, LICENSE and `.gitignore`. |
+| 1 — MVF | **Done**, with two deviations: the example lives in the sibling repo `esp-rack-light-demo`, not `examples/`, and the Builder presets `.core()/.networking()/.full()` are still empty stubs (`lib/ESPRack/src/Builder.cpp:28-38`). |
+| 2 — module parity | **Done, then exceeded.** All planned modules exist, plus features, ui-dyn, presence, restart, factory-reset, cert-manager, mothership, wireguard and discovery: 23 modules in total. |
+| 3 — UI as an npm package | **Not started.** The UI is copied into consumers by `sync_ui.py` and embedded as `WWWData.h`. |
+| 4 — release engineering | **Not started.** No CI, no CHANGELOG, no tags. Versions disagree: root `library.json` 0.1.8, `lib/ESPRack/library.json` 0.3.0, `Version.h` 0.2.5. The root single-library bundle omits cert-manager, discovery, mothership and wireguard, so git-URL consumers can't use them. |
+| 5 — polish | **Started.** `modules/template/` (module skeleton) and the docs set: `ARCHITECTURE.md`, `docs/module-guide.md`, `docs/consumer-guide.md`, `docs/module-catalog.md`. Still open: Doxygen, `MIGRATION.md`, an external third-party module. |
+
+Work beyond the plan that has landed:
+- Mothership fleet client and PKI (`docs/plans/mothership-roadmap.md`) and
+  the WireGuard tunnel.
+- API v1 standardization C0–C5 (`docs/plans/api-standardization.md`).
+- The single multiplexed WebSocket.
+- UDP discovery replacing mDNS (`docs/plans/device-mesh-discovery.md`).
+- Heap work (`docs/plans/memory-fragmentation-master-plan.md`,
+  `heap-baseline-fix.md`).
+- The fluent web DSL (`web-form-dsl.md`, `web-feature-builder.md`) and the
+  tree menu (`tree-menu.md`).
+
+### 0.2 In flight
+
+- **SES series** on `feature/ses-light-support`, the library side of the
+  `esp-rack-ses-light` consumer (ESP32-S3):
+  - SES-LIB-001 documentation (this update).
+  - Next: a time-source arbitration interface in the core (NTP/GPS/RTC
+    priority plus validity), replacing the three hard-coded "clock sane after
+    1700000000" checks in `PersistentTlsClient.cpp`,
+    `CertManagerService.cpp` and `SecuritySettingsService.cpp`.
+  - Next: a location-provider interface.
+  - Next: `gps` (UART/NMEA) and `pzem` (PZEM-004T v3 Modbus) modules, and
+    possibly `sun`/astro.
+
+### 0.3 Branches
+
+| Branch | State |
+|---|---|
+| `master` | **Stale**: `8f8a262`, 2026-05-09, 128 commits behind the integration line. |
+| `feature/ses-light-support` | **Current integration line.** Contains `feature/ws-single-session` → `feature/api-v1` → `feature/device-mesh`, `feature/web-feature-builder`, `feature/web-buffer-auto-sizing`, `feature/wg-esprack-lib`, `feature/wireguard-tunnel`, `debug/esp32async-migration`, and the merged `mothership-phase1/2`. |
+| `feature/mothership-phase4-rotation`, `feature/mship-remote-control`, `feature/mship-ui-direct-monitor`, `feature/pki-approval-flow` | Side branches whose work was **partly** carried into the line under new commits. By subject: 3/5, 23/34, 24/44 and 9/15 commits respectively. The rest needs a keep-or-drop decision. |
+
+### 0.4 Known issues (verified by reading the code; not reproduced on hardware unless stated)
+
+**High: functional and security**
+
+1. **UI Save is broken since C1 (`2adff81`).** `DynamicTabPanel` POSTs to
+   `tab.restPath`, which is the GET-only `/api/v1/<id>/form`. The request
+   lands in the `/api/*` 404. The UI should POST to the manifest's
+   `rest.update` (`ui/src/components/dynamic-component/DynamicFeature.tsx:45-52`,
+   `lib/ESPRack/include/WebFeatureDelegate.h:81-107`).
+2. **WS has no per-channel authorization.** Any authenticated identity,
+   including a guest or a `reader` token, can `sub` to any channel and write
+   through `{"type":"p"}` (`lib/ESPRack/include/WsManager.h:646-667`).
+   - For example, it can replace cert-manager's device certificate, key, CA
+     bundle and PKI URL, because `CertManagerSettings::staUpd` is the full
+     `update()`.
+   - NTP and MQTT are also writable this way.
+3. **Tab-level `auth` is UI-only.**
+   - wifi, ap, mqtt and ntp are `Authenticated` features with admin-only
+     Settings tabs.
+   - So a non-admin user can `GET …/form`, which contains the WiFi, AP and
+     MQTT passwords in plaintext (`web::Secret` emits the value), and can
+     `POST …/state`.
+4. **MQTT's state reader echoes the broker password.** Every WS push and
+   `GET /api/v1/mqtt/state` carries it
+   (`modules/mqtt/include/MqttSettingsService.h:198`).
+5. **The device supports only two live browser clients.**
+   `cleanupClients(2)` used to apply to each socket. Now there's a single
+   socket, so the oldest client gets closed whenever more than two are
+   connected (`WsManager.h:321`).
+6. **Install-order auth holes.** `uiDyn` (priority 6) and `presence` (7)
+   install before `security` (8) and capture `NullSecurityManager`. As a
+   result, `/api/v1/ui/dynamic` and `/ws/presence` are effectively
+   unauthenticated.
+7. **`WebPageSpec` endpoints have no operator floor.** A `reader` token
+   passes the gate on mutating page POSTs (`WebPageEntry.h:38`).
+8. **Default credentials ship in the defaults:**
+   - admin/admin and guest/guest;
+   - AP and OTA password `esp-react`, with OTA enabled by default;
+   - the discovery PSK placeholder.
+9. **`tokens.create` builds JSON by concatenation.** A token name containing
+   `"` breaks the response, and the one-time token is lost
+   (`modules/security/src/SecuritySettingsService.cpp:265-266`).
+
+**Medium: correctness**
+
+10. **Builder validation isn't fail-fast.** A missing dependency is logged as
+    a "cycle", and install falls back to insertion order. Presets are empty.
+    `bufferSize()/cors()/wsKeepAlive()` are never applied.
+11. **`onShutdown()` never runs.** Every restart path calls `ESP.restart()`
+    directly.
+12. **Duplicate WS frames.** NTP, Telegram and cert-manager call
+    `broadcastWs` in their update handler as well as relying on the
+    binding's auto-broadcast.
+13. **OTA partial update resets the port and password to factory**
+    (`modules/ota/include/OTASettingsService.h:57-59`).
+14. **The filesystem boot purge deletes every zero-byte file on flash**
+    (`modules/filesystem/src/FileSystemManager.cpp:199`).
+15. **The secret-key auto-discovery probe uses `bufferSize`.** If a form
+    outgrows it, the secrets past that point are silently stored in
+    plaintext.
+16. **`GET /state` for features with a separate WS reader returns the status
+    payload, and some readers mutate state.** MQTT `pendingSeenTopics` and
+    the demo's `mqtt_pending` are cleared by a REST GET.
+17. **The cert-manager state machine overwrites its transient states.**
+    Enrolling, Renewing and Failed are replaced on the next update, as
+    reported in the module audit (`docs/module-catalog.md`).
+18. **Stale artefacts and comments:**
+    - `api/manifest-dump.json` and `openapi.*` still list `mdns` and per-feature `ws`;
+    - `App.cpp:154-161` refers to a `custom_sdkconfig` that doesn't exist;
+    - `Module.h:60-62` says security has priority 5 (it's 8);
+    - `WsManager.h:5` says `/ws`, but the socket is `/ws/app`;
+    - several `/rest/...` and "per-feature /ws/* path" comments remain;
+    - `DISCOVERY_PROTOCOL.md` is out of date.
+
+**Carried over from `docs/plans/open-issues-2026-05-22.md`**
+
+| # | Issue | State |
+|---|---|---|
+| 1 | WireGuard tunnel close | Diagnostics added (`26bed96`), fix pending. |
+| 2 | `fwVer`/`hwRev` missing from the enroll body | **Still open.** |
+| 3 | mbedTLS fragmentation | Mitigated for cert-manager and mothership by BearSSL static buffers. Telegram still uses `WiFiClientSecure`. |
+| 4 | trial re-enroll policy | Policy decision. |
+
+**Consumer side (`esp-rack-light-demo`)**
+
+- The app never persists its settings: there's no
+  `_cfg.saveIfChanged()` handler.
+- The C3 env uses `huge_app.csv`, which has a single app slot, so OTA can't
+  install.
+- `platformio.ini` duplicates the `[factory_settings]` and `[features]`
+  sections.
+
+See [`docs/consumer-guide.md`](docs/consumer-guide.md) (appendix).
 
 ---
 
@@ -776,22 +919,22 @@ Three audiences, three docs:
 
 - [x] Directory created
 - [x] `ROADMAP.md` (this file)
-- [ ] `README.md` placeholder
-- [ ] `.gitignore` (PIO, npm, IDE)
-- [ ] `LICENSE` (MIT)
-- [ ] Scaffold dirs `lib/`, `modules/`, `ui/`, `scripts/` with `.gitkeep`
-- [ ] `git init` + first commit
-- [ ] (later) push to GitHub as new repo `esp-rack`
+- [x] `README.md` placeholder
+- [x] `.gitignore` (PIO, npm, IDE)
+- [x] `LICENSE` (MIT)
+- [x] Scaffold dirs `lib/`, `modules/`, `ui/`, `scripts/` with `.gitkeep`
+- [x] `git init` + first commit
+- [x] (later) push to GitHub as new repo `esp-rack`
 
 ### 14.2 `esp-rack-light-demo/` (consumer repo)
 
-- [ ] Directory created (sibling to `esp-rack/`)
-- [ ] `README.md` placeholder noting it consumes `esp-rack`
-- [ ] `.gitignore`
-- [ ] `LICENSE`
-- [ ] Scaffold dirs `src/`, `interface/`, `data/` with `.gitkeep`
-- [ ] `git init` + first commit
-- [ ] (later) push to GitHub as new repo `esp-rack-light-demo`
+- [x] Directory created (sibling to `esp-rack/`)
+- [x] `README.md` placeholder noting it consumes `esp-rack`
+- [x] `.gitignore`
+- [x] `LICENSE`
+- [x] Scaffold dirs `src/`, `interface/`, `data/` with `.gitkeep`
+- [x] `git init` + first commit
+- [x] (later) push to GitHub as new repo `esp-rack-light-demo`
 
 Once Phase 0 is locked in, Phase 1 starts with extracting the framework
 core out of the existing `lib/framework/` in `ESP-SES-LightService` and

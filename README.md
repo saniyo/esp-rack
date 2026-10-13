@@ -1,18 +1,27 @@
 # ESPRack
 
-> Modular firmware framework for ESP32 (S3 / C3 / C6 / classic) running
-> Arduino 3.x / IDF 5+. Plug-and-play modules, manifest-driven UI,
-> encryption-at-rest for password fields.
+> Modular firmware framework for ESP32 (C3 / C6 / S3 / classic) on
+> Arduino-ESP32 3.x / ESP-IDF 5 (pioarduino platform). You install
+> plug-in modules, the React UI is generated from a manifest the device
+> serves, the device exposes a versioned REST + WebSocket API, and
+> secret settings are encrypted on flash.
 
-**Status**: pre-v0.1 — see [`ROADMAP.md`](ROADMAP.md) for the plan.
+**Status:** pre-release, under active development. The framework and 23
+modules run on hardware in the reference consumer
+[`esp-rack-light-demo`](../esp-rack-light-demo). The API is not frozen.
+Current state, work in flight and known problems are in
+[`ROADMAP.md` → Status](ROADMAP.md#0-status-2026-10-13).
 
 ## Quick taste
 
 ```cpp
 #include <ESPRack.h>
-#include <modules/wifi/WiFiModule.h>
-#include <modules/security/SecurityModule.h>
-#include <modules/mqtt/MqttModule.h>
+#include <SecurityModule.h>    // headers are flat: each module's include/ is on the path
+#include <PresenceModule.h>
+#include <FileSystemModule.h>
+#include <WiFiModule.h>
+#include <APModule.h>
+#include <NTPModule.h>
 #include "MyAppModule.h"
 
 AsyncWebServer server(80);
@@ -20,29 +29,59 @@ std::unique_ptr<ESPRack::App> app;
 
 void setup() {
   Serial.begin(115200);
-  app = ESPRack::Builder(&server, "MyDevice", "v1.0.0")
-    .core()                              // wifi + ap + security + status + fs
-    .install<MqttModule>()
-    .install<MyAppModule>(/*pin=*/14)
-    .build();
-
-  app->begin();
+  app = ESPRack::Builder(&server, FACTORY_PROJECT_NAME, FACTORY_PROJECT_VERSION)
+    .install<PresenceModule>()
+    .install<SecurityModule>()           // requires "presence"
+    .install<FileSystemModule>()
+    .install<WiFiModule>()
+    .install<APModule>()
+    .install<NTPModule>()                // requires "wifi"
+    .install<MyAppModule>(Serial2)       // hardware handles are ctor args
+    .build();                            // dependency + priority sort
+  app->begin();                          // mounts FS, starts modules, starts the web server
 }
 
 void loop() { app->loop(); }
 ```
 
-## Reference consumer
+The order of `.install<>()` calls doesn't matter: `Builder` sorts the
+modules by their declared dependencies and priorities. List every module
+you want explicitly. The `.core()`/`.networking()`/`.full()` presets are
+still empty stubs. Each module is a PlatformIO library, so the consumer
+also has to list it in `lib_deps`. See
+[`docs/consumer-guide.md`](docs/consumer-guide.md).
 
-See sibling repo **`esp-rack-light-demo`** — a working RGB-light
-controller built as a single `LightControlModule` on top of ESPRack.
+## Repository layout
+
+| Path | What |
+|---|---|
+| `lib/ESPRack/` | Core library (`ESPRack`). Hardware-independent: Module/Builder/App lifecycle, ConfigManager, the web layer (manifest, form DSL, REST, WS), security primitives, provider interfaces. |
+| `modules/<name>/` | One PlatformIO library per feature: wifi, ap, security, mqtt, telegram, ntp, ota, discovery, mothership, wireguard, … Full list in [`docs/module-catalog.md`](docs/module-catalog.md). `modules/template/` is the skeleton to copy for new modules. |
+| `ui/` | The React UI. A consumer's build copies it in and embeds it into the firmware as `WWWData.h`. |
+| `api/` | Generated OpenAPI spec + manifest dump (`scripts/gen_openapi.py`). |
+| `scripts/` | Dev tools: OpenAPI generator, mock mothership server, serial-log converter. |
+| `docs/` | Guides (below) and `docs/plans/`, the design notes and audits behind past work. |
 
 ## Documentation
 
-- [`ROADMAP.md`](ROADMAP.md) — design, phased delivery, status
-- `ARCHITECTURE.md` — module API spec (coming in Phase 1)
-- `MIGRATION.md` — moving from `esp32-react`/`ESP-React-Framework` style
-  monoliths (coming in Phase 4)
+| Document | For |
+|---|---|
+| [`ARCHITECTURE.md`](ARCHITECTURE.md) | How the core works: layers, lifecycle, persistence, web/WS/REST, security, memory. |
+| [`docs/module-guide.md`](docs/module-guide.md) | **Writing a module**: hooks, settings, UI forms, live status, actions, endpoints, messaging, hardware rules. |
+| [`docs/consumer-guide.md`](docs/consumer-guide.md) | Creating a device firmware project on top of ESPRack (based on `esp-rack-light-demo`). |
+| [`docs/module-catalog.md`](docs/module-catalog.md) | Every built-in module: purpose, API, dependencies, cost. |
+| [`ROADMAP.md`](ROADMAP.md) | Original design and phased plan, plus the current status section. |
+| `docs/plans/*.md` | Design notes per topic: API standardization, discovery protocol, memory/heap work, mothership, WireGuard, tree menu, form DSL. |
+
+## Branches
+
+`master` is **stale**: it's at `8f8a262` (2026-05-09) and 128 commits
+behind the integration line. The current integration line is
+**`feature/ses-light-support`**. It contains `feature/ws-single-session`,
+which in turn contains `feature/api-v1`, `feature/device-mesh`,
+`feature/web-*`, `feature/wireguard-*` and `debug/esp32async-migration`.
+Build consumers against it. The branch table is in
+[`ROADMAP.md` → Status](ROADMAP.md#0-status-2026-10-13).
 
 ## License
 

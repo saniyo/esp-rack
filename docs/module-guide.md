@@ -66,9 +66,12 @@ modules/<dir>/
 - `"name"` is what consumers put in `lib_deps`, by convention `<Name>Module`
   (e.g. `NTPModule`, `MqttModule`). The directory name and library name don't
   have to match: `modules/wireguard` is `WireGuardModule`.
-- `"dependencies": [{"name": "ESPRack"}]`, plus any external library the
-  module needs, e.g. `AsyncMqttClient` for mqtt. See each module's
-  `library.json`.
+- `"dependencies": [{"name": "ESPRack"}]`, plus the external libraries the
+  module needs.
+  - The in-tree modules don't declare their third-party libraries today
+    (`AsyncMqttClient`, the Telegram bot, `WireGuard-ESPRack`, and core's
+    `ESP_SSLClient`), so consumers list them in `lib_deps` by hand.
+  - New modules should declare them.
 - `"frameworks": ["arduino"]`, `"platforms": ["espressif32"]`.
   `lib_compat_mode = strict` in the consumer rejects libraries that don't
   declare these.
@@ -78,7 +81,7 @@ modules/<dir>/
 path, so you write `#include <Module.h>`, `#include <ConfigDelegate.h>` and
 `#include <NTPModule.h>`. The `<modules/wifi/WiFiModule.h>` form shown in
 `lib/ESPRack/include/ESPRack.h` and the old README does **not** match how the
-demo builds (`esp-rack-light-demo/src/main.cpp:78-100` uses `<WiFiModule.h>`).
+demo builds (`esp-rack-light-demo/src/main.cpp:18-40` uses `<WiFiModule.h>`).
 
 Naming conventions in the tree:
 
@@ -90,8 +93,8 @@ Naming conventions in the tree:
 | Descriptor id | camelCase, unique | `"ntp"`, `"lightControl"`, `"configManagerUi"` |
 | Feature id (UI) | camelCase, often the descriptor id | `"ntp"`, `"lightState"` |
 | Action id | dotted `<scope>.<verb>` | `light.reset`, `system.restart`, `wifi.scan` |
-| Config file | `/config/<id>.json` | `/config/ntpSettings.json`, `/config/lightState.json` |
-| Factory defaults | `FACTORY_<MODULE>_<KEY>` with `#ifndef` fallback | `FACTORY_NTP_SERVER` (`modules/ntp/include/NTPSettingsService.h:68-79`) |
+| Config file | `/config/<name>.json` (module's choice) | `/config/ntpSettings.json`, `/config/lightState.json`, `/config/template.json` |
+| Factory defaults | `FACTORY_<MODULE>_<KEY>` with `#ifndef` fallback | `FACTORY_NTP_SERVER` (`modules/ntp/include/NTPSettingsService.h:43-54`) |
 
 ---
 
@@ -207,8 +210,14 @@ runtime values. Its service derives from `StatefulService<T>`
 | `addUpdateHandler(cb, allowRemove)` | Subscribe to propagated updates. `cb(const String& origin)` (`:55-62`). |
 | `_state` | The protected instance (`:127`). Prefer `read()`/`update*()` once more than one task can touch it. |
 
-`origin` is a free-form string (`"boot"`, `"tick"`, `"rest.proxy"`,
-`"ws:<cid>"`...). The UI uses it to filter its own echoes.
+`origin` is a free-form string, e.g. `"boot"`, `"tick"`, `"http"` (REST
+POST, `HttpEndpoint.h`), `"rest.proxy"`, or `"ws:<cid>"`.
+
+- The UI is meant to use it to filter its own echoes.
+- That doesn't work reliably today. The UI sends back the origin of the
+  last frame it *received* (`DynamicStatus.tsx:198`), so a WS write can
+  arrive labelled `"tick"`.
+- Don't make security decisions on `origin`.
 
 **Threads.**
 - `onLoop()` runs on `loopTask`.
@@ -247,7 +256,7 @@ Semantics, verified in `lib/ESPRack/include/ConfigManager.h`:
   `updateWithoutPropagation`, so no handlers fire.
 - **Saving is explicit.** Every built-in settings service registers
   `addUpdateHandler([this](const String& o){ _cfg.saveIfChanged(o); }, false)`.
-  See `modules/ntp/src/NTPSettingsService.cpp:27-31` and the template's
+  See `modules/ntp/src/NTPSettingsService.cpp:28-32` and the template's
   constructor. `saveIfChanged` serializes with `readConfig`, compares a
   **plaintext CRC32** and skips the flash write when nothing changed
   (`:496-502`). Otherwise it does an atomic write, rotating the previous file
@@ -263,12 +272,27 @@ Semantics, verified in `lib/ESPRack/include/ConfigManager.h`:
 
 ### 4.3 Parse-back: the updater
 
-The UI's Save posts a **flat object with only the changed keys**
-(`ui/src/components/dynamic-component/DynamicSettings.tsx:276-284`) to
-`/api/v1/<id>/state`. Your updater must therefore accept partial dicts.
-Use `FormBuilder::updateValue(src, "key", field)` for each key; it's a
-no-op when the key is absent. Accept the `{settings:{...}}` envelope as
-well, like `NTPSettings::update` does (`NTPSettingsService.h:177-190`).
+The UI's Save sends a **flat object with only the changed keys**
+(`ui/src/components/dynamic-component/DynamicSettings.tsx:276-284`).
+Machine clients POST to `/api/v1/<id>/state` with the same shape. Your
+updater must therefore accept partial dicts.
+
+- Use `FormBuilder::updateValue(src, "key", field)` for each key; it's a
+  no-op when the key is absent.
+- Accept the `{settings:{...}}` envelope as well, like `NTPSettings::update`
+  does (`NTPSettingsService.h:152-165`).
+- Never fill absent keys with factory defaults. `OTASettings::update` does
+  this (`modules/ota/include/OTASettingsService.h:57-59`), so a partial
+  `{"enabled":false}` resets the OTA port and password.
+
+> ⚠ **The UI Save is broken today.** Since C1 (`2adff81`), `DynamicTabPanel`
+> POSTs to `tab.restPath`, which is the **GET-only** `/api/v1/<id>/form`
+> (`ui/src/components/dynamic-component/DynamicFeature.tsx:45-52`). The
+> request falls through to the `/api/*` 404 (`App.cpp:332-336`), so settings
+> tabs don't save from the browser. This is clear from the code but hasn't
+> been reproduced on hardware. A fix is pending: the UI should POST to the
+> manifest's `rest.update`. Until then, test your updater with
+> `POST /api/v1/<id>/state`.
 
 **Field types matter** (`lib/ESPRack/include/FormBuilder.h:467-562`):
 
@@ -378,7 +402,7 @@ than ~8 KB don't fit the no-PSRAM C3's `max_alloc` and need streaming.
 |---|---|
 | `key` | Must match a `web::Form` name emitted by the form reader. |
 | `.live()` | The tab subscribes to the feature's WS channel. |
-| `.postable()` | The tab shows Save and POSTs to `/state`. |
+| `.postable()` | The tab shows Save. It **should** POST to `rest.update` (`/state`), but it currently POSTs to the tab's `restPath` (`/form`) and gets a 404; see §4.3. |
 | `.order(n)` | Sorting, used when tabs are contributed by several modules. |
 | `.icon(name)` | Icon for the tree leaf. |
 | `.auth(...)` | **UI hint only.** The server enforces the *feature* auth level for both GET and POST, so an admin-only Settings tab on an `Authenticated` feature can still be POSTed by any non-reader user. To really protect writes, make the whole feature `adminOnly()` or split it into two features. |
@@ -457,7 +481,7 @@ Rules worth knowing:
   `ui/src/components/dynamic-component/utils/fieldParser.ts`. A new field
   type needs both sides.
 - Colors baked into the form (`.color()`) only change on refetch. WS ticks
-  update values only (`NTPSettingsService.h:153-157`).
+  update values only (`NTPSettingsService.h:128-132`).
 - Editable (`rw`) fields on a **live** tab are written over WS on blur
   (`DynamicStatus.tsx:198`, a `{"type":"p", ch, p:{key:val}}` frame).
   They reach the **WS updater**, not the REST one.
@@ -486,13 +510,13 @@ Rules worth knowing:
   - **Automatically after every propagated `update()`.** The feature's
     `WsManager::Binding` registers its own update handler (`WsManager.h:146-156`).
     Don't call `broadcastWs()` from your update handler too: NTP does
-    (`NTPSettingsService.cpp:252`) and sends every change twice.
+    (`NTPSettingsService.cpp:31`) and sends every change twice.
   - **Manually** with `_feature->broadcastWs(origin)` for runtime values
     you changed with `updateWithoutPropagation()`.
 - **Cadence and throttling are the module's job.** The framework has no
   rate limiter. Gate periodic work on `_feature->hasSubscribers()`
   (`WebFeatureDelegate.h:296-299`) and a millis() period from settings
-  (template `pushLive()`, `NTPSettingsService::loop()` at `:306-317`).
+  (template `pushLive()`, `NTPSettingsService::loop()` at `NTPSettingsService.cpp:85-96`).
   The only server-side protection is per-client back-pressure, which drops
   frames for slow clients (`WS_BACKPRESSURE_THRESHOLD`, `WsManager.h:61-63`,
   `604-612`). `broadcastCurrentState` also skips serialization when a
@@ -503,6 +527,13 @@ Rules worth knowing:
 - Frame size: the `wsBufferSize` you pass (the 8-argument overload). WS
   frames are built in one shared document sized to the largest channel's
   capacity (`WsManager.h:236-238`).
+
+> ⚠️ **At most two live clients.** `processAllQueues()` calls
+> `_ws->cleanupClients(2)` (`WsManager.h:321`). In ESPAsyncWebServer
+> 3.7.10 that closes the **oldest** client whenever more than two are
+> connected. Before the single-socket change this limit applied per
+> feature; now it applies to the whole device, so a third browser tab or
+> device causes reconnect churn.
 
 > ⚠️ **WS access control is coarse today.** The upgrade requires only
 > `IS_AUTHENTICATED` (`modules/security/include/SecurityModule.h:55-58`).
@@ -695,7 +726,7 @@ which peripheral or pins to use.
    location-provider interfaces (planned in SES-LIB-002) instead of calling
    `settimeofday()` on its own. Note that the NTP module's
    `configTzTime()` keeps SNTP running, and SNTP overwrites any clock that
-   someone else sets (`NTPSettingsService.cpp:337-358`).
+   someone else sets (`NTPSettingsService.cpp:116-138`).
 
 ---
 
