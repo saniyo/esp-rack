@@ -18,6 +18,7 @@
 #include "IMqttDispatcher.h"
 #include "IMqttProvider.h"
 #include "MqttSubscription.h"
+#include <atomic>
 #include <vector>
 #include <set>
 
@@ -52,6 +53,16 @@
 #ifndef FACTORY_MQTT_MAX_TOPIC_LENGTH
 #define FACTORY_MQTT_MAX_TOPIC_LENGTH 128
 #endif
+// Device availability (SES-LIB-020): a retained "online" after connect and
+// a retained "offline" last will. Off by default: a generic device
+// shouldn't leave retained topics on a broker unasked.
+#ifndef FACTORY_MQTT_AVAILABILITY
+#define FACTORY_MQTT_AVAILABILITY false
+#endif
+// "" = "<clientId>/availability"
+#ifndef FACTORY_MQTT_AVAILABILITY_TOPIC
+#define FACTORY_MQTT_AVAILABILITY_TOPIC ""
+#endif
 
 #define MQTT_FILE         "/config/mqttSettings.json"
 // Form/state paths are derived by the registry (C1): /api/v1/mqtt/form (GET)
@@ -82,6 +93,8 @@ class MqttSettings {
   uint16_t keepAlive = FACTORY_MQTT_KEEP_ALIVE;
   bool cleanSession = FACTORY_MQTT_CLEAN_SESSION;
   uint16_t maxTopicLength = FACTORY_MQTT_MAX_TOPIC_LENGTH;
+  bool availability = FACTORY_MQTT_AVAILABILITY;
+  String availabilityTopic = FACTORY_MQTT_AVAILABILITY_TOPIC;  // "" = <clientId>/availability
 
   // Persisted: list of topic patterns the user has "attached" — these
   // get re-subscribed on every (re)connect so the user's discovery
@@ -92,6 +105,7 @@ class MqttSettings {
   // runtime (not persisted)
   bool connected{false};
   String runtimeClientId;
+  String availabilityNow;  // the topic in use, "" = availability off
   uint8_t disconnectReason{0};
   String topicsJoined;  // newline-separated rolling log (legacy field)
 
@@ -168,6 +182,8 @@ class MqttSettings {
     root["keep_alive"] = s.keepAlive;
     root["clean_session"] = s.cleanSession;
     root["max_topic_length"] = s.maxTopicLength;
+    root["availability"] = s.availability;
+    root["availability_topic"] = s.availabilityTopic;
     JsonArray att = root.createNestedArray("attached_topics");
     for (const auto& t : s.attachedTopics) att.add(t);
     root["sniffer_pattern"] = s.snifferPattern;
@@ -203,6 +219,9 @@ class MqttSettings {
     root["keep_alive"] = s.keepAlive;
     root["clean_session"] = s.cleanSession;
     root["max_topic_length"] = s.maxTopicLength;
+    root["availability"] = s.availability;
+    root["availability_topic"] = s.availabilityTopic;
+    root["availability_now"] = s.availabilityNow.length() ? s.availabilityNow : String("off");
 
     // Streaming push: emit ALL topics that mutated since last tick
     // (capped at SNIFFER_BURST_MAX). tableMode("upsert") on the
@@ -251,6 +270,8 @@ class MqttSettings {
                .colorMap("Connected:success,Not enabled:info,default:error"));
     st.add(web::Text("client_id", s.runtimeClientId.c_str()).readOnly()
                .label("Client ID").icon("Memory"));
+    st.add(web::Text("availability_now", s.availabilityNow.length() ? s.availabilityNow.c_str() : "off")
+               .readOnly().label("Availability topic").icon("Sensors"));
 
     // ── Discovery controls — sit ABOVE the live table so the
     // operator's eye flow is: read the controls, then read the data
@@ -326,6 +347,9 @@ class MqttSettings {
     set.add(web::Switch("clean_session", s.cleanSession).label("Clean session"));
     set.add(web::Number("max_topic_length", s.maxTopicLength).label("Max topic length")
                .min(16).max(4096).format("0").unit("B"));
+    set.add(web::Switch("availability", s.availability).label("Availability (online / offline will)"));
+    set.add(web::Text("availability_topic", s.availabilityTopic.c_str())
+               .label("Availability topic").placeholder("<client id>/availability"));
   }
 
   /* ----- Unified update (REST + FS + WS) ----- */
@@ -348,6 +372,8 @@ class MqttSettings {
     changed |= FormBuilder::updateValue(src, "keep_alive", s.keepAlive);
     changed |= FormBuilder::updateValue(src, "clean_session", s.cleanSession);
     changed |= FormBuilder::updateValue(src, "max_topic_length", s.maxTopicLength);
+    changed |= FormBuilder::updateValue(src, "availability", s.availability);
+    changed |= FormBuilder::updateValue(src, "availability_topic", s.availabilityTopic);
     changed |= FormBuilder::updateValue(src, "sniffer_enabled", s.snifferEnabled);
     changed |= FormBuilder::updateValue(src, "sniffer_pattern", s.snifferPattern);
     changed |= FormBuilder::updateValue(src, "selected_topic", s.selectedTopic);
@@ -412,6 +438,9 @@ class MqttSettingsService : public StatefulService<MqttSettings>,
 
   void begin();
   void loop();
+  // Before a restart (MqttModule::onShutdown): goes offline as below,
+  // waiting at most kOfflineAckShutdownMs for the broker's ack.
+  void end();
 
   // Legacy API retained for other services.
   bool isEnabled();
@@ -449,6 +478,8 @@ class MqttSettingsService : public StatefulService<MqttSettings>,
   const std::vector<String>& attachedTopics() const override {
     return _state.attachedTopics;
   }
+
+  const char* availabilityTopic() const override { return _state.availabilityNow.c_str(); }
 
   // Read-only iteration for UI rendering (mirrors TelegramService).
   template <typename Fn>
@@ -491,6 +522,24 @@ class MqttSettingsService : public StatefulService<MqttSettings>,
   char* _retainedClientId{nullptr};
   char* _retainedUsername{nullptr};
   char* _retainedPassword{nullptr};
+  char* _retainedWillTopic{nullptr};
+
+  // Availability (SES-LIB-020). A clean DISCONNECT cancels the will, so
+  // going offline on purpose publishes a retained "offline" (QoS 1) and
+  // sends DISCONNECT only once the broker has acked it. Without the ack
+  // the TCP connection is just dropped and the broker publishes the will.
+  static constexpr uint32_t kOfflineAckMs = 2000;          // operator turned MQTT off / transport change
+  static constexpr uint32_t kOfflineAckShutdownMs = 400;   // within the 500 ms onShutdown budget
+  bool _willActive{false};         // this connection was opened with the will
+  bool _offlineWaiting{false};     // loop() finishes the reconfigure
+  uint32_t _offlineSince{0};
+  std::atomic<uint16_t> _offlineId{0};
+  std::atomic<bool> _offlineAcked{false};
+  void refreshAvailabilityTopic();
+  bool publishOffline();            // true: queued, _offlineId set
+  bool startGoingOffline();         // true: loop() calls finishGoingOffline()
+  void finishGoingOffline(bool acked);
+  void connectMqtt();
 
   bool _reconfigureMqtt{false};
   unsigned long _disconnectedAt{0};
@@ -557,6 +606,8 @@ class MqttSettingsService : public StatefulService<MqttSettings>,
     uint16_t keepAlive{0};
     bool     cleanSession{false};
     uint16_t maxTopicLength{0};
+    bool     availability{false};
+    String   availabilityTopic;
     bool     valid{false};       // false until the first configureMqtt
   };
   TransportSnapshot _lastTransport;

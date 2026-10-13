@@ -1,6 +1,9 @@
 #include <MqttSettingsService.h>
 #include <WebManager.h>
 #include <DeviceIdentity.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <string.h>
 
 // ─── mqttTopicMatches ───────────────────────────────────────────────
 // MQTT v3.1.1 §4.7 wildcard matcher. Walks pattern + topic level by
@@ -97,6 +100,11 @@ MqttSettingsService::MqttSettingsService(ConfigManager* cfgMgr)
 
   _mqttClient.onConnect(std::bind(&MqttSettingsService::onMqttConnect, this, std::placeholders::_1));
   _mqttClient.onDisconnect(std::bind(&MqttSettingsService::onMqttDisconnect, this, std::placeholders::_1));
+  // PUBACK of our retained "offline" (async_tcp task): the clean
+  // DISCONNECT may go now (SES-LIB-020).
+  _mqttClient.onPublish([this](uint16_t packetId) {
+    if (packetId != 0 && packetId == _offlineId.load()) _offlineAcked = true;
+  });
   _mqttClient.onMessage(std::bind(&MqttSettingsService::onMqttMessage,
                                   this,
                                   std::placeholders::_1,
@@ -336,6 +344,7 @@ void MqttSettingsService::begin() {
   // gets replaced here. See MqttSettingsService.h::clientId for the
   // rationale.
   _state.clientId = DeviceIdentity::canonical();
+  refreshAvailabilityTopic();
 
   if (_state.enabled) {
     log_d("MQTT is enabled, configuring...");
@@ -348,6 +357,12 @@ void MqttSettingsService::begin() {
 
 /* ---------- loop ---------- */
 void MqttSettingsService::loop() {
+  if (_offlineWaiting) {
+    const bool acked = _offlineAcked.load();
+    if (!acked && (uint32_t)(millis() - _offlineSince) < kOfflineAckMs) return;
+    finishGoingOffline(acked);
+    return;
+  }
   if (_reconfigureMqtt ||
       (_disconnectedAt && (unsigned long)(millis() - _disconnectedAt) >= MQTT_RECONNECTION_DELAY)) {
     configureMqtt();
@@ -383,6 +398,12 @@ void MqttSettingsService::onMqttConnect(bool sessionPresent) {
   log_d("%s", sessionPresent ? "with persistent session" : "without persistent session");
 
   refreshRuntime();
+
+  // Device availability (SES-LIB-020): the will says "offline", this says
+  // "online". Before the listeners, so whatever they publish follows it.
+  if (_willActive && _retainedWillTopic) {
+    _mqttClient.publish(_retainedWillTopic, 1, true, "online");
+  }
 
   // Re-issue every broker-side subscribe pattern for non-persistent
   // sessions OR after a reconnect — without it the subscriber-side
@@ -720,10 +741,75 @@ void MqttSettingsService::onStationModeDisconnected(const WiFiEventStationModeDi
 }
 #endif
 
+/* ---------- availability (SES-LIB-020) ---------- */
+void MqttSettingsService::refreshAvailabilityTopic() {
+  if (!_state.availability) {
+    _state.availabilityNow = "";
+  } else if (_state.availabilityTopic.length()) {
+    _state.availabilityNow = _state.availabilityTopic;
+  } else {
+    _state.availabilityNow = _state.clientId + "/availability";
+  }
+}
+
+bool MqttSettingsService::publishOffline() {
+  if (!_willActive || !_retainedWillTopic || !_mqttClient.connected()) return false;
+  _offlineAcked = false;
+  const uint16_t id = _mqttClient.publish(_retainedWillTopic, 1, true, "offline");
+  _offlineId = id;
+  return id != 0;
+}
+
+bool MqttSettingsService::startGoingOffline() {
+  if (!publishOffline()) return false;
+  _offlineWaiting = true;
+  _offlineSince = millis();
+  return true;
+}
+
+void MqttSettingsService::finishGoingOffline(bool acked) {
+  _offlineWaiting = false;
+  _offlineId = 0;
+  _willActive = false;
+  // Acked: a clean DISCONNECT (the will is no longer needed). Not acked:
+  // drop the TCP connection so the broker publishes the will itself.
+  _mqttClient.disconnect(!acked);
+  if (!acked) log_w("[mqtt] no PUBACK for \"offline\" in %u ms: connection dropped, the will covers it",
+                    (unsigned)kOfflineAckMs);
+  connectMqtt();
+}
+
+void MqttSettingsService::end() {
+  if (!_willActive || !_mqttClient.connected()) {
+    _mqttClient.disconnect();
+    return;
+  }
+  // The PUBACK is handled on async_tcp (and lwIP's tiT task carries it):
+  // waiting there would deadlock. Leave the connection alone; the restart
+  // drops it and the broker publishes the will.
+  const char* task = pcTaskGetName(nullptr);
+  if (task && (strcmp(task, "async_tcp") == 0 || strcmp(task, "tiT") == 0)) return;
+  if (!publishOffline()) return;  // couldn't queue it: the will covers it
+  const uint32_t t0 = millis();
+  while (!_offlineAcked.load() && (uint32_t)(millis() - t0) < kOfflineAckShutdownMs) vTaskDelay(pdMS_TO_TICKS(5));
+  const bool acked = _offlineAcked.load();
+  _offlineId = 0;
+  _willActive = false;
+  _mqttClient.disconnect(!acked);
+}
+
 /* ---------- configureMqtt ---------- */
 void MqttSettingsService::configureMqtt() {
+  refreshAvailabilityTopic();
+  // A connection with the will goes offline in two steps; loop() calls
+  // finishGoingOffline() -> connectMqtt() once acked or timed out.
+  if (_offlineWaiting || startGoingOffline()) return;
   _mqttClient.disconnect();
+  connectMqtt();
+}
 
+void MqttSettingsService::connectMqtt() {
+  _willActive = false;
   if (_state.enabled && WiFi.isConnected()) {
     log_d("Connecting to MQTT...");
     _mqttClient.setServer(retainCstr(_state.host.c_str(), &_retainedHost), _state.port);
@@ -741,6 +827,13 @@ void MqttSettingsService::configureMqtt() {
     _mqttClient.setKeepAlive(_state.keepAlive);
     _mqttClient.setCleanSession(_state.cleanSession);
     _mqttClient.setMaxTopicLength(_state.maxTopicLength);
+    if (_state.availabilityNow.length()) {
+      _mqttClient.setWill(retainCstr(_state.availabilityNow.c_str(), &_retainedWillTopic), 1, true, "offline");
+      _willActive = true;
+    } else {
+      _mqttClient.setWill(nullptr, 0, false, nullptr);
+      retainCstr(nullptr, &_retainedWillTopic);
+    }
     _mqttClient.connect();
   }
 
@@ -771,6 +864,8 @@ void MqttSettingsService::captureTransportSnapshot() {
   _lastTransport.keepAlive      = _state.keepAlive;
   _lastTransport.cleanSession   = _state.cleanSession;
   _lastTransport.maxTopicLength = _state.maxTopicLength;
+  _lastTransport.availability      = _state.availability;
+  _lastTransport.availabilityTopic = _state.availabilityTopic;
   _lastTransport.valid          = true;
 }
 
@@ -784,7 +879,10 @@ bool MqttSettingsService::transportDiffersFromSnapshot() const {
       || _state.clientId       != _lastTransport.clientId
       || _state.keepAlive      != _lastTransport.keepAlive
       || _state.cleanSession   != _lastTransport.cleanSession
-      || _state.maxTopicLength != _lastTransport.maxTopicLength;
+      || _state.maxTopicLength != _lastTransport.maxTopicLength
+      // the will lives in CONNECT: a new topic needs a new connection
+      || _state.availability      != _lastTransport.availability
+      || _state.availabilityTopic != _lastTransport.availabilityTopic;
 }
 
 /* ---------- sniffer / attached helpers ---------- */

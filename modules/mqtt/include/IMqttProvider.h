@@ -50,6 +50,12 @@ class IMqttProvider : public ESPRack::IMessagingProvider {
   // me to watch" plus their own captured values; example use in
   // LightStateService.cpp's "Attached values" table.
   virtual const std::vector<String>& attachedTopics() const = 0;
+
+  // Device availability (SES-LIB-020): the topic carrying the retained
+  // "online" / "offline" (last will), "" when it's off. Subscriptions only
+  // reference it (e.g. an availability_topic in discovery payloads); the
+  // provider alone publishes there.
+  virtual const char* availabilityTopic() const { return ""; }
 };
 
 #endif  // ESPRACK_IMQTT_PROVIDER_H

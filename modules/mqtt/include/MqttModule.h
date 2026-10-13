@@ -10,7 +10,7 @@
 class MqttModule : public ESPRack::Module {
  public:
   void describe(ESPRack::ModuleDescriptor& d) override {
-    d.id = "mqtt"; d.version = "2.0.0"; d.priority = 40;
+    d.id = "mqtt"; d.version = "2.1.0"; d.priority = 40;
     d.requires_ = {"wifi"};
   }
   void onInstall(ESPRack::ModuleContext& ctx) override {
@@ -24,6 +24,8 @@ class MqttModule : public ESPRack::Module {
   }
   void onBegin() override { if (svc_) svc_->begin(); }
   void onLoop()  override { if (svc_) svc_->loop();  }
+  // Retained "offline" before a restart (SES-LIB-020), then disconnect.
+  void onShutdown() override { if (svc_) svc_->end(); }
 
   // Service accessor — useful for App-level integration tests / direct
   // legacy callback registration.

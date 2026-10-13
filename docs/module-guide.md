@@ -699,6 +699,13 @@ if (_mq.active()) _mq.publish("rate", "12.5");          // -> home/uart/rate
 _mq.onMessage("cmd/#", [this](const String& topic, const String& payload) { /*...*/ });
 ```
 
+Device availability (SES-LIB-020) belongs to the provider, not to a
+subscription. With MQTT → Settings → Availability on, the device publishes a
+retained `online` after every connect, and the broker publishes the retained
+`offline` will when the device drops off. Reference the topic with
+`mq->availabilityTopic()` ("" when off), e.g. in a discovery payload. Don't
+publish there yourself.
+
 Live demo of both: `LightStateService::begin()` and `loop()`
 (`esp-rack-light-demo/src/LightStateService.cpp:487-508`, `594-646`).
 

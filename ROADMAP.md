@@ -47,6 +47,9 @@ Work beyond the plan that has landed:
   - SES-LIB-016 (UI pack B): dated table columns (`date/time/datetime/duration`),
     `Message.levelKey`, `Action.withClientTime`, `updateValue` for 32/64-bit
     integers, 13 icons. Plan: `docs/plans/ses-lib-016-ui-pack-b.md`.
+  - SES-LIB-020: MQTT device availability: retained `online` plus an
+    `offline` last will (`availability`, `availability_topic`,
+    `IMqttProvider::availabilityTopic()`).
   - SES-LIB-027: clock steps as int64 (`TimeStep{ms}` for listeners,
     `TimeStatus::lastStepMs`/`offsetMs[]`); a date a year off is corrected in
     one step.
