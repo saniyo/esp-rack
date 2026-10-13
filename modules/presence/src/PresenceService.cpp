@@ -13,9 +13,9 @@ static String clipPage(const String& raw) {
   return raw.substring(0, 77) + "...";
 }
 
-void PresenceService::mountWs(AsyncWebServer* server, SecurityManager* sm) {
-  if (_ws || !server || !sm) return;
-  _sm = sm;
+void PresenceService::mountWs(AsyncWebServer* server, SecurityResolver resolveSecurity) {
+  if (_ws || !server || !resolveSecurity) return;
+  _resolveSecurity = std::move(resolveSecurity);
   _ws = new AsyncWebSocket(PRESENCE_WS_PATH);
 
   _ws->onEvent([this](AsyncWebSocket* /*srv*/, AsyncWebSocketClient* client,
@@ -84,7 +84,8 @@ void PresenceService::mountWs(AsyncWebServer* server, SecurityManager* sm) {
   // Auth predicate: any authenticated user can open presence WS — it's the
   // SPA's identity channel, not a privileged endpoint. Admin-only pages
   // and sensitive APIs stay IS_ADMIN through their own wraps.
-  _ws->handleHandshake([sm](AsyncWebServerRequest* request) -> bool {
+  _ws->handleHandshake([this](AsyncWebServerRequest* request) -> bool {
+    SecurityManager* sm = _resolveSecurity ? _resolveSecurity() : nullptr;
     if (!sm) return true;
     Authentication a = sm->authenticateRequest(request);
     return AuthenticationPredicates::IS_AUTHENTICATED(a);

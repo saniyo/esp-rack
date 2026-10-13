@@ -81,7 +81,12 @@ class UiDynService {
                const char* path = UI_DYN_SERVICE_PATH,
                size_t jsonCapacity = MAX_UI_DYN_SIZE);
 
-  void begin();  // монтує GET endpoint (JWT protected якщо є securityManager)
+  void begin();  // mounts the GET endpoint (JWT-protected when a securityManager is set)
+
+  // Late binding (LIB-FIX-005): uiDyn (priority 6) installs before
+  // SecurityModule (8), so the ctor's manager is App's Null stub. The
+  // module hands over the real one right before begin() mounts the route.
+  void setSecurityManager(SecurityManager* sm) { if (!_mounted) _securityManager = sm; }
 
   // Phase 7c — also expose the manifest GET through WebManager's proxy
   // dispatch so the mship-ui reverse proxy can reach it (proxyDispatch

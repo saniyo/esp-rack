@@ -263,9 +263,11 @@ class WebManager {
 
   // Late-bind the SecurityManager pointer. Used by the SecurityModule
   // to swap App's NullSecurityManager for the real PBKDF2-backed
-  // implementation during onInstall. Must be called BEFORE any other
-  // module's onInstall (priority 5 ensures this) — entries registered
-  // before this point may have captured the old pointer in lambdas.
+  // implementation during onInstall. Registry entries are safe either
+  // way: registerEndpoints() runs in WebManager::begin(), after every
+  // onInstall, and reads _sm then. Only code that captures ctx.security
+  // during its OWN onInstall before SecurityModule (priority 8) sees the
+  // Null stub - see Module.h.
   void setSecurityManager(SecurityManager* sm) { _sm = sm; }
 
   // Append a tab to an existing feature entry. Primary use case: compound

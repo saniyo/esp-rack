@@ -19,7 +19,12 @@ class PresenceModule : public ESPRack::Module {
   void onInstall(ESPRack::ModuleContext& ctx) override {
     svc_.reset(new PresenceService());
     if (ctx.app) ctx.app->setPresence(svc_.get());
-    svc_->mountWs(ctx.server, ctx.security);
+    // Resolve per handshake: SecurityModule installs AFTER presence (it
+    // requires it), so ctx.security here is still the Null manager.
+    ESPRack::App* app = ctx.app;
+    svc_->mountWs(ctx.server, [app]() -> SecurityManager* {
+      return app ? app->security() : nullptr;
+    });
   }
   void onLoop() override {
     if (!svc_) return;

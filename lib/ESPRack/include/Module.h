@@ -57,9 +57,10 @@ class App;
 // installed by their respective modules during onInstall. Builder
 // refreshes the context between module installs so a module installed
 // AFTER SecurityModule sees the real SecurityManager*, not the null
-// stub. Modules at lower priority numbers run first; install
-// SecurityModule with priority 5 to make sure everyone else gets the
-// real pointer.
+// stub. SecurityModule is priority 8 and requires presence, so modules
+// that install before it (features 5, uiDyn 6, presence 7) must NOT
+// capture ctx.security: resolve app->security() when the request arrives,
+// or take it in onBegin() (every onInstall has run by then).
 struct ModuleContext {
   AsyncWebServer*  server         {nullptr};
   ConfigManager*   cfgMgr         {nullptr};

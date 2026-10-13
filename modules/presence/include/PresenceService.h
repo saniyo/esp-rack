@@ -9,6 +9,7 @@
 #include <SecurityManager.h>
 
 #include <deque>
+#include <functional>
 #include <map>
 
 #define PRESENCE_WS_PATH "/ws/presence"
@@ -55,7 +56,14 @@ class PresenceService {
   // Wire the /ws/presence WebSocket. Safe to call once during ESPReact ctor;
   // subsequent calls are no-ops. The WS accepts `hello` and `page` frames
   // described in the header comment above.
-  void mountWs(AsyncWebServer* server, SecurityManager* sm);
+  //
+  // The SecurityManager is RESOLVED PER HANDSHAKE (LIB-FIX-005): presence
+  // installs before SecurityModule (security requires presence), so a
+  // pointer captured at install time is App's NullSecurityManager, which
+  // authenticates everyone as admin. The resolver returns whatever manager
+  // the App holds when the browser connects.
+  using SecurityResolver = std::function<SecurityManager*()>;
+  void mountWs(AsyncWebServer* server, SecurityResolver resolveSecurity);
 
   // ==== SD log sink (toggleable) =========================================
   // When enabled, significant presence events (connect, disconnect, page
@@ -109,7 +117,7 @@ class PresenceService {
   std::map<String, ClientPresence> _clients;  // keyed by clientKey
 
   AsyncWebSocket* _ws{nullptr};
-  SecurityManager* _sm{nullptr};
+  SecurityResolver _resolveSecurity;
 
   // SD/FS log sink state
   fs::FS*      _logFs{nullptr};
