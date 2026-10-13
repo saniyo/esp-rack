@@ -24,6 +24,6 @@ void RestartService::registerManifest(WebManager* web) {
 }
 
 void RestartService::restart(AsyncWebServerRequest* request) {
-  request->onDisconnect(RestartService::restartNow);
+  request->onDisconnect([]() { RestartService::restartNow("system.restart"); });
   request->send(200);
 }
