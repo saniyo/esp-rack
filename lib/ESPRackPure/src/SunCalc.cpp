@@ -9,13 +9,22 @@ namespace {
 constexpr double kPi = 3.14159265358979323846;
 constexpr double kRad = kPi / 180.0;
 
+// Flash budget: only sin, cos, atan2, sqrt and floor from libm (most
+// firmwares already link sin/cos/floor); tan, asin, acos, fmod and ceil are
+// expressed through them.
 inline double rad(double d) { return d * kRad; }
 inline double deg(double r) { return r / kRad; }
-inline double fmodPos(double a, double m) {
-  const double r = fmod(a, m);
-  return r < 0 ? r + m : r;
-}
+inline double modPos(double a, double m) { return a - m * floor(a / m); }
 inline double clamp1(double v) { return v > 1.0 ? 1.0 : v < -1.0 ? -1.0 : v; }
+inline double asinC(double x) {
+  x = clamp1(x);
+  return atan2(x, sqrt(1.0 - x * x));
+}
+inline double acosC(double x) {
+  x = clamp1(x);
+  return atan2(sqrt(1.0 - x * x), x);
+}
+inline double roundHalfUp(double v) { return floor(v + 0.5); }
 
 struct Sun {
   double decl;       // radians
@@ -26,7 +35,7 @@ struct Sun {
 Sun sunAt(double utcS) {
   const double jd = utcS / 86400.0 + 2440587.5;
   const double T = (jd - 2451545.0) / 36525.0;
-  const double L0 = fmodPos(280.46646 + T * (36000.76983 + T * 0.0003032), 360.0);
+  const double L0 = modPos(280.46646 + T * (36000.76983 + T * 0.0003032), 360.0);
   const double M = rad(357.52911 + T * (35999.05029 - 0.0001537 * T));
   const double e = 0.016708634 - T * (0.000042037 + 0.0000001267 * T);
   const double C = sin(M) * (1.914602 - T * (0.004817 + 0.000014 * T)) + sin(2 * M) * (0.019993 - 0.000101 * T) +
@@ -35,28 +44,32 @@ Sun sunAt(double utcS) {
   const double appLong = rad(L0 + C - 0.00569 - 0.00478 * sin(omega));
   const double eps0 = 23.0 + (26.0 + (21.448 - T * (46.815 + T * (0.00059 - T * 0.001813))) / 60.0) / 60.0;
   const double eps = rad(eps0 + 0.00256 * cos(omega));
-  const double y = tan(eps / 2) * tan(eps / 2);
+  const double cosEps = cos(eps);
+  const double y = (1.0 - cosEps) / (1.0 + cosEps);  // tan²(eps/2)
   const double L0r = rad(L0);
   const double eqt = 4.0 * deg(y * sin(2 * L0r) - 2 * e * sin(M) + 4 * e * y * sin(M) * cos(2 * L0r) -
                                0.5 * y * y * sin(4 * L0r) - 1.25 * e * e * sin(2 * M));
-  return Sun{asin(sin(eps) * sin(appLong)), eqt};
+  return Sun{asinC(sin(eps) * sin(appLong)), eqt};
 }
 
-// Hour angle in degrees, [-180, 180), negative before solar noon.
-double hourAngle(double utcS, double lonDeg, const Sun& s) {
-  const double tst = fmodPos(fmodPos(utcS, 86400.0) / 60.0 + s.eqTimeMin + 4.0 * lonDeg, 1440.0);
-  return tst / 4.0 - 180.0;
-}
+struct Geo {
+  double elevDeg;  // geometric
+  double ha;       // hour angle, radians, negative before solar noon
+  double decl;     // radians
+};
 
-double elevGeo(double utcS, double latR, double lonDeg) {
+// The one place elevation is computed (sunPosition and the crossing search).
+Geo geometry(double utcS, double sinLat, double cosLat, double lonDeg) {
   const Sun s = sunAt(utcS);
-  const double ha = rad(hourAngle(utcS, lonDeg, s));
-  return deg(asin(clamp1(sin(latR) * sin(s.decl) + cos(latR) * cos(s.decl) * cos(ha))));
+  const double tst = modPos(modPos(utcS, 86400.0) / 60.0 + s.eqTimeMin + 4.0 * lonDeg, 1440.0);
+  const double ha = rad(tst / 4.0 - 180.0);
+  const double elev = deg(asinC(sinLat * sin(s.decl) + cosLat * cos(s.decl) * cos(ha)));
+  return Geo{elev, ha, s.decl};
 }
 
 double refractionDeg(double e) {
   if (e > 85.0) return 0.0;
-  const double te = tan(rad(e));
+  const double te = sin(rad(e)) / cos(rad(e));
   double arcsec;
   if (e > 5.0) {
     arcsec = 58.1 / te - 0.07 / (te * te * te) + 0.000086 / (te * te * te * te * te);
@@ -69,9 +82,9 @@ double refractionDeg(double e) {
 }
 
 struct Crossing {
-  double latR, lon, h0;
+  double sinLat, cosLat, lon, h0;
   bool up;
-  double f(double t) const { return elevGeo(t, latR, lon) - h0; }
+  double f(double t) const { return geometry(t, sinLat, cosLat, lon).elevDeg - h0; }
   bool crosses(double fPrev, double fCur) const { return up ? (fPrev < 0 && fCur >= 0) : (fPrev >= 0 && fCur < 0); }
 };
 
@@ -111,7 +124,7 @@ bool scan(const Crossing& c, double from, double end, int64_t& out) {
           lo = mid;
         }
       }
-      out = static_cast<int64_t>(ceil(hi - 0.5));
+      out = static_cast<int64_t>(roundHalfUp(hi));
       return true;
     }
     tPrev = t;
@@ -122,13 +135,14 @@ bool scan(const Crossing& c, double from, double end, int64_t& out) {
 }  // namespace
 
 SunPos sunPosition(int64_t utcS, double latDeg, double lonDeg, bool refraction) {
-  const double t = static_cast<double>(utcS);
-  const Sun s = sunAt(t);
   const double latR = rad(latDeg);
-  const double ha = rad(hourAngle(t, lonDeg, s));
-  double elev = deg(asin(clamp1(sin(latR) * sin(s.decl) + cos(latR) * cos(s.decl) * cos(ha))));
-  const double az = fmodPos(deg(atan2(sin(ha), cos(ha) * sin(latR) - tan(s.decl) * cos(latR))) + 180.0, 360.0);
-  if (refraction) elev += refractionDeg(elev);
+  const double sinLat = sin(latR), cosLat = cos(latR);
+  const Geo g = geometry(static_cast<double>(utcS), sinLat, cosLat, lonDeg);
+  // atan2(sin H, cos H sin lat - tan d cos lat), both terms scaled by cos d > 0
+  const double cd = cos(g.decl);
+  double az = deg(atan2(sin(g.ha) * cd, cos(g.ha) * sinLat * cd - sin(g.decl) * cosLat)) + 180.0;
+  if (az >= 360.0) az -= 360.0;
+  const double elev = refraction ? g.elevDeg + refractionDeg(g.elevDeg) : g.elevDeg;
   return SunPos{elev, az};
 }
 
@@ -137,18 +151,19 @@ int64_t solarNoon(int64_t nearUtcS, double lonDeg) {
   const double dayStart = floor(lmt / 86400.0) * 86400.0 - lonDeg * 240.0;
   double noon = dayStart + 43200.0;
   for (int i = 0; i < 2; ++i) noon = dayStart + 43200.0 - sunAt(noon).eqTimeMin * 60.0;
-  return static_cast<int64_t>(floor(noon + 0.5));
+  return static_cast<int64_t>(roundHalfUp(noon));
 }
 
 bool nextCrossing(int64_t fromUtcS, double latDeg, double lonDeg, double h0Deg, Dir dir, int64_t& out,
                   int32_t horizonS) {
   if (horizonS <= 0) return false;
-  const Crossing c{rad(latDeg), lonDeg, h0Deg, dir == Dir::Ascending};
+  const double latR = rad(latDeg);
+  const Crossing c{sin(latR), cos(latR), lonDeg, h0Deg, dir == Dir::Ascending};
   const double from = static_cast<double>(fromUtcS);
   const double end = from + horizonS;
   const double side = c.up ? -1.0 : 1.0;
   const double noon0 = static_cast<double>(solarNoon(fromUtcS, lonDeg));
-  const double sinH0 = sin(rad(h0Deg)), sinLat = sin(c.latR), cosLat = cos(c.latR);
+  const double sinH0 = sin(rad(h0Deg)), sinLat = c.sinLat, cosLat = c.cosLat;
 
   // Fast path: the hour angle at which the sun reaches h0, day by day.
   for (int k = -1; k <= 2; ++k) {
@@ -159,7 +174,7 @@ bool nextCrossing(int64_t fromUtcS, double latDeg, double lonDeg, double h0Deg, 
       const Sun s = sunAt(g);
       const double ch = (sinH0 - sinLat * sin(s.decl)) / (cosLat * cos(s.decl));
       ok = ch >= -1.0 && ch <= 1.0;
-      if (ok) g = noon + side * deg(acos(ch)) * 240.0;
+      if (ok) g = noon + side * deg(acosC(ch)) * 240.0;
     }
     if (!ok) break;  // no such crossing that day: let the scan decide
     if (g < from - 1800.0) continue;
@@ -168,7 +183,7 @@ bool nextCrossing(int64_t fromUtcS, double latDeg, double lonDeg, double h0Deg, 
     if (!secant(c, g, root)) break;
     if (root < from) continue;
     if (root > end) break;
-    out = static_cast<int64_t>(ceil(root - 0.5));
+    out = static_cast<int64_t>(roundHalfUp(root));
     if (out < fromUtcS) out = fromUtcS;
     return true;
   }
