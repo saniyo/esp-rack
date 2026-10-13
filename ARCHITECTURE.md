@@ -466,6 +466,13 @@ A form reader writes `{ "<tabKey>": { "description", "fields": [ {"<key>": value
     upload-firmware, web-endpoints and ws-diag.
 - Parse-back always goes through `FormBuilder::updateValue`.
 - The field reference is in the module guide §5.3.
+- **Device time** (SES-LIB-015). The manifest's `device.tz = {iana, posix}`
+  comes from `TimeSync::getTimezone()`. On `TzChanged`, `App` calls
+  `WebManager::refreshManifestCache()`: the content signature changes, so
+  the flash cache (written as `.tmp` and then renamed) and the ETag change.
+  The UI formats trend axes and other device-local times with it
+  (`ui/src/utils/deviceTime.ts`). Times of day (`DateTime.timeOfDay()`)
+  are seconds since local midnight with no conversion.
 
 ### 4.4 Large responses
 

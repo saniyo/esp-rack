@@ -41,6 +41,9 @@ Work beyond the plan that has landed:
     clock validity), SNTP routed through it, `system.setTime`, the
     `ILocationProvider` interface; `clockSane()` replaces the three
     hard-coded clock checks. Plan: `docs/plans/ses-lib-002-timesync.md`.
+  - SES-LIB-015 (UI pack A): `web::Progress`, Trend `xFormat/category/stack/
+    refLine` in the device timezone (manifest `device.tz`), and
+    `DateTime.timeOfDay()`. Plan: `docs/plans/ses-lib-015-ui-pack-a.md`.
   - SES-LIB-018: a WS state frame that overflows the frame doc is dropped and
     counted (`overflow_frames`), never sent truncated.
   - LIB-FEAT-001 (core 0.5.0): external HW module instances

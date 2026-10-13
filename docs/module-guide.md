@@ -478,8 +478,9 @@ access flag: `rw` by default, `.readOnly()` for `r`.
 | `web::Number(key, double)` | **emitted as a string** at the format's precision (`:192`) | `.min() .max()` (**default 0..100, always emitted, so set them**), `.format("0.00")` (decimals), `.unit() .placeholder() .colorMap()`. No `step`. |
 | `web::Slider(key, double)` | number | `.min() .max() .step()` (defaults 0/100/1) |
 | `web::Dropdown / Radio(key, int)` | int | `.option("Label", value)` repeated |
-| `web::DateTime(key, int32_t seconds)` | epoch seconds | `.dateOnly() .timeOnly() .dateTime()` |
-| `web::Trend(key)` | read-only chart | `.mode("lineChart"/"barChart"/"pieChart")`, `.xAxis("timestamp")`, `.line(key, color, type)`, `.legend() .tooltip() .maxPoints(n)` |
+| `web::DateTime(key, int32_t seconds)` | epoch seconds | `.dateOnly() .timeOnly() .dateTime()`. `.timeOfDay()`: the value is **seconds since local midnight** (0..86399) shown as HH:MM with no timezone conversion; clamp it in the updater |
+| `web::Trend(key)` | read-only chart | `.mode("lineChart"/"barChart"/"pieChart")`, `.xAxis("timestamp")`, `.line(key, color, type)`, `.legend() .tooltip() .maxPoints(n)`. Also: `.xFormat("epoch"/"time"/"date"/"datetime"/"dom"/"month")`, where x is epoch seconds (≥ 1e11 = ms) labelled in the **device** timezone; without it x shows raw. `.category()`: x is the `xAxis` key and every push replaces the rows. `.stack(a, b[, c])` stacks bars. `.refLine(key, color, label)` draws a line at a sibling value. |
+| `web::Progress(key, double)` | read-only bar | `.min() .max()`, `.maxKey(k)` (live max from a sibling), `.markerKey(k)` (marker at a sibling value, e.g. a plan), `.unit() .format("0.0")`, `.thresholds("0:error,60:warning,95:success")` (% of max → colour) |
 | `web::Table(key)` | rows (initially `[]`) | `.col(key, label, type[, fmt])`, `.mode("append"/"upsert"/"replace")`, `.maxRows(n)`, `.layout("grid"/"cards")`, `.primary() .secondary() .avatar() .badge()`, `.rowFill() .rowFillFallback() .rowNav()`; seed rows with `form.rowsOf(key)` |
 | `web::Files(key, restBase)` | path | `.initial(path) .uploadBase(path)` |
 | `web::Upload(key, url)` | — | `.accept(mime)` |
@@ -501,6 +502,15 @@ Rules worth knowing:
   type needs both sides.
 - Colors baked into the form (`.color()`) only change on refetch. WS ticks
   update values only (`NTPSettingsService.h:128-132`).
+- **Sibling values** (`Progress.maxKey/markerKey`, `Trend.refLine`) name
+  another state key. On a live tab that can be any key of the WS reader
+  (it doesn't have to be a field). On a REST-only tab it must be a field of
+  the same form.
+- **Device time.** The manifest carries `device.tz = {iana, posix}` from
+  `TimeSync`, and `xFormat` labels are formatted in that zone, not the
+  browser's. Without an IANA label the POSIX standard offset is used, shown
+  as "UTC±N". A timezone change re-bakes the manifest, and a page picks it
+  up on reload.
 - Editable (`rw`) fields on a **live** tab are written over WS on blur
   (`DynamicStatus.tsx:198`, a `{"type":"p", ch, p:{key:val}}` frame).
   They reach the **WS updater**, not the REST one.

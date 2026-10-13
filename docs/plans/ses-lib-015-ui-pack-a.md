@@ -167,3 +167,23 @@ The obvious name `ref` is taken (the action key `ActionRef`), hence `refl`. `xFm
   - Trend `pw_chart` with `xFormat("time")`;
   - a daily bar chart of the month with `xFormat("dom")` or category;
   - `DateTime.timeOfDay()` for `sched_from`/`sched_to` in the device zone.
+
+## 9. Implementation notes
+
+- **Sibling values.** On a live tab, `DynamicStatus` keeps a shallow merge of every WS
+  frame, so `maxKey`/`markerKey`/`refLine` may name any key of the WS reader. Elsewhere
+  they must be fields of the same form.
+- **Category trends.** `DynamicStatus` replaces the rows on each push. `TrendChart` skips
+  the timestamp merge and takes the series from the numeric row keys except `xAxis`.
+- **Manifest cache.** It is now always written as `<file>.tmp` and then renamed, at boot
+  too. A truncated write keeps the previous file.
+- **TimeSync.** `ESPRACK_TIMESYNC_MAX_LISTENERS` went from 4 to 6, because App now uses
+  one slot.
+- **[host].** `ui/src/components/dynamic-component/utils/fieldParser.test.ts` has 13
+  jest cases: run `react-app-rewired test` with `TZ=America/New_York`. The option strings
+  are hand-copied from Form.h, because the `FieldVocab.h` → TS codegen is still a TODO.
+- **Measured** (pioarduino 54.03.21-2, C3 light-demo):
+  - UI JS +3,789 B gz (394,743 → 398,532, the same toolchain at 29c438b and here);
+  - framework C++ ≈ +1.3 KB flash, +32 B RAM (two listener slots);
+  - the demo's UI pack tab +4,048 B (demo only).
+  - C3 2,599,070 B with the tab, C6 2,599,713, S3 2,695,462; 0 warnings.
