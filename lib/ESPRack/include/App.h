@@ -68,8 +68,23 @@ class HwRegistry;          // hw/HwRegistry.h — owned by App
 // onShutdown() skip work that makes no sense for that reason.
 const char* restartReason();
 
-// Reasons used by the built-in modules.
-static constexpr const char* kRestartFactoryReset = "system.factoryReset";
+// Why THIS boot happened (SES-LIB-007), stable for the whole boot:
+//   * a software reset through restartDevice() -> the reason it was given
+//     (restartDevice stores it in RTC memory before the hooks run);
+//   * a software reset that bypassed it (esp_restart, a library) -> "idf";
+//   * otherwise the hardware reason: "power-on", "ext", "panic", "int-wdt",
+//     "task-wdt", "wdt", "brownout", "deep-sleep", "usb", "jtag", "unknown".
+const char* lastRestartReason();
+
+// Reasons used by the built-in modules (≤ 23 chars survive the reboot).
+static constexpr const char* kRestartUser          = "user";          // system.restart
+static constexpr const char* kRestartUpload        = "upload";        // firmware upload
+static constexpr const char* kRestartConfigRestore = "config-restore";
+static constexpr const char* kRestartFactoryReset  = "system.factoryReset";
+static constexpr const char* kRestartAutoUpdate    = "auto-update";
+static constexpr const char* kRestartMothership    = "mothership";    // mothership reboot command
+static constexpr const char* kRestartOta           = "ota";           // ArduinoOTA
+static constexpr const char* kRestartHwRestore     = "hw-restore";    // System -> Hardware
 
 class App {
  public:

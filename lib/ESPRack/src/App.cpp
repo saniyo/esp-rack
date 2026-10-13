@@ -14,9 +14,13 @@
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <esp_attr.h>
+#include <esp_rom_crc.h>
 #include <esp_system.h>
 #include <esp_task_wdt.h>
 #include <esp_timer.h>
+#include <stddef.h>
+#include <string.h>
 
 // Firmware-tag anchors — keep the strings emitted in FwTags.cpp
 // alive through --gc-sections. A function-local volatile load isn't
@@ -51,6 +55,63 @@ NullSecurityManager& nullSecurity() {
 
 // The running App, for restartDevice() / the esp shutdown hook (LIB-FIX-006).
 App* s_app = nullptr;
+
+// SES-LIB-007: the reason restartDevice() was given, kept across the reset in
+// RTC memory (not power loss). 32 bytes.
+struct RestartRecord {
+  uint32_t magic;
+  char reason[24];
+  uint32_t crc;
+};
+static_assert(sizeof(RestartRecord) == 32, "restart record layout");
+constexpr uint32_t kRestartMagic = 0x31525352u;  // "RSR1"
+RTC_NOINIT_ATTR RestartRecord s_restartRecord;
+
+uint32_t restartRecordCrc(const RestartRecord& r) {
+  return esp_rom_crc32_le(0, reinterpret_cast<const uint8_t*>(&r), offsetof(RestartRecord, crc));
+}
+
+void storeRestartRecord(const char* reason) {
+  RestartRecord r{};
+  r.magic = kRestartMagic;
+  strlcpy(r.reason, reason ? reason : "unknown", sizeof(r.reason));
+  r.crc = restartRecordCrc(r);
+  s_restartRecord = r;
+}
+
+char s_lastReason[24] = {0};
+
+const char* hardwareReason(esp_reset_reason_t rr) {
+  switch (rr) {
+    case ESP_RST_POWERON:   return "power-on";
+    case ESP_RST_EXT:       return "ext";
+    case ESP_RST_SW:        return "idf";  // esp_restart() without restartDevice()
+    case ESP_RST_PANIC:     return "panic";
+    case ESP_RST_INT_WDT:   return "int-wdt";
+    case ESP_RST_TASK_WDT:  return "task-wdt";
+    case ESP_RST_WDT:       return "wdt";
+    case ESP_RST_BROWNOUT:  return "brownout";
+    case ESP_RST_DEEPSLEEP: return "deep-sleep";
+    case ESP_RST_USB:       return "usb";
+    case ESP_RST_JTAG:      return "jtag";
+    default:                return "unknown";
+  }
+}
+
+// Once per boot, before anything can call restartDevice() again.
+void resolveLastRestartReason() {
+  if (s_lastReason[0]) return;
+  const esp_reset_reason_t rr = esp_reset_reason();
+  const RestartRecord r = s_restartRecord;
+  const bool valid = r.magic == kRestartMagic && r.crc == restartRecordCrc(r) &&
+                     memchr(r.reason, '\0', sizeof(r.reason)) != nullptr && r.reason[0];
+  if (rr == ESP_RST_SW && valid) {
+    strlcpy(s_lastReason, r.reason, sizeof(s_lastReason));
+  } else {
+    strlcpy(s_lastReason, hardwareReason(rr), sizeof(s_lastReason));
+  }
+  s_restartRecord.magic = 0;  // used: a later non-SW reset never reuses it
+}
 }  // namespace
 
 #ifndef ESPRACK_SHUTDOWN_BUDGET_MS
@@ -142,6 +203,11 @@ App::App(AsyncWebServer* server, const char* deviceName, const char* deviceVersi
   sys.auth          = WebAuthLevel::Authenticated;
   sys.routeTemplate = "/system/*";
   webManager_.registerCompoundFeature(std::move(sys));
+
+  // Why this boot happened (SES-LIB-007): read the RTC record now, before
+  // anything can restart again.
+  resolveLastRestartReason();
+  log_i("[boot] last restart: %s", s_lastReason);
 
   s_app = this;
 }
@@ -610,16 +676,23 @@ void App::finishAndRestart() {
 }
 
 void App::onEspShutdown() {
-  if (s_app) s_app->runShutdownOnce("esp_restart");
+  if (s_app) s_app->runShutdownOnce("idf");  // esp_restart() outside restartDevice()
 }
 
 const char* restartReason() {
   return (s_app && s_app->shutdownDone_.load()) ? s_app->restartReason_ : "";
 }
 
+const char* lastRestartReason() {
+  resolveLastRestartReason();
+  return s_lastReason;
+}
+
 void restartDevice(const char* reason, std::function<void()> afterShutdown) {
   App* a = s_app;
+  resolveLastRestartReason();                 // read this boot's record before overwriting it
   if (!a) {                                   // no framework: nothing to shut down
+    storeRestartRecord(reason);
     if (afterShutdown) afterShutdown();
     esp_restart();
   }
@@ -641,6 +714,9 @@ void restartDevice(const char* reason, std::function<void()> afterShutdown) {
 
   a->restartReason_ = reason ? reason : "unknown";
   a->afterShutdown_ = std::move(afterShutdown);
+  // Survives the reset: lastRestartReason() of the next boot (SES-LIB-007).
+  // Written before the hooks, so a hook that hangs doesn't lose it.
+  storeRestartRecord(a->restartReason_);
 
   if (!a->begun_ || onLoop) a->finishAndRestart();
 

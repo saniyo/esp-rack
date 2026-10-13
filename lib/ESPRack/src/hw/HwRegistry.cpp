@@ -314,7 +314,7 @@ void HwRegistry::loop() {
     }
   }
   log_w("[hw] restore factory pins: %d instance(s), restarting", restored);
-  restartDevice("system.restoreFactoryHw");
+  restartDevice(kRestartHwRestore);
 }
 
 #if ESPRACK_HW_TAB
