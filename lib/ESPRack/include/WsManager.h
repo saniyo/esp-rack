@@ -40,6 +40,7 @@
 #endif
 
 #include "StatefulService.h"
+#include "WebAuth.h"
 
 #ifndef MWS_DEFAULT_JSON_CAP
 #define MWS_DEFAULT_JSON_CAP 2048
@@ -142,14 +143,16 @@ class WsManager {
             StatefulService<TState>* service,
             JsonStateReader<TState> reader,
             JsonStateUpdater<TState> updater,
-            bool autoBroadcast = true)
+            bool autoBroadcast = true,
+            WebAuthLevel level = WebAuthLevel::Authenticated)
         : _mgr(manager),
           _path(path ? String(path) : String()),
           _service(service),
           _jsonCapacity(jsonCapacity ? jsonCapacity : (size_t)MWS_DEFAULT_JSON_CAP),
           _reader(reader),
           _updater(updater),
-          _autoBroadcast(autoBroadcast) {
+          _autoBroadcast(autoBroadcast),
+          _level(level) {
       attach();
     }
 
@@ -157,7 +160,7 @@ class WsManager {
       if (_attached) return;
       if (!_mgr || !_service || _path.length() == 0) return;
 
-      _mgr->template addEndpoint<TState>(_path, _service, _reader, _updater, _jsonCapacity);
+      _mgr->template addEndpoint<TState>(_path, _service, _reader, _updater, _jsonCapacity, _level);
 
       // Auto-broadcast on any service update (REST/MQTT/WS); origin lets the
       // frontend filter its own echoes.
@@ -189,6 +192,7 @@ class WsManager {
     JsonStateReader<TState> _reader;
     JsonStateUpdater<TState> _updater;
     bool _autoBroadcast{true};
+    WebAuthLevel _level{WebAuthLevel::Authenticated};
 
     bool _attached{false};
     update_handler_id_t _handlerId{0};
@@ -224,13 +228,25 @@ class WsManager {
     if (_ws) _ws->setFilter(_authFilter);
   }
 
+  // Per-channel authorization (LIB-FIX-003). The upgrade filter only proves
+  // "authenticated"; each connection's identity is resolved once at
+  // WS_EVT_CONNECT through this manager into an access level + write right:
+  //   sub on channel X  -> client level >= X's feature auth level
+  //   "p" write on X    -> the above AND operator role (not a "reader" token)
+  // Without a manager (no SecurityModule / FT_SECURITY=0) every client is
+  // treated as admin+operator, matching the open-device behaviour elsewhere.
+  // Identity is fixed for the connection's lifetime: a revoked token keeps
+  // its socket until it reconnects (ping eviction / page reload).
+  void setSecurityManager(SecurityManager* sm) { _sm = sm; }
+
   // `path` is the CHANNEL name (feature id). All channels share one socket.
   template <typename TState>
   void* addEndpoint(const String& path,
                     StatefulService<TState>* svc,
                     JsonStateReader<TState> reader,
                     JsonStateUpdater<TState> updater,
-                    size_t jsonCapacity = MWS_DEFAULT_JSON_CAP) {
+                    size_t jsonCapacity = MWS_DEFAULT_JSON_CAP,
+                    WebAuthLevel level = WebAuthLevel::Authenticated) {
     if (!_server || !svc || path.length() == 0) {
       return nullptr;
     }
@@ -243,6 +259,7 @@ class WsManager {
     }
 
     std::unique_ptr<Channel<TState>> ch(new Channel<TState>(path, svc, reader, updater, jsonCapacity));
+    ch->level = level;
     ChannelBase* chPtr = ch.get();
 
     _channels[path] = chPtr;
@@ -428,11 +445,15 @@ class WsManager {
     uint32_t lastTxMs{0};
     uint32_t droppedFrames{0};   // frames skipped due to per-client back-pressure
     std::set<String> subs;       // channels this client subscribed to
+    // Resolved once at connect (see setSecurityManager).
+    WebAuthLevel level{WebAuthLevel::Admin};
+    bool canWrite{true};
   };
 
   // --------- Channel type-erasure ---------
   struct ChannelBase {
     String name;                              // channel id (== feature id)
+    WebAuthLevel level{WebAuthLevel::Authenticated};  // the feature's auth level
     size_t jsonCapacity{MWS_DEFAULT_JSON_CAP};
     uint32_t droppedBroadcasts{0};            // skipped because no subscriber was ready
 
@@ -492,6 +513,22 @@ class WsManager {
   AsyncWebServer* _server{nullptr};
   AsyncWebSocket* _ws{nullptr};                 // THE single multiplexed socket
   ArRequestFilterFunction _authFilter{nullptr};
+  SecurityManager* _sm{nullptr};  // per-connection identity (LIB-FIX-003)
+
+  static bool levelAtLeast(WebAuthLevel have, WebAuthLevel need) {
+    return static_cast<uint8_t>(have) >= static_cast<uint8_t>(need);
+  }
+
+  // Copy of a client's access rights, taken under the roster lock. Unknown
+  // client (already gone) -> no rights.
+  bool clientRights(uint32_t cid, WebAuthLevel& level, bool& canWrite) const {
+    ClientsLock g(_clientsMx);
+    auto cit = _clients.find(cid);
+    if (cit == _clients.end()) return false;
+    level = cit->second.level;
+    canWrite = cit->second.canWrite;
+    return true;
+  }
 
   std::vector<std::unique_ptr<ChannelBase>> _channelList;
   std::map<String, ChannelBase*> _channels;
@@ -659,21 +696,34 @@ class WsManager {
         const char* type = root["type"] | "";
         String ch = root["ch"] | "";
 
+        WebAuthLevel level = WebAuthLevel::Public;
+        bool canWrite = false;
+        ChannelBase* base = ch.length() ? findChannel(ch) : nullptr;
+        const bool known = clientRights(it->cid, level, canWrite);
+
         if (ch.length() > 0) {
           if (strcmp(type, "sub") == 0) {
-            {
-              ClientsLock g(_clientsMx);
-              auto cit = _clients.find(it->cid);
-              if (cit != _clients.end()) cit->second.subs.insert(ch);
+            // Subscribing to an unknown channel stays allowed (no data
+            // flows until it exists); a known channel needs the level.
+            if (!known || (base && !levelAtLeast(level, base->level))) {
+              log_w("[ws] sub denied: cid=%u ch=%s", (unsigned)it->cid, ch.c_str());
+            } else {
+              {
+                ClientsLock g(_clientsMx);
+                auto cit = _clients.find(it->cid);
+                if (cit != _clients.end()) cit->second.subs.insert(ch);
+              }
+              pushSnapshot(ch, it->cid);   // enqueues a unicast; processTx (below) sends it
             }
-            pushSnapshot(ch, it->cid);   // enqueues a unicast; processTx (below) sends it
           } else if (strcmp(type, "unsub") == 0) {
             ClientsLock g(_clientsMx);
             auto cit = _clients.find(it->cid);
             if (cit != _clients.end()) cit->second.subs.erase(ch);
+          } else if (base && root["p"].is<JsonObject>() &&
+                     (!known || !canWrite || !levelAtLeast(level, base->level))) {
+            log_w("[ws] write denied: cid=%u ch=%s", (unsigned)it->cid, ch.c_str());
           } else {
             // State write from the client.
-            ChannelBase* base = findChannel(ch);
             if (base && root["p"].is<JsonObject>()) {
               String origin = root["origin_id"] | "";
               if (origin.length() == 0) origin = String("ws:") + String(it->cid);
@@ -696,6 +746,25 @@ class WsManager {
     const uint32_t id = c->id();
     bool justConnected = false;
 
+    // Resolve the connection's identity from the upgrade request (passed as
+    // `a` on WS_EVT_CONNECT) BEFORE taking the roster lock — token checks
+    // can be slow. No manager = open device (admin + operator).
+    WebAuthLevel connLevel = WebAuthLevel::Admin;
+    bool connCanWrite = true;
+    if (t == WS_EVT_CONNECT && _sm) {
+      AsyncWebServerRequest* req = reinterpret_cast<AsyncWebServerRequest*>(a);
+      if (req) {
+        Authentication au = _sm->authenticateRequest(req);
+        connLevel = !au.authenticated ? WebAuthLevel::Public
+                  : (au.user && au.user->admin) ? WebAuthLevel::Admin
+                  : WebAuthLevel::Authenticated;
+        connCanWrite = AuthenticationPredicates::IS_OPERATOR(au);
+      } else {
+        connLevel = WebAuthLevel::Public;
+        connCanWrite = false;
+      }
+    }
+
     // Map mutations under the lock. ws sends (sendId) and queue pumping happen
     // AFTER releasing it.
     {
@@ -709,6 +778,8 @@ class WsManager {
           info.connectedAtMs = millis();
           info.lastRxMs = millis();
           info.lastTxMs = 0;
+          info.level = connLevel;
+          info.canWrite = connCanWrite;
           _clients[id] = info;   // empty subs — state flows only after an explicit sub
           justConnected = true;
         } break;

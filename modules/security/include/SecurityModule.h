@@ -55,6 +55,10 @@ class SecurityModule : public ESPRack::Module {
     if (ctx.ws) {
       ctx.ws->setAuthFilter(
           svc_->filterRequest(AuthenticationPredicates::IS_AUTHENTICATED));
+      // Per-channel gate (LIB-FIX-003): each connection's level/role is
+      // resolved at connect and checked against the feature's auth on
+      // every sub and write.
+      ctx.ws->setSecurityManager(svc_.get());
     }
 
     svc_->registerManifest(ctx.web);

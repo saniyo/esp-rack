@@ -113,8 +113,11 @@ class WebFeatureEntry : public IWebFeatureEntry {
     // name is the feature id (NOT the legacy wsPath). _spec.wsPath now serves
     // only as the opt-in "this feature is live" flag.
     if (_spec.wsPath && _wsManager && !_wsBinding) {
+      // The channel carries the feature's auth level: WsManager gates sub
+      // by it and writes by it + the operator floor (LIB-FIX-003).
       _wsBinding.reset(new WsManager::Binding<T>(_wsManager, _spec.id, _wsBufferSize,
-                                                 _service, _wsReader, _wsUpdater, true));
+                                                 _service, _wsReader, _wsUpdater, true,
+                                                 _spec.auth));
     }
 
     _mounted = true;

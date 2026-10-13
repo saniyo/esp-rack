@@ -35,7 +35,18 @@ class WebPageEntry : public IWebFeatureEntry {
     for (const auto& e : _spec.endpoints) {
       if (!e.path) continue;
       const char* method = e.method ? e.method : "GET";
-      auto predicate = webAuthLevelToPredicate(e.auth);
+      auto levelPredicate = webAuthLevelToPredicate(e.auth);
+      // Operator floor for mutating methods (LIB-FIX-003), same rule as
+      // typed-feature state POSTs and actions: a "reader" machine token may
+      // GET whatever its level allows but never mutate (403). A jsonHandler
+      // always carries a body, i.e. is mutating whatever `method` says.
+      const bool mutating = e.jsonHandler || strcmp(method, "GET") != 0;
+      AuthenticationPredicate predicate = levelPredicate;
+      if (mutating) {
+        predicate = [levelPredicate](Authentication& a) {
+          return levelPredicate(a) && AuthenticationPredicates::IS_OPERATOR(a);
+        };
+      }
 
       if (e.jsonHandler) {
         // POST/PUT/PATCH path that wants its body auto-parsed.
