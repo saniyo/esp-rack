@@ -287,6 +287,27 @@ class Trend : public FieldSpec<Trend> {
   Trend& maxPoints(int n)         { _maxPoints = n; return *this; }
   Trend& legend(bool on = true)   { _legend = on; return *this; }
   Trend& tooltip(bool on = true)  { _tooltip = on; return *this; }
+  // x labels in the DEVICE timezone (manifest device.tz); x = epoch seconds
+  // (>= 1e11 = ms). Without xFormat the x numbers show raw (e.g. millis()).
+  //   epoch (time under 36 h of span, else date) | time | date | datetime | dom | month
+  Trend& xFormat(const char* f)   { _xFmt = f; return *this; }
+  // x is a category key (xAxis): each push REPLACES the data — no timestamp
+  // merge, no maxPoints window. Works for barChart and lineChart.
+  Trend& category(bool on = true) { _cat = on; return *this; }
+  // Stack these series (bars) on top of each other; call again for another stack.
+  Trend& stack(const char* a, const char* b, const char* c = nullptr) {
+    if (_stack.length()) _stack += '|';
+    _stack += a; _stack += '+'; _stack += b;
+    if (c && c[0]) { _stack += '+'; _stack += c; }
+    return *this;
+  }
+  // Horizontal line at y = the sibling state key's live value. No ':' '|' ';'
+  // in label.
+  Trend& refLine(const char* key_, const char* color, const char* label = nullptr) {
+    if (_refl.length()) _refl += '|';
+    _refl += key_; _refl += ':'; _refl += (color ? color : ""); _refl += ':'; _refl += (label ? label : "");
+    return *this;
+  }
   Trend& line(const char* key_, const char* color, const char* type) { return line(key_, false, color, type); }
   Trend& line(const char* key_, bool hidden, const char* color, const char* type) {
     if (_lines.length()) _lines += ';';
@@ -302,11 +323,15 @@ class Trend : public FieldSpec<Trend> {
     String o = head(FieldType::Trend);
     o += ';'; o += Opt::Mode; o += '='; o += _mode;
     o += ';'; o += Opt::TrendXAxis; o += '=';
-    o += (String(_mode) == "barChart") ? "keys" : _xAxis;
+    o += (String(_mode) == "barChart" && !_cat) ? String("keys") : _xAxis;
     if (_lines.length())  { o += ';'; o += Opt::Lines; o += '='; o += _lines; }
     if (_legend)  { o += ';'; o += Opt::Legend;  o += "=true"; }
     if (_tooltip) { o += ';'; o += Opt::Tooltip; o += "=true"; }
     if (_maxPoints > 0) { o += ';'; o += Opt::MaxPoints; o += '='; o += _maxPoints; }
+    if (_xFmt && _xFmt[0]) { o += ';'; o += Opt::XFormat; o += '='; o += _xFmt; }
+    if (_cat) { o += ';'; o += Opt::Category; }
+    if (_stack.length()) { o += ';'; o += Opt::Stack; o += '='; o += _stack; }
+    if (_refl.length()) { o += ';'; o += Opt::RefLine; o += '='; o += _refl; }
     o += tail();
     f["o"] = o;
   }
@@ -314,6 +339,9 @@ class Trend : public FieldSpec<Trend> {
   const char* _mode = "lineChart";
   String _xAxis = "timestamp";
   String _lines;
+  const char* _xFmt = nullptr;
+  bool _cat = false;
+  String _stack, _refl;
   bool _legend = false, _tooltip = false;
   int _maxPoints = 100;
 };
@@ -404,9 +432,41 @@ class DateTime : public FieldSpec<DateTime> {
   DateTime& dateOnly() { return putStr(Opt::DateTimeMode, "date"); }
   DateTime& timeOnly() { return putStr(Opt::DateTimeMode, "time"); }
   DateTime& dateTime() { return putStr(Opt::DateTimeMode, "datetime"); }
+  // Time of day: the value is seconds since local midnight (0..86399), shown
+  // and edited as HH:MM with no timezone conversion. Clamp it in the updater.
+  DateTime& timeOfDay() { return putStr(Opt::DateTimeMode, "tod"); }
   void writeTo(JsonArray& fields) const { emit(fields, FieldType::DateTime, _v); }
  private:
   int32_t _v;
+};
+
+// ── Progress (read-only bar: value against a static or live max) ─────────--
+//   web::Progress("today", s.kwh).max(10).maxKey("plan_max").markerKey("plan")
+//       .unit("kWh").format("0.0").thresholds("0:error,60:warning,95:success")
+// maxKey / markerKey name sibling state keys (on a live tab: any readState
+// key; otherwise a field of the same form). thresholds: % of max -> colour.
+class Progress : public FieldSpec<Progress> {
+ public:
+  Progress(const char* key, double value) : FieldSpec(key), _v(value) { _af = Access::Read; }
+  Progress& min(double v)                { _min = v; return *this; }
+  Progress& max(double v)                { _max = v; return *this; }
+  Progress& maxKey(const char* k)        { return putStr(Opt::MaxKey, k); }
+  Progress& markerKey(const char* k)     { return putStr(Opt::MarkerKey, k); }
+  Progress& unit(const char* u)          { return putStr(Opt::Unit, u); }
+  Progress& format(const char* f)        { return putStr(Opt::Format, f); }
+  Progress& thresholds(const char* spec) { return putStr(Opt::Thresholds, spec); }
+  void writeTo(JsonArray& fields) const {
+    JsonObject f = fields.createNestedObject();
+    f[_key] = _v;  // value FIRST (see emit)
+    String o = head(FieldType::Progress);
+    o += ';'; o += Opt::Min; o += '='; o += _min;
+    o += ';'; o += Opt::Max; o += '='; o += _max;
+    o += tail();
+    f["o"] = o;
+  }
+ private:
+  double _v;
+  double _min = 0, _max = 100;
 };
 
 // ── Action (button firing an HTTP call or referencing a manifest action) ──

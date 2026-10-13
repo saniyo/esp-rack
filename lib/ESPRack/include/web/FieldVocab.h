@@ -57,6 +57,7 @@ constexpr const char* Action    = "action";
 constexpr const char* Message   = "message";
 constexpr const char* TimeZones = "timezones";
 constexpr const char* Ip        = "ip";
+constexpr const char* Progress  = "progress";
 }  // namespace FieldType
 
 // ── Access flag — second segment. r = read-only, rw = editable. ──
@@ -102,6 +103,15 @@ constexpr const char* Legend        = "legend";       // trend — bare flag
 constexpr const char* Tooltip       = "tooltip";      // trend — bare flag
 constexpr const char* MaxPoints     = "maxPoints";    // trend
 constexpr const char* Mode          = "mode";         // trend / table
+constexpr const char* XFormat       = "xFmt";         // trend — epoch|time|date|datetime|dom|month (device TZ)
+constexpr const char* Category      = "cat";          // trend — bare flag: x is a category, data replaced per push
+constexpr const char* Stack         = "stack";        // trend — "a+b|c+d" stacked groups
+constexpr const char* RefLine       = "refl";         // trend — "key:color:label|…" (y = sibling key's value)
+
+// Progress.
+constexpr const char* MaxKey        = "maxKey";       // progress — max from a sibling key
+constexpr const char* MarkerKey     = "markerKey";    // progress — marker at a sibling key's value
+constexpr const char* Thresholds    = "thr";          // progress — "pct:color,…" ascending
 
 // Files / upload.
 constexpr const char* Base          = "base";         // files
@@ -123,7 +133,7 @@ constexpr const char* Avatar          = "avatar";          // table cards
 constexpr const char* Badge           = "badge";           // table cards — "field|unit|icon"
 
 // Datetime.
-constexpr const char* DateTimeMode  = "dtmode";       // datetime — "date|time|datetime"
+constexpr const char* DateTimeMode  = "dtmode";       // datetime — "date|time|datetime|tod"
 
 // Action.
 constexpr const char* Method        = "method";       // action
