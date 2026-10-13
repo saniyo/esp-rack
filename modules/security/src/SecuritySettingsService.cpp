@@ -261,9 +261,15 @@ void SecuritySettingsService::registerManifest(WebManager* web) {
                     "Token registry is full - revoke and reuse a slot");
         return;
       }
-      // Snackbar carries the one-time token value.
-      String body = String("{\"ok\":true,\"message\":\"") + role + " token '" +
-                    name + "' (copy now, shown once): " + tok + "\"}";
+      // Snackbar carries the one-time token value. Built with ArduinoJson
+      // (LIB-FIX-008): the operator-supplied name is escaped, so a quote or
+      // backslash in it can't break the JSON and lose the shown-once token.
+      String message = String(role) + " token '" + name + "' (copy now, shown once): " + tok;
+      DynamicJsonDocument doc(JSON_OBJECT_SIZE(2) + message.length() + 64);
+      doc["ok"] = true;
+      doc["message"] = message;
+      String body;
+      serializeJson(doc, body);
       r->send(200, "application/json", body);
     };
     web->registerAction(act);
