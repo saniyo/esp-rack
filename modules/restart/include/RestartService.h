@@ -11,6 +11,7 @@
 
 #include <ESPAsyncWebServer.h>
 #include <SecurityManager.h>
+#include <App.h>   // ESPRack::restartDevice
 
 class WebManager;
 
@@ -24,11 +25,10 @@ class RestartService {
   // ignored and no path #define is needed.
   void registerManifest(WebManager* web);
 
-  static void restartNow() {
-    WiFi.disconnect(true);
-    // delay(500);
-    vTaskDelay(500 / portTICK_PERIOD_MS);
-    ESP.restart();
+  // Graceful restart through the framework (LIB-FIX-006): every module's
+  // onShutdown() runs (reverse order, on the loop task) before the reset.
+  static void restartNow(const char* reason = "system.restart") {
+    ESPRack::restartDevice(reason);
   }
 
  private:

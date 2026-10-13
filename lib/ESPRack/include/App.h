@@ -25,6 +25,8 @@
 // Its destructor calls shutdown() if begin() ran.
 
 #include <Arduino.h>
+#include <atomic>
+#include <functional>
 #include <memory>
 #include <vector>
 
@@ -44,6 +46,27 @@ class IMothershipProfileProvider;   // forward — populated by MothershipModule
 class IWireguardProvider;           // forward — populated by WireGuardModule
 
 namespace ESPRack {
+
+// Graceful device restart (LIB-FIX-006) — THE way to reboot. Runs every
+// installed module's onShutdown() in reverse install order on the loop task
+// (so it never races that module's onLoop), each timed against
+// ESPRACK_SHUTDOWN_BUDGET_MS, then esp_restart(). Callable from any task:
+// off-loop callers hand the restart to App::loop() and fall back to running
+// it themselves if the loop doesn't respond within 3 s. Without an App it
+// is a plain esp_restart(). Never returns.
+//
+// `afterShutdown` (optional) runs once, AFTER every onShutdown() and right
+// before the chip resets — e.g. factory reset wipes /config there, so a
+// module that persists state in onShutdown() can't resurrect the files.
+[[noreturn]] void restartDevice(const char* reason,
+                                std::function<void()> afterShutdown = nullptr);
+
+// Reason passed to the restart in progress ("" when none). Lets an
+// onShutdown() skip work that makes no sense for that reason.
+const char* restartReason();
+
+// Reasons used by the built-in modules.
+static constexpr const char* kRestartFactoryReset = "system.factoryReset";
 
 class App {
  public:
@@ -144,7 +167,23 @@ class App {
   // instances. It transfers the `modules_` vector into the App via
   // adoptModules() then disowns it.
   friend class Builder;
+  friend void restartDevice(const char* reason, std::function<void()> afterShutdown);
+  friend const char* restartReason();
   void adoptModules(std::vector<std::unique_ptr<Module>>&& modules);
+
+  // Restart plumbing (LIB-FIX-006). runShutdownOnce() is idempotent across
+  // tasks: whichever path gets there first (loop, fallback, esp shutdown
+  // handler) runs the module hooks; the others skip them.
+  void runShutdownOnce(const char* reason);
+  [[noreturn]] void finishAndRestart();    // hooks -> afterShutdown -> esp_restart
+  static void onEspShutdown();             // esp_register_shutdown_handler hook
+  std::function<void()> afterShutdown_;
+  std::atomic<bool> afterDone_ {false};
+  std::atomic<bool> shutdownDone_ {false};
+  std::atomic<bool> restartRequested_ {false};
+  std::atomic<bool> restartClaimed_ {false};   // first restartDevice() caller wins
+  const char*       restartReason_ {"unknown"};
+  void*             loopTask_ {nullptr};   // TaskHandle_t of the App::loop caller
 
   AsyncWebServer*  server_ {nullptr};
   String           deviceName_;

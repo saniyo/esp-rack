@@ -2,6 +2,7 @@
 #include "AutoUpdateService.h"
 
 #include <WebManager.h>
+#include <App.h>  // ESPRack::restartDevice (LIB-FIX-006)
 #include <DeviceIdentity.h>
 
 #ifdef ESP32
@@ -175,7 +176,7 @@ void AutoUpdateService::loop() {
       // ESP32 OTA is partition-safe: partial writes never get booted.
       // vTaskDelay yields the scheduler instead of busy-blocking the loop.
       vTaskDelay(pdMS_TO_TICKS(1000));
-      ESP.restart();
+      ESPRack::restartDevice("autoUpdate.timeout");
     }
   }
 
@@ -446,7 +447,7 @@ void AutoUpdateService::handleOtaResult(t_httpUpdate_return ret, const char* ser
       setOtaState(AU_SUCCESS);
       setLastResult("success");
       vTaskDelay(pdMS_TO_TICKS(1000));
-      ESP.restart();
+      ESPRack::restartDevice("autoUpdate");
       break;
   }
 }

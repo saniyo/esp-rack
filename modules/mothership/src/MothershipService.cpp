@@ -4,6 +4,7 @@
 #include <IWireguardProvider.h>
 #include <DeviceIdentity.h>
 #include <WebManager.h>
+#include <App.h>  // ESPRack::restartDevice (LIB-FIX-006)
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
@@ -1051,9 +1052,12 @@ String MothershipService::actionReboot(JsonObjectConst params) {
   // returned), nothing on this side needs to flush. The browser
   // sees TCP-RST on its open WS sockets, exactly the same as on
   // any other reset path.
-  log_d("[mship.action.reboot] esp_restart()");
+  // LIB-FIX-006: through the framework so modules' onShutdown() run (on the
+  // loop task, which is what serialises them against WsManager cleanup);
+  // the reset follows immediately after the hooks.
+  log_d("[mship.action.reboot] restartDevice()");
   Serial.flush();
-  esp_restart();   // does not return
+  ESPRack::restartDevice("mothership.reboot");   // does not return
   return "rebooting";
 }
 
@@ -1347,16 +1351,36 @@ String MothershipService::actionConfigRestore(JsonObjectConst params) {
   if (configs.isNull() || configs.size() == 0) {
     return "missing or empty params.configs";
   }
-  size_t written = mgr->restoreAll(configs);
-  log_d("[mship.config.restore] wrote %u config files",
-                (unsigned)written);
-  if (written == 0) return "no_entries_matched";
-  // Schedule a reboot so each service's begin() picks up the new
-  // primary files cleanly. Half-second delay lets the action result
-  // land in the ring before the inline esp_restart() fires.
-  log_d("[mship.config.restore] rebooting in 500ms");
-  vTaskDelay(pdMS_TO_TICKS(500));
-  esp_restart();
+  // Count matching entries first so "nothing matched" never reboots.
+  size_t matching = 0;
+  mgr->forEachEntry([&](ConfigManager::IConfigEntry& e) {
+    if (configs[e.id().c_str()].is<JsonObjectConst>()) ++matching;
+  });
+  if (matching == 0) return "no_entries_matched";
+  // The files are written AFTER every module's onShutdown() (LIB-FIX-006),
+  // so a module persisting state on shutdown can't overwrite them. The
+  // payload must outlive this action: keep a serialized copy. If that
+  // allocation fails, fall back to writing now (pre-006 behaviour).
+  std::shared_ptr<String> blob(new String());
+  serializeJson(configs, *blob);
+  if (blob->length() == 0) {
+    size_t written = mgr->restoreAll(configs);
+    log_w("[mship.config.restore] no heap for deferred restore — wrote %u now",
+          (unsigned)written);
+    ESPRack::restartDevice("mothership.configRestore");
+  }
+  log_d("[mship.config.restore] %u entries match; restoring after shutdown",
+        (unsigned)matching);
+  vTaskDelay(pdMS_TO_TICKS(500));   // let the action result reach the ring
+  ESPRack::restartDevice("mothership.configRestore", [mgr, blob]() {
+    DynamicJsonDocument doc(blob->length() * 2 + 1024);
+    if (deserializeJson(doc, *blob) == DeserializationError::Ok) {
+      size_t written = mgr->restoreAll(doc.as<JsonObjectConst>());
+      log_d("[mship.config.restore] wrote %u config files", (unsigned)written);
+    } else {
+      log_e("[mship.config.restore] deferred restore: payload re-parse failed");
+    }
+  });
   return "rebooting";   // unreached
 }
 

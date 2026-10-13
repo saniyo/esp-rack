@@ -4,6 +4,7 @@
 #include <ESPFS.h>
 #include <FormBuilder.h>
 #include <WebManager.h>
+#include <App.h>  // ESPRack::restartDevice (LIB-FIX-006)
 
 ConfigManagerService::ConfigManagerService(AsyncWebServer* server,
                                            SecurityManager* securityManager,
@@ -83,13 +84,23 @@ void ConfigManagerService::registerManifest(WebManager* web) {
   restore.confirm        = "Restore all settings from saved backup and reboot?";
   restore.successMessage = "Restoring snapshot, rebooting…";
   restore.handler        = [this](AsyncWebServerRequest* r) {
-    if (!_cfg || !_cfg->restoreAllFromSnapshot()) {
+    // Nothing to restore -> 500 without rebooting (snackbar says so).
+    bool anySnapshot = false;
+    if (_cfg) {
+      _cfg->forEachEntry([&](ConfigManager::IConfigEntry& e) {
+        if (!anySnapshot && _cfg->hasSnapshot(e.primary().c_str())) anySnapshot = true;
+      });
+    }
+    if (!anySnapshot) {
       r->send(500);
       return;
     }
-    r->onDisconnect([]() {
-      delay(500);
-      ESP.restart();
+    // The restore itself runs AFTER every module's onShutdown()
+    // (LIB-FIX-006), so a module persisting state on shutdown can't
+    // overwrite the restored files.
+    ConfigManager* cfg = _cfg;
+    r->onDisconnect([cfg]() {
+      ESPRack::restartDevice("config.restore", [cfg]() { (void)cfg->restoreAllFromSnapshot(); });
     });
     r->send(200);
   };

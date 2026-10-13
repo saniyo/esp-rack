@@ -33,15 +33,21 @@ void FactoryResetService::handleRequest(AsyncWebServerRequest* request) {
 }
 
 /**
- * Delete function assumes that all files are stored flat, within the config directory.
+ * Wipe /config and restart. The wipe runs AFTER every module's onShutdown()
+ * (restartDevice's afterShutdown step, LIB-FIX-006), so a module that
+ * persists state on shutdown can't resurrect config files on a reset device.
+ * Delete function assumes that all files are stored flat, within the config
+ * directory.
  */
 void FactoryResetService::factoryReset() {
-  File root = fs->open(FS_CONFIG_DIRECTORY);
-  File file;
-  while (file = root.openNextFile()) {
-    String path = file.path();
-    file.close();
-    fs->remove(path);
-  }
-  RestartService::restartNow();
+  FS* f = fs;
+  ESPRack::restartDevice(ESPRack::kRestartFactoryReset, [f]() {
+    File root = f->open(FS_CONFIG_DIRECTORY);
+    File file;
+    while (file = root.openNextFile()) {
+      String path = file.path();
+      file.close();
+      f->remove(path);
+    }
+  });
 }

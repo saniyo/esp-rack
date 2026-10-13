@@ -26,9 +26,14 @@
 //                   consumer's main loop(). Must NOT block. Default
 //                   no-op.
 //
-//   onShutdown()  — graceful cleanup before factory reset / restart.
-//                   Called in REVERSE install order so dependents tear
-//                   down first. Default no-op.
+//   onShutdown()  — graceful cleanup before any restart. Runs through
+//                   ESPRack::restartDevice() (all built-in reboot paths)
+//                   or the esp_restart() shutdown hook: REVERSE install
+//                   order, on the loop task when possible, never twice.
+//                   Budget ESPRACK_SHUTDOWN_BUDGET_MS (500 ms) per module —
+//                   persist counters, switch outputs to a safe state.
+//                   ESPRack::restartReason() tells why (e.g.
+//                   kRestartFactoryReset). Default no-op.
 //
 // See ROADMAP.md §3 for the full contract and §3.3 for dependency
 // resolution semantics.
@@ -128,7 +133,8 @@ class Module {
   // Phase D. Main loop tick. Default no-op.
   virtual void onLoop() {}
 
-  // Phase E. Reverse-order shutdown. Default no-op.
+  // Phase E. Reverse-order shutdown before a restart (see header comment).
+  // Must finish quickly (budget 500 ms) and must not block on the network.
   virtual void onShutdown() {}
 };
 

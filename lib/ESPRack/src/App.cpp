@@ -12,6 +12,7 @@
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <esp_system.h>
 #include <esp_timer.h>
 
 // Firmware-tag anchors — keep the strings emitted in FwTags.cpp
@@ -44,7 +45,16 @@ NullSecurityManager& nullSecurity() {
   static NullSecurityManager s;
   return s;
 }
+
+// The running App, for restartDevice() / the esp shutdown hook (LIB-FIX-006).
+App* s_app = nullptr;
 }  // namespace
+
+#ifndef ESPRACK_SHUTDOWN_BUDGET_MS
+// Per-module onShutdown() budget. Not preemptive (a hook can't be
+// interrupted) — an overrun is logged so the offending module shows up.
+#define ESPRACK_SHUTDOWN_BUDGET_MS 500
+#endif
 
 App::App(AsyncWebServer* server, const char* deviceName, const char* deviceVersion) :
     server_       {server},
@@ -128,10 +138,13 @@ App::App(AsyncWebServer* server, const char* deviceName, const char* deviceVersi
   sys.auth          = WebAuthLevel::Authenticated;
   sys.routeTemplate = "/system/*";
   webManager_.registerCompoundFeature(std::move(sys));
+
+  s_app = this;
 }
 
 App::~App() {
   if (begun_) shutdown();
+  if (s_app == this) s_app = nullptr;
 }
 
 void App::adoptModules(std::vector<std::unique_ptr<Module>>&& modules) {
@@ -141,6 +154,15 @@ void App::adoptModules(std::vector<std::unique_ptr<Module>>&& modules) {
 void App::begin() {
   if (begun_) return;
   begun_ = true;
+
+  // Restart plumbing (LIB-FIX-006): remember the loop task (restartDevice
+  // hands off-loop restarts to it) and hook esp_restart() itself so a
+  // reboot that bypasses restartDevice (ArduinoOTA, Update, a library)
+  // still runs the modules' onShutdown().
+  loopTask_ = xTaskGetCurrentTaskHandle();
+  if (esp_register_shutdown_handler(&App::onEspShutdown) != ESP_OK) {
+    log_w("[restart] esp_register_shutdown_handler failed — only restartDevice() runs onShutdown");
+  }
 
   // Anchor the fragmentation-watchdog reference. tick() in loop()
   // will append per-minute samples from here forward; this first
@@ -412,6 +434,13 @@ void App::begin() {
 void App::loop() {
   if (!begun_) return;
 
+  // A restart requested from another task is performed HERE, on the loop
+  // task, so onShutdown() never runs concurrently with the same module's
+  // onLoop() (LIB-FIX-006).
+  if (restartRequested_.load()) {
+    finishAndRestart();
+  }
+
   // Module loop fan-out. The per-module profiler and the heap-drift
   // sampler that bracket it are DEBUG instrumentation (FT_LOOP_PROFILE /
   // FT_HEAP_MONITOR), built for the perf / fragmentation hunt and
@@ -485,12 +514,82 @@ void App::loop() {
 }
 
 void App::shutdown() {
+  runShutdownOnce("shutdown");
+}
+
+void App::runShutdownOnce(const char* reason) {
+  if (shutdownDone_.exchange(true)) return;   // another path got here first
   if (!begun_) return;
-  begun_ = false;
+  begun_ = false;                             // App::loop stops ticking modules
+  log_w("[restart] graceful shutdown (reason=%s)", reason ? reason : "?");
   // Reverse install order so dependents tear down first.
   for (auto it = modules_.rbegin(); it != modules_.rend(); ++it) {
-    if (*it) (*it)->onShutdown();
+    if (!*it) continue;
+    const uint32_t t0 = millis();
+    (*it)->onShutdown();
+    const uint32_t dt = millis() - t0;
+    if (dt > ESPRACK_SHUTDOWN_BUDGET_MS) {
+      ModuleDescriptor d;
+      (*it)->describe(d);
+      log_w("[restart] '%s' onShutdown took %u ms (budget %u ms)",
+            d.id ? d.id : "?", (unsigned)dt, (unsigned)ESPRACK_SHUTDOWN_BUDGET_MS);
+    }
   }
+}
+
+void App::finishAndRestart() {
+  runShutdownOnce(restartReason_);
+  if (afterShutdown_ && !afterDone_.exchange(true)) afterShutdown_();
+  esp_restart();
+}
+
+void App::onEspShutdown() {
+  if (s_app) s_app->runShutdownOnce("esp_restart");
+}
+
+const char* restartReason() {
+  return (s_app && s_app->shutdownDone_.load()) ? s_app->restartReason_ : "";
+}
+
+void restartDevice(const char* reason, std::function<void()> afterShutdown) {
+  App* a = s_app;
+  if (!a) {                                   // no framework: nothing to shut down
+    if (afterShutdown) afterShutdown();
+    esp_restart();
+  }
+
+  // First caller wins. A later caller (any task) just waits for the reset
+  // already under way — it must not cut the running hooks short.
+  bool expected = false;
+  if (!a->restartClaimed_.compare_exchange_strong(expected, true)) {
+    for (;;) vTaskDelay(pdMS_TO_TICKS(1000));
+  }
+
+  a->restartReason_ = reason ? reason : "unknown";
+  a->afterShutdown_ = std::move(afterShutdown);
+
+  const bool onLoop =
+      a->loopTask_ && xTaskGetCurrentTaskHandle() == static_cast<TaskHandle_t>(a->loopTask_);
+  if (!a->begun_ || onLoop) a->finishAndRestart();
+
+  // Off the loop task: hand off to App::loop(), which runs the hooks there
+  // (never concurrently with a module's onLoop) and resets the chip.
+  a->restartRequested_ = true;
+  uint32_t t0 = millis();
+  while (!a->shutdownDone_.load() && millis() - t0 < 3000) {
+    vTaskDelay(pdMS_TO_TICKS(20));
+  }
+  if (a->shutdownDone_.load()) {
+    // The loop is running the hooks — give them their budget, then reset
+    // regardless (a hung hook must not keep the device from rebooting).
+    const uint32_t grace =
+        (uint32_t)a->modules_.size() * ESPRACK_SHUTDOWN_BUDGET_MS + 2000;
+    t0 = millis();
+    while (millis() - t0 < grace) vTaskDelay(pdMS_TO_TICKS(50));
+    esp_restart();
+  }
+  log_w("[restart] loop did not respond within 3 s — shutting down from the caller task");
+  a->finishAndRestart();
 }
 
 }  // namespace ESPRack
