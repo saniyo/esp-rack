@@ -11,6 +11,8 @@
 #include "ProblemJson.h"
 #include "time/TimeSync.h"
 #include "hw/HwRegistry.h"
+#include "system/BootGuard.h"
+#include "system/LoopWdt.h"
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -239,6 +241,11 @@ void App::begin() {
   // i.e. before webManager_.begin() mounts the endpoints.
   TimeSync::instance().begin();
   TimeSync::instance().registerManifest(&webManager_);
+  // Boot-loop guard (SES-LIB-014): before any module starts, so onBegin()
+  // can read BootGuard::info().safeMode. A consumer may call begin() with
+  // other limits before app->begin(); the first call wins.
+  BootGuard::begin();
+  BootGuard::registerManifest(&webManager_);
   // System -> Hardware tab + "Restore factory pins" (LIB-FEAT-001).
   hw_->registerManifest(&webManager_);
 
@@ -533,6 +540,7 @@ void App::loop() {
   }
 
   hw_->loop();  // a pending "Restore factory pins" (restarts)
+  BootGuard::loop();  // markStable() once the uptime reaches stableAfterMs
 
   // Module loop fan-out. The per-module profiler and the heap-drift
   // sampler that bracket it are DEBUG instrumentation (FT_LOOP_PROFILE /
@@ -617,6 +625,8 @@ bool App::runShutdownOnce(const char* reason) {
     return true;
   }
   begun_ = false;                             // App::loop stops ticking modules
+  // The hooks may take longer than the loop watchdog's 5 s in total.
+  LoopWdt::pause();
   log_w("[restart] graceful shutdown (reason=%s)", reason ? reason : "?");
   // Reverse install order so dependents tear down first.
   for (auto it = modules_.rbegin(); it != modules_.rend(); ++it) {
