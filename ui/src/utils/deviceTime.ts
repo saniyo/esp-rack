@@ -70,7 +70,9 @@ export function toEpochMs(x: number): number {
   return Math.abs(x) >= 1e11 ? x : x * 1000;
 }
 
-const OPTS: Record<Exclude<XFormat, 'epoch'> | 'full', Intl.DateTimeFormatOptions> = {
+type FmtKey = Exclude<XFormat, 'epoch'> | 'full' | 'dateFull' | 'datetimeFull' | 'monthYear';
+
+const OPTS: Record<FmtKey, Intl.DateTimeFormatOptions> = {
   time: { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' },
   date: { day: '2-digit', month: '2-digit' },
   datetime: { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' },
@@ -80,11 +82,15 @@ const OPTS: Record<Exclude<XFormat, 'epoch'> | 'full', Intl.DateTimeFormatOption
     year: 'numeric', month: '2-digit', day: '2-digit',
     hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
   },
+  // table cells (SES-LIB-016)
+  dateFull: { year: 'numeric', month: '2-digit', day: '2-digit' },
+  datetimeFull: { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' },
+  monthYear: { month: 'short', year: 'numeric' },
 };
 
 const fmtCache = new Map<string, Intl.DateTimeFormat>();
 
-function formatter(zone: ResolvedZone, key: keyof typeof OPTS, locale?: string): Intl.DateTimeFormat {
+function formatter(zone: ResolvedZone, key: FmtKey, locale?: string): Intl.DateTimeFormat {
   const id = `${locale || ''}|${zone.timeZone || ''}|${key}`;
   let f = fmtCache.get(id);
   if (!f) {
@@ -141,4 +147,54 @@ export function hhmmToSecOfDay(v: string): number | undefined {
   const s = Number(m[3] || 0);
   if (h > 23 || min > 59 || s > 59) return undefined;
   return h * 3600 + min * 60 + s;
+}
+
+// ── Table cells (SES-LIB-016) ──────────────────────────────────────────────
+
+// Duration -> the two largest units: "3d 4h", "2h 05m", "45m 10s", "12s", "0s".
+// unit: what the value counts — seconds (default), ms or minutes.
+export function formatDuration(v: unknown, unit?: string): string {
+  const n = typeof v === 'number' ? v : typeof v === 'string' ? parseFloat(v) : NaN;
+  if (!Number.isFinite(n)) return String(v ?? '');
+  const scale = unit === 'ms' ? 0.001 : unit === 'min' ? 60 : 1;
+  let s = Math.round(Math.abs(n * scale));
+  const sign = n < 0 && s > 0 ? '−' : '';
+  const d = Math.floor(s / 86400);
+  s -= d * 86400;
+  const h = Math.floor(s / 3600);
+  s -= h * 3600;
+  const m = Math.floor(s / 60);
+  s -= m * 60;
+  const p2 = (x: number) => String(x).padStart(2, '0');
+  if (d > 0) return `${sign}${d}d ${h}h`;
+  if (h > 0) return `${sign}${h}h ${p2(m)}m`;
+  if (m > 0) return `${sign}${m}m ${p2(s)}s`;
+  return `${sign}${s}s`;
+}
+
+export type CellTimeType = 'date' | 'time' | 'datetime' | 'duration';
+
+export function isCellTimeType(t: string): t is CellTimeType {
+  return t === 'date' || t === 'time' || t === 'datetime' || t === 'duration';
+}
+
+// A dated table cell in the device zone. date (fmt "month" -> "Oct 2026"),
+// time (fmt "tod": the value is seconds since midnight), datetime, duration.
+// Non-numbers show as they are.
+export function formatCellTime(
+  val: unknown,
+  type: CellTimeType,
+  fmt: string | undefined,
+  zone: ResolvedZone,
+  locale?: string,
+): string {
+  if (val === undefined || val === null || val === '') return '';
+  if (type === 'duration') return formatDuration(val, fmt);
+  if (type === 'time' && fmt === 'tod') return secOfDayToHHMM(val) || String(val);
+  const n = typeof val === 'number' ? val : typeof val === 'string' ? parseFloat(val) : NaN;
+  if (!Number.isFinite(n)) return String(val);
+  const key: FmtKey =
+    type === 'time' ? 'time' : type === 'datetime' ? 'datetimeFull' : fmt === 'month' ? 'monthYear' : 'dateFull';
+  const ms = toEpochMs(n) + (zone.offsetSec ?? 0) * 1000;
+  return formatter(zone, key, locale).format(new Date(ms));
 }

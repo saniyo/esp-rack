@@ -140,9 +140,15 @@ constexpr const char* Method        = "method";       // action
 constexpr const char* Confirm       = "confirm";      // action
 constexpr const char* ActionRef     = "ref";          // action — manifest action id
 constexpr const char* WithFields    = "withFields";   // action — "param=field,..."
+constexpr const char* ClientTime    = "clientTime";   // action — "secParam[,msParam]": browser time on fire
 
 // Message.
 constexpr const char* Level         = "level";        // message — Alert severity
+constexpr const char* LevelKey      = "levelKey";     // message — severity from a sibling value
+
+// Table column type tokens (inside `cols`, not option keys) — device TZ:
+//   "date" (fmt "month") | "time" (fmt "tod" = seconds of day) | "datetime"
+//   | "duration" (fmt "s" default | "ms" | "min")
 }  // namespace Opt
 
 }  // namespace web

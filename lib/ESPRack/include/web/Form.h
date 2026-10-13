@@ -350,6 +350,9 @@ class Trend : public FieldSpec<Trend> {
 class Table : public FieldSpec<Table> {
  public:
   explicit Table(const char* key) : FieldSpec(key) {}
+  // type: "text" | "number" | "boolean" | "date" | "time" | "datetime" |
+  // "duration" (see FieldVocab.h: dated types use the device timezone; fmt
+  // "month" for date, "tod" for time, "s"/"ms"/"min" for duration).
   Table& col(const char* key_, const char* type) { return col(key_, key_, type, nullptr); }
   Table& col(const char* key_, const char* label, const char* type) { return col(key_, label, type, nullptr); }
   Table& col(const char* key_, const char* label, const char* type, const char* fmt) {
@@ -478,6 +481,14 @@ class Action : public FieldSpec<Action> {
   Action& confirm(const char* t)    { return putStr(Opt::Confirm, t); }
   Action& ref(const char* actionId) { return putStr(Opt::ActionRef, actionId); }
   Action& withFields(const char* spec) { return putStr(Opt::WithFields, spec); }
+  // Append the browser's clock on fire: secParam = epoch seconds, msParam (if
+  // set) = 0..999. With .ref("system.setTime") this is "set the clock from
+  // this browser": withClientTime("epoch", "ms").
+  Action& withClientTime(const char* secParam, const char* msParam = nullptr) {
+    String v = secParam ? secParam : "";
+    if (msParam && msParam[0]) { v += ','; v += msParam; }
+    return putStr(Opt::ClientTime, v);
+  }
   void writeTo(JsonArray& fields) const { emit(fields, FieldType::Action, String(_label ? _label : _key)); }
  private:
   const char* _label;
@@ -488,6 +499,9 @@ class Message : public FieldSpec<Message> {
  public:
   Message(const char* key, const char* text) : FieldSpec(key), _text(text) { _af = Access::Read; }
   Message& level(const char* lvl) { return putStr(Opt::Level, lvl); }
+  // Live severity from a sibling state key whose value is
+  // "info" | "warning" | "error" | "success" (else the static level).
+  Message& levelKey(const char* k) { return putStr(Opt::LevelKey, k); }
   void writeTo(JsonArray& fields) const { emit(fields, FieldType::Message, String(_text ? _text : "")); }
  private:
   const char* _text;

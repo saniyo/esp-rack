@@ -31,11 +31,13 @@ import TableChartIcon from '@mui/icons-material/TableChart';
 
 import { parseFieldOptions, RowFillPair, BadgeSpec, ShowIfSpec } from '../utils/fieldParser';
 import { FieldAvatar, resolveIcon } from '../utils/iconRegistry';
+import { CellTimeType, formatCellTime, isCellTimeType, ResolvedZone } from '../../../utils/deviceTime';
+import { useDeviceZone } from '../../../utils/useDeviceZone';
 
 interface ColumnSpec {
   key: string;
   label: string;
-  type: 'text' | 'number' | 'boolean';
+  type: 'text' | 'number' | 'boolean' | CellTimeType;
   fmt?: string;
 }
 
@@ -75,7 +77,7 @@ function parseCols(raw: string): ColumnSpec[] {
       }
       const t = (kv.type || 'text').toLowerCase();
       const type: ColumnSpec['type'] =
-        t === 'number' || t === 'boolean' ? (t as any) : 'text';
+        t === 'number' || t === 'boolean' || isCellTimeType(t) ? (t as ColumnSpec['type']) : 'text';
       return {
         key,
         label: kv.label || key,
@@ -85,9 +87,11 @@ function parseCols(raw: string): ColumnSpec[] {
     });
 }
 
-function formatCell(val: any, col: ColumnSpec): string {
+function formatCell(val: any, col: ColumnSpec, zone: ResolvedZone): string {
   if (val === undefined || val === null) return '';
   if (col.type === 'boolean') return val ? '✓' : '✗';
+  // dated cells in the device timezone (SES-LIB-016)
+  if (isCellTimeType(col.type)) return formatCellTime(val, col.type, col.fmt, zone);
   if (col.type === 'number') {
     const n = typeof val === 'number' ? val : parseFloat(val);
     if (!Number.isFinite(n)) return String(val);
@@ -111,6 +115,7 @@ const interpolate = (tmpl: string, row: Record<string, any>): string =>
 
 const TableField: FC<TableFieldProps> = ({ field, value, onChange, formState }) => {
   const navigate = useNavigate();
+  const zone = useDeviceZone();
   const parsed = useMemo(() => parseFieldOptions(field.label, field.o), [field.label, field.o]);
   const cols = useMemo(() => {
     const raw = (parsed.optionMap.cols?.value as string) || '';
@@ -411,7 +416,7 @@ const TableField: FC<TableFieldProps> = ({ field, value, onChange, formState }) 
                   >
                     {cols.map((c) => (
                       <TableCell key={c.key} align={c.type === 'number' ? 'right' : 'left'}>
-                        {formatCell(r[c.key], c)}
+                        {formatCell(r[c.key], c, zone)}
                       </TableCell>
                     ))}
                   </TableRow>

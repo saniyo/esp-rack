@@ -8,18 +8,26 @@ import { resolveIcon } from '../utils/iconRegistry';
 interface MessageFieldProps {
   field: Field;
   value: string | undefined;  // body text
+  // levelKey (SES-LIB-016): live severity from a sibling state value.
+  getSibling?: (key: string) => any;
 }
 
 type AlertSeverity = 'info' | 'warning' | 'error' | 'success';
 
-const MessageField: FC<MessageFieldProps> = ({ field, value }) => {
+const SEVERITIES: readonly string[] = ['info', 'warning', 'error', 'success'];
+
+const MessageField: FC<MessageFieldProps> = ({ field, value, getSibling }) => {
   const { readableLabel, optionMap } = useFieldParser(field.label, field.o || '');
 
+  // levelKey's live value wins when it's a severity; else the static level.
+  const levelKey = (optionMap as any).levelKey?.value as string | undefined;
+  const live = levelKey ? getSibling?.(levelKey) : undefined;
   const severity = useMemo<AlertSeverity>(() => {
+    if (typeof live === 'string' && SEVERITIES.includes(live)) return live as AlertSeverity;
     const raw = ((optionMap as any).level?.value as string) || 'info';
     if (raw === 'warning' || raw === 'error' || raw === 'success') return raw;
     return 'info';
-  }, [optionMap]);
+  }, [optionMap, live]);
 
   const IconComp = resolveIcon(field.icon);
 

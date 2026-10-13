@@ -282,7 +282,7 @@ const DynamicContentHandler: FC<DynamicContentHandlerProps> = ({
         return <ActionField key={fieldKey} field={field} value={formState[field.label]} />;
       }
       case 'message':
-        return <MessageField key={fieldKey} field={field} value={formState[field.label]} />;
+        return <MessageField key={fieldKey} field={field} value={formState[field.label]} getSibling={getSibling} />;
       case 'timezones':
         return <TimeZones key={fieldKey} {...commonProps} />;
       case 'ip':

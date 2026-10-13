@@ -28,8 +28,8 @@ export const fieldConfigurations = {
   //                       rowFill / rowNav dispatch on row click either way.
   table: { options: ['r', 'rw', 'cols', 'icon', 'color', 'mode', 'maxRows', 'rowFill', 'rowFillFallback', 'rowNav', 'layout', 'primary', 'secondary', 'avatar', 'badge', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const },
   datetime: { options: ['r', 'rw', 'dtmode', 'icon', 'color', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const },
-  action: { options: ['r', 'rw', 'url', 'method', 'confirm', 'color', 'icon', 'ref', 'withFields', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const },
-  message: { options: ['r', 'rw', 'level', 'icon', 'color', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const },
+  action: { options: ['r', 'rw', 'url', 'method', 'confirm', 'color', 'icon', 'ref', 'withFields', 'clientTime', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const },
+  message: { options: ['r', 'rw', 'level', 'levelKey', 'icon', 'color', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const },
   timezones: { options: ['r', 'rw', 'icon', 'color', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const },
   ip: { options: ['r', 'rw', 'pl', 'icon', 'color', 'colorMap', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const },
   // Read-only bar (SES-LIB-015): value against mn..mx, or a live max from
@@ -304,6 +304,15 @@ const optionParsers: Record<string, (option: string) => ParsedFieldOption> = {
       .filter((x): x is WithFieldsPair => x !== null);
     return { key: 'withFields', value: pairs };
   },
+
+  // ── SES-LIB-016 ──
+  // message: severity from a sibling state value.
+  levelKey: (opt) => ({ key: 'levelKey', value: getAfter(opt, 'levelKey').trim() }),
+  // action: "secParam[,msParam]" -> the browser clock appended on fire.
+  clientTime: (opt) => ({
+    key: 'clientTime',
+    value: getAfter(opt, 'clientTime').split(',').map((s) => s.trim()).filter(Boolean),
+  }),
 
   // ── SES-LIB-015 ──
   // progress: sibling state keys for a live max / a marker.

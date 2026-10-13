@@ -88,6 +88,20 @@ import Download from '@mui/icons-material/Download';
 import Key from '@mui/icons-material/Key';
 import Public from '@mui/icons-material/Public';
 import VpnLock from '@mui/icons-material/VpnLock';
+// SES-LIB-016: sun/night, location, energy, calendar, status
+import WbSunny from '@mui/icons-material/WbSunny';
+import NightsStay from '@mui/icons-material/NightsStay';
+import WbTwilight from '@mui/icons-material/WbTwilight';
+import GpsFixed from '@mui/icons-material/GpsFixed';
+import GpsOff from '@mui/icons-material/GpsOff';
+import SatelliteAlt from '@mui/icons-material/SatelliteAlt';
+import LocationOn from '@mui/icons-material/LocationOn';
+import ElectricMeter from '@mui/icons-material/ElectricMeter';
+import ElectricBolt from '@mui/icons-material/ElectricBolt';
+import CalendarMonth from '@mui/icons-material/CalendarMonth';
+import HistoryIcon from '@mui/icons-material/History';
+import ReportProblem from '@mui/icons-material/ReportProblem';
+import CheckCircle from '@mui/icons-material/CheckCircle';
 
 export const ICON_MAP: Record<string, SvgIconComponent> = {
   Update,
@@ -162,6 +176,19 @@ export const ICON_MAP: Record<string, SvgIconComponent> = {
   Key,
   Public,
   VpnLock,
+  WbSunny,
+  NightsStay,
+  WbTwilight,
+  GpsFixed,
+  GpsOff,
+  SatelliteAlt,
+  LocationOn,
+  ElectricMeter,
+  ElectricBolt,
+  CalendarMonth,
+  History: HistoryIcon,
+  ReportProblem,
+  CheckCircle,
 };
 
 export function resolveIcon(name?: string | null): SvgIconComponent | null {

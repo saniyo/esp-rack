@@ -150,6 +150,16 @@ const ActionField: FC<ActionFieldProps> = ({ field, value }) => {
         url = url + (url.includes('?') ? '&' : '?') + qs;
       }
 
+      // clientTime (SES-LIB-016): the browser's clock at click time, e.g.
+      // ?epoch=<s>&ms=<0..999> for system.setTime ("set clock from browser").
+      const clientTime = ((optionMap as any).clientTime?.value ?? []) as string[];
+      if (clientTime.length > 0) {
+        const now = Date.now();
+        const parts = [`${encodeURIComponent(clientTime[0])}=${Math.floor(now / 1000)}`];
+        if (clientTime[1]) parts.push(`${encodeURIComponent(clientTime[1])}=${now % 1000}`);
+        url = url + (url.includes('?') ? '&' : '?') + parts.join('&');
+      }
+
       const axiosPath = toAxiosPath(url);
       if (resolved.method === 'GET') await AXIOS.get(axiosPath);
       else if (resolved.method === 'DELETE') await AXIOS.delete(axiosPath);

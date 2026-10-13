@@ -6,6 +6,8 @@ import { describe, expect, it } from '@jest/globals';
 
 import { parseFieldOptions, RefLineSpec, ThresholdStep } from './fieldParser';
 import {
+  formatCellTime,
+  formatDuration,
   formatFull,
   formatX,
   hhmmToSecOfDay,
@@ -140,5 +142,61 @@ describe('device timezone', () => {
   it('detects ms', () => {
     expect(toEpochMs(1_790_000_000)).toBe(1_790_000_000_000);
     expect(toEpochMs(1_790_000_000_000)).toBe(1_790_000_000_000);
+  });
+});
+
+// ── SES-LIB-016 ──
+describe('Message levelKey / Action clientTime', () => {
+  it('parses levelKey', () => {
+    // web::Message("m_state", "…").level("info").levelKey("state_level")
+    const p = parseFieldOptions('m_state', 'message;r;level=info;levelKey=state_level');
+    expect(p.optionMap.levelKey?.value).toBe('state_level');
+    expect(p.optionMap.level?.value).toBe('info');
+  });
+
+  it('parses clientTime', () => {
+    // web::Action("a_clock").ref("system.setTime").withClientTime("epoch", "ms")
+    const p = parseFieldOptions('a_clock', 'action;rw;ref=system.setTime;clientTime=epoch,ms');
+    expect(p.optionMap.clientTime?.value).toEqual(['epoch', 'ms']);
+    expect(p.optionMap.ref?.value).toBe('system.setTime');
+    const q = parseFieldOptions('a', 'action;rw;clientTime=t');
+    expect(q.optionMap.clientTime?.value).toEqual(['t']);
+  });
+});
+
+describe('table cells in the device zone', () => {
+  const kyiv = resolveZone({ iana: 'Europe/Kyiv' });
+  // 2026-03-29 01:30Z = 04:30 EEST (after the spring-forward)
+  const t = Date.UTC(2026, 2, 29, 1, 30) / 1000;
+
+  it('date / month / datetime / time', () => {
+    expect(formatCellTime(t, 'date', undefined, kyiv, 'en-GB')).toBe('29/03/2026');
+    expect(formatCellTime(t, 'date', 'month', kyiv, 'en-GB')).toBe('Mar 2026');
+    expect(formatCellTime(t, 'datetime', undefined, kyiv, 'en-GB')).toBe('29/03/2026, 04:30');
+    expect(formatCellTime(t, 'time', undefined, kyiv, 'en-GB')).toBe('04:30');
+    expect(formatCellTime(t * 1000, 'time', undefined, kyiv, 'en-GB')).toBe('04:30');  // ms
+  });
+
+  it('time of day has no zone', () => {
+    expect(formatCellTime(81000, 'time', 'tod', kyiv, 'en-GB')).toBe('22:30');
+  });
+
+  it('keeps non-numbers and empties', () => {
+    expect(formatCellTime('n/a', 'date', undefined, kyiv)).toBe('n/a');
+    expect(formatCellTime(null, 'date', undefined, kyiv)).toBe('');
+    expect(formatCellTime('', 'duration', undefined, kyiv)).toBe('');
+  });
+
+  it('durations: two largest units', () => {
+    expect(formatDuration(0)).toBe('0s');
+    expect(formatDuration(45)).toBe('45s');
+    expect(formatDuration(2710)).toBe('45m 10s');
+    expect(formatDuration(7500)).toBe('2h 05m');
+    expect(formatDuration(3600)).toBe('1h 00m');
+    expect(formatDuration(3 * 86400 + 4 * 3600 + 59)).toBe('3d 4h');
+    expect(formatDuration(-90)).toBe('−1m 30s');
+    expect(formatDuration(1500, 'ms')).toBe('2s');
+    expect(formatDuration(125, 'min')).toBe('2h 05m');
+    expect(formatCellTime(125, 'duration', 'min', kyiv)).toBe('2h 05m');
   });
 });
