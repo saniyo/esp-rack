@@ -28,6 +28,19 @@ constexpr int64_t utcFromCivil(int32_t y, uint32_t mo, uint32_t d,
          static_cast<int64_t>(mi) * 60 + static_cast<int64_t>(s);
 }
 
+constexpr bool isLeap(int32_t y) noexcept { return (y % 4 == 0 && y % 100 != 0) || y % 400 == 0; }
+
+// 0 for a month outside 1..12.
+constexpr uint8_t daysInMonth(int32_t y, uint32_t m) noexcept {
+  return m == 2 ? (isLeap(y) ? 29 : 28)
+                : (m == 4 || m == 6 || m == 9 || m == 11) ? 30 : (m >= 1 && m <= 12) ? 31 : 0;
+}
+
+// Floor division (rounds toward -inf), b > 0.
+constexpr int64_t floorDiv(int64_t a, int64_t b) noexcept {
+  return a / b - ((a % b != 0 && a < 0) ? 1 : 0);
+}
+
 // 0 = Monday … 6 = Sunday. 1970-01-01 was a Thursday (3).
 constexpr uint8_t weekdayMon0(int64_t days) noexcept {
   return static_cast<uint8_t>(((days + 3) % 7 + 7) % 7);

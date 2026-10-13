@@ -7,7 +7,8 @@
 #   ctest --test-dir test-host/build -C Release --output-on-failure
 #
 # Every test_* directory becomes one executable; extra .cpp files in a test
-# directory are compiled into it, headers next to the test are visible.
+# directory are compiled into it, headers next to the test and generated
+# fixtures (fixtures/, scripts/gen_*_fixture.py) are visible.
 
 cmake_minimum_required(VERSION 3.16)
 project(esprack_test_host CXX)
@@ -38,6 +39,7 @@ foreach(dir ${TEST_DIRS})
     add_executable(${name} ${srcs})
     target_include_directories(${name} PRIVATE
       ${CMAKE_CURRENT_SOURCE_DIR}/shim
+      ${CMAKE_CURRENT_SOURCE_DIR}/fixtures
       ${dir}
       ${ESPRACK_ROOT}/modules/digital-io/include)
     target_compile_options(${name} PRIVATE ${WARN})
