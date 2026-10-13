@@ -4,7 +4,7 @@
 * lib/ESPRack/include/Version.h is the single source of truth for the library
   version; lib/ESPRack/library.json and the root library.json bundle must match.
 * The root bundle must compile every module under modules/ (except the
-  `template` skeleton) — srcFilter and -I flags.
+  `template` and `template-ext-hw` skeletons) — srcFilter and -I flags.
 
 Exit code 0 = consistent, 1 = drift (each problem printed).
 Usage: python scripts/check_versions.py   (from the repo root)
@@ -13,6 +13,8 @@ import json
 import os
 import re
 import sys
+
+SKELETONS = ("template", "template-ext-hw")  # copy-and-rename starting points, not shipped
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -40,7 +42,7 @@ def main():
     src = set(bundle.get("srcFilter", []))
     flags = set(bundle.get("flags", []))
     for m in sorted(os.listdir(os.path.join(ROOT, "modules"))):
-        if m == "template" or not os.path.isdir(os.path.join(ROOT, "modules", m)):
+        if m in SKELETONS or not os.path.isdir(os.path.join(ROOT, "modules", m)):
             continue
         if f"+<modules/{m}/src/>" not in src:
             problems.append(f"library.json srcFilter: missing modules/{m}/src")
