@@ -9,6 +9,7 @@
 #include <WsManager.h>
 
 #include <IWebFeatureEntry.h>
+#include <SecretFields.h>
 #include <WebFeatureSpec.h>
 
 // Typed aggregator for a single StatefulService<T>: REST (GET/POST) + optional
@@ -60,13 +61,35 @@ class WebFeatureEntry : public IWebFeatureEntry {
   void registerEndpoints(AsyncWebServer* server, SecurityManager* sm) override {
     if (_mounted || !server || !_service) return;
 
-    // Auto-size the REST buffer from the real schema tree if the feature
-    // opted in (WEBFEATURE_BUFFER_AUTO). Once, here at boot (heap fresh) —
-    // never per request. The probe always reads the FORM tree; the state
-    // endpoint inherits the same buffer size (C1).
+    // One boot-time probe of the FORM tree (heap fresh, never per request):
+    //  * auto-sizes the REST buffer when the feature opted in
+    //    (WEBFEATURE_BUFFER_AUTO); the state endpoint inherits it (C1);
+    //  * collects the feature's secret keys (web::Secret fields) for the
+    //    masking below (LIB-FIX-004).
+    const size_t measured = probeForm();
     if (_restBufferSize == WEBFEATURE_BUFFER_AUTO) {
-      _restBufferSize = measureRestBuffer();
+      _restBufferSize = measured;
     }
+
+    // Secret-aware faces (LIB-FIX-004). Readers: secrets masked (always for
+    // echoes/WS, for non-admins on GETs). Updaters: a value equal to the mask
+    // is dropped so a round-tripped form can't overwrite the stored secret.
+    _maskedEcho = [this](T& s, JsonObject& o) {
+      stateReaderRaw()(s, o);
+      SecretFields::maskAll(o, _secretKeys);
+    };
+    _postUpdater = [this](JsonObject& in, T& s) {
+      SecretFields::stripMasked(in, _secretKeys);
+      return _restUpdater(in, s);
+    };
+    _wsOut = [this](T& s, JsonObject& o) {
+      _wsReader(s, o);
+      SecretFields::maskAll(o, _secretKeys);
+    };
+    _wsIn = [this](JsonObject& in, T& s) {
+      SecretFields::stripMasked(in, _secretKeys);
+      return _wsUpdater(in, s);
+    };
 
     // Derive the C1 mount paths from the feature id — modules no longer set
     // restRead/restUpdate (those fields are now ignored, see WebFeatureSpec).
@@ -81,9 +104,9 @@ class WebFeatureEntry : public IWebFeatureEntry {
     if (!_formPath.isEmpty()) {
       // FORM face — GET only, served by the form reader (the restReader the
       // module passed today). The UI saves through the state POST below, so
-      // the form endpoint never needs an updater.
-      _getEndpoint.reset(new HttpGetEndpoint<T>(_restReader, _service, server,
-                                                _formPath, sm, predicate, _restBufferSize));
+      // the form endpoint never needs an updater. Secrets masked for
+      // non-admin identities.
+      mountGet(server, sm, predicate, _formPath, /*formFace=*/true);
     }
 
     if (!_statePath.isEmpty()) {
@@ -95,14 +118,11 @@ class WebFeatureEntry : public IWebFeatureEntry {
       // consumes flat dicts and {settings:{...}} envelopes) and ALSO
       // requires a write-capable role: "reader" machine tokens may GET
       // everything their auth level allows but never mutate (403).
-      const JsonStateReader<T>& stateReader =
-          _hasDistinctStateReader ? _wsReader : _restReader;
       auto writePredicate = [predicate](Authentication& a) {
         return predicate(a) && AuthenticationPredicates::IS_OPERATOR(a);
       };
-      _stateGet.reset(new HttpGetEndpoint<T>(stateReader, _service, server,
-                                             _statePath, sm, predicate, _restBufferSize));
-      _statePost.reset(new HttpPostEndpoint<T>(stateReader, _restUpdater, _service, server,
+      mountGet(server, sm, predicate, _statePath, /*formFace=*/false);
+      _statePost.reset(new HttpPostEndpoint<T>(_maskedEcho, _postUpdater, _service, server,
                                                _statePath, sm, writePredicate, _restBufferSize));
     }
 
@@ -115,8 +135,9 @@ class WebFeatureEntry : public IWebFeatureEntry {
     if (_spec.wsPath && _wsManager && !_wsBinding) {
       // The channel carries the feature's auth level: WsManager gates sub
       // by it and writes by it + the operator floor (LIB-FIX-003).
+      // Pushes are secret-masked; writes drop round-tripped masks.
       _wsBinding.reset(new WsManager::Binding<T>(_wsManager, _spec.id, _wsBufferSize,
-                                                 _service, _wsReader, _wsUpdater, true,
+                                                 _service, _wsOut, _wsIn, true,
                                                  _spec.auth));
     }
 
@@ -271,7 +292,7 @@ class WebFeatureEntry : public IWebFeatureEntry {
     if (is_post && match_state) {
       JsonObject in_obj = body.as<JsonObject>();
       StateUpdateResult outcome =
-          _service->update(in_obj, _restUpdater, "rest.proxy");
+          _service->update(in_obj, _postUpdater ? _postUpdater : _restUpdater, "rest.proxy");
       if (outcome == StateUpdateResult::ERROR) {
         out_status = 400;
         JsonObject err = out_body.to<JsonObject>();
@@ -305,12 +326,41 @@ class WebFeatureEntry : public IWebFeatureEntry {
   const WebFeatureSpec& spec() const { return _spec; }
 
  private:
-  // Build the REST tree once into a generous temp doc and size the runtime
-  // buffer to the ACTUAL pool used + 50% headroom for variable scalar values
-  // — replaces hand-guessed worst-case constants. Called once at boot (heap
-  // fresh); the temp doc is freed on return. Safe fallback if the probe
-  // can't allocate or the feature has no reader.
-  size_t measureRestBuffer() {
+  // The reader behind the machine /state face: the distinct flat reader when
+  // the feature registered one, else the form reader (interim).
+  const JsonStateReader<T>& stateReaderRaw() const {
+    return _hasDistinctStateReader ? _wsReader : _restReader;
+  }
+
+  // GET for the form or state face. Secrets are masked unless the caller is
+  // an admin; the identity check (one JWT verify) is skipped entirely for
+  // features without secret fields.
+  void mountGet(AsyncWebServer* server, SecurityManager* sm,
+                AuthenticationPredicate predicate, const String& path, bool formFace) {
+    ArRequestHandlerFunction handler = [this, sm, formFace](AsyncWebServerRequest* r) {
+      bool mask = false;
+      if (!_secretKeys.empty() && sm) {
+        Authentication a = sm->authenticateRequest(r);
+        mask = !(a.authenticated && a.user && a.user->admin);
+      }
+      const JsonStateReader<T>& reader = formFace ? _restReader : stateReaderRaw();
+      sendAdaptiveJson(
+          r,
+          [this, &reader, mask](JsonObject& root) {
+            _service->read(root, reader);
+            if (mask) SecretFields::maskAll(root, _secretKeys);
+          },
+          _restBufferSize ? _restBufferSize : DEFAULT_BUFFER_SIZE);
+    };
+    server->on(path.c_str(), HTTP_GET, sm ? sm->wrapRequest(handler, predicate) : handler);
+  }
+
+  // Build the REST tree once into a generous temp doc: size the runtime
+  // buffer to the ACTUAL pool used (+512 B) — replaces hand-guessed
+  // worst-case constants — and collect the feature's secret keys. Called
+  // once at boot (heap fresh); the temp doc is freed on return. Safe
+  // fallback if the probe can't allocate or the feature has no reader.
+  size_t probeForm() {
     static constexpr size_t kProbe    = 24576;  // > any realistic schema
     static constexpr size_t kFallback = 8192;
     if (!_service || !_restReader) return kFallback;
@@ -319,6 +369,10 @@ class WebFeatureEntry : public IWebFeatureEntry {
     JsonObject root = probe.to<JsonObject>();
     if (root.isNull()) return kFallback;
     _service->read(root, _restReader);
+    {
+      JsonObjectConst rootC = root;
+      SecretFields::collectFromForm(rootC, _secretKeys);
+    }
     const size_t used = probe.memoryUsage();
     if (used == 0) return kFallback;
     // Small +512 B headroom for scalar growth beyond the default-state
@@ -365,8 +419,14 @@ class WebFeatureEntry : public IWebFeatureEntry {
   String _formPath;
   String _statePath;
 
-  std::unique_ptr<HttpGetEndpoint<T>> _getEndpoint;   // form GET
-  std::unique_ptr<HttpGetEndpoint<T>> _stateGet;      // state GET
+  // Secret handling (LIB-FIX-004): keys found by probeForm(), plus the
+  // masking/stripping wrappers built from them in registerEndpoints.
+  std::vector<String> _secretKeys;
+  JsonStateReader<T>  _maskedEcho;   // POST /state echo
+  JsonStateUpdater<T> _postUpdater;  // POST /state + rest.proxy writes
+  JsonStateReader<T>  _wsOut;        // WS pushes / snapshots
+  JsonStateUpdater<T> _wsIn;         // WS "p" writes
+
   std::unique_ptr<HttpPostEndpoint<T>> _statePost;    // state POST (operator floor)
   std::unique_ptr<WsManager::Binding<T>> _wsBinding;
 

@@ -195,7 +195,10 @@ class MqttSettings {
     root["host"] = s.host;
     root["port"] = s.port;
     root["username"] = s.username;
-    root["pwd"] = s.password;
+    // pwd INTENTIONALLY OMITTED (LIB-FIX-004b): this reader backs every WS
+    // push AND GET /api/v1/mqtt/state; the broker password never leaves
+    // the device through either. The form GET is the only place it shows,
+    // and only to admins.
     root["client_id_cfg"] = s.clientId;
     root["keep_alive"] = s.keepAlive;
     root["clean_session"] = s.cleanSession;

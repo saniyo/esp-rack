@@ -690,19 +690,49 @@ class ConfigManager {
 template <typename T>
 inline void ConfigManager::discoverSecretKeysFromForm(ConfigDescriptor<T>& desc) {
   if (!desc.formReader || !desc.service) return;
-  T scratch{};
-  DynamicJsonDocument doc(desc.bufferSize);
-  JsonObject root = doc.to<JsonObject>();
-  setProbing(true);
-  desc.formReader(scratch, root);
-  setProbing(false);
-
   desc.secretKeys.clear();
-  // ArduinoJson 6.21 quirk: JsonObject::as<JsonObjectConst>() fails to
-  // compile on the RISC-V toolchain — use implicit conversion via a
-  // local variable instead (same trick already used by other call sites).
-  JsonObjectConst rootC = root;
-  walkAndCollectSecrets(rootC, desc.secretKeys);
+
+  // The probe renders the WHOLE form (every tab), usually far larger than
+  // the config file `bufferSize` was sized for. A truncated probe would
+  // silently miss the secret keys past the overflow point and they would
+  // be written to flash in plaintext (LIB-FIX-004c) — so grow until the
+  // form fits. Boot-time only, heap is fresh, the doc is freed per pass.
+  size_t cap = desc.bufferSize < 2048 ? 2048 : desc.bufferSize;
+  bool complete = false;
+  for (; cap <= 32768; cap *= 2) {
+    T scratch{};
+    DynamicJsonDocument doc(cap);
+    if (doc.capacity() == 0) break;  // no heap — fail safe below
+    JsonObject root = doc.to<JsonObject>();
+    setProbing(true);
+    desc.formReader(scratch, root);
+    setProbing(false);
+    if (doc.overflowed()) continue;
+    // ArduinoJson 6.21 quirk: JsonObject::as<JsonObjectConst>() fails to
+    // compile on the RISC-V toolchain — use implicit conversion via a
+    // local variable instead (same trick already used by other call sites).
+    JsonObjectConst rootC = root;
+    walkAndCollectSecrets(rootC, desc.secretKeys);
+    complete = true;
+    break;
+  }
+
+  if (!complete) {
+    // FAIL-SAFE: which keys are secret can't be proven, so every top-level
+    // string the config reader writes is treated as one. Settings still
+    // persist and load (decrypt passes plaintext through); they're simply
+    // all encrypted on flash. Never a silent plaintext secret.
+    log_e("[cfg] %s: secret-key probe INCOMPLETE (form > %u B or heap exhausted) — "
+          "encrypting ALL string keys of this config",
+          desc.id, (unsigned)cap);
+    T scratch{};
+    DynamicJsonDocument doc(desc.bufferSize);
+    JsonObject root = doc.to<JsonObject>();
+    if (desc.reader) desc.reader(scratch, root);
+    for (JsonPair kv : root) {
+      if (kv.value().is<const char*>()) desc.secretKeys.emplace_back(kv.key().c_str());
+    }
+  }
 
   if (!desc.secretKeys.empty()) {
     String joined;

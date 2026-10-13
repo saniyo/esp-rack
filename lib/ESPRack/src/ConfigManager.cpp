@@ -1,4 +1,5 @@
 #include "ConfigManager.h"
+#include "SecretFields.h"
 
 #include <strings.h>  // strcasecmp
 
@@ -539,33 +540,9 @@ void ConfigManager::setProbing(bool v) { g_probing = v; }
 // nested objects"), and recursion happens through arrays + nested
 // objects only when the current object isn't itself a secret leaf.
 void ConfigManager::walkAndCollectSecrets(JsonObjectConst root, std::vector<String>& out) {
-  // Is this object a SECRET-typed field? Field's `o` starts with
-  // "secret;" (FieldType::SECRET → toString "secret"). When yes, the
-  // sibling key in this same object that isn't "o" is the JSON key
-  // that ConfigManager must encrypt on save / decrypt on load.
-  const char* o = root["o"] | (const char*)nullptr;
-  if (o && strncmp(o, "secret;", 7) == 0) {
-    for (JsonPairConst inner : root) {
-      if (strcmp(inner.key().c_str(), "o") == 0) continue;
-      out.emplace_back(inner.key().c_str());
-      break;  // FormBuilder writes exactly one value key per field
-    }
-    return;  // leaf — don't recurse further
-  }
-  // Not a secret leaf — recurse into nested objects and array
-  // elements. Tab arrays (status/settings/scan) come through here.
-  for (JsonPairConst kv : root) {
-    JsonVariantConst v = kv.value();
-    if (v.is<JsonObjectConst>()) {
-      walkAndCollectSecrets(v.as<JsonObjectConst>(), out);
-    } else if (v.is<JsonArrayConst>()) {
-      for (JsonVariantConst el : v.as<JsonArrayConst>()) {
-        if (el.is<JsonObjectConst>()) {
-          walkAndCollectSecrets(el.as<JsonObjectConst>(), out);
-        }
-      }
-    }
-  }
+  // Single definition of "secret field" shared with the web layer's
+  // masking (SecretFields.h): a field whose `o` starts with "secret;".
+  SecretFields::collectFromForm(root, out);
 }
 
 // root either:
