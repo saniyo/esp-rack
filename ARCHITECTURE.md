@@ -157,6 +157,19 @@ An `esp_register_shutdown_handler` hook covers reboots that bypass this,
 such as ArduinoOTA's own. `ESPRack::restartReason()` tells a hook why it is
 running.
 
+**Restart reason across the reboot** (SES-LIB-007). `restartDevice(reason)`
+writes `{magic, reason[24], crc}` to a 32-byte `RTC_NOINIT` record before the
+hooks run. At the next boot, `ESPRack::lastRestartReason()` combines it with
+`esp_reset_reason()`:
+
+- a software reset with a valid record returns the record's reason;
+- a software reset without one returns `"idf"`;
+- any other reset returns the hardware reason (`power-on`, `panic`, `task-wdt`,
+  `int-wdt`, `wdt`, `brownout`, …), even when a record exists.
+
+The record is cleared once it has been read. The framework's reasons are the
+`kRestart*` constants in `App.h`.
+
 ### 2.5 Threads
 
 | Context | Runs |

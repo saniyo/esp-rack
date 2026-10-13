@@ -47,6 +47,10 @@ Work beyond the plan that has landed:
   - SES-LIB-016 (UI pack B): dated table columns (`date/time/datetime/duration`),
     `Message.levelKey`, `Action.withClientTime`, `updateValue` for 32/64-bit
     integers, 13 icons. Plan: `docs/plans/ses-lib-016-ui-pack-b.md`.
+  - SES-LIB-007: `ESPRack::lastRestartReason()`, from a 32-byte RTC record plus
+    `esp_reset_reason()`. The framework's restart reasons are normalised to
+    `kRestart*` constants; OTA reboots through `restartDevice`. Plan:
+    `docs/plans/ses-lib-007-last-restart-reason.md`.
   - SES-LIB-022: `SecurityManager::usesFactoryCredentials()`, a cached per-user
     flag; no PBKDF2 when it's read. Plan: `docs/plans/ses-lib-022-factory-credentials.md`.
   - SES-LIB-018: a WS state frame that overflows the frame doc is dropped and
