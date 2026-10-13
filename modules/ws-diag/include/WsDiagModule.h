@@ -9,7 +9,7 @@
 class WsDiagModule : public ESPRack::Module {
  public:
   void describe(ESPRack::ModuleDescriptor& d) override {
-    d.id = "wsDiag"; d.version = "1.0.0"; d.priority = 80;
+    d.id = "wsDiag"; d.version = "1.0.1"; d.priority = 80;
     d.requires_ = {"presence"};
   }
   void onInstall(ESPRack::ModuleContext& ctx) override {

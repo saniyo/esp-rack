@@ -4,7 +4,9 @@
 
 // IMothershipProvider — public read-only contract for the mothership
 // check-in client. Consumer modules / status panels query state via
-// this interface without depending on the concrete service class.
+// this interface (App::mothership()) without depending on the concrete
+// service class. Lives in the core so they never include a header of the
+// mothership module (PlatformIO's LDF would pull the module in, LIB-FIX-012).
 // Mirrors ICertProvider conventions.
 //
 // Phase 2 only — Phase 3 (WireGuard tunnel) and Phase 4 (cert
@@ -39,6 +41,13 @@ class IMothershipProvider {
   // Total successful check-ins since boot (for sanity / health).
   virtual uint32_t successCount() const = 0;
   virtual uint32_t failCount() const = 0;
+
+  // Heap values sent with the last check-in, and how long ago (System ->
+  // Status shows them). false before the first check-in.
+  virtual bool heapAtLastCheckin(uint32_t& freeOut, uint32_t& maxAllocOut, uint32_t& ageMsOut) const {
+    (void)freeOut; (void)maxAllocOut; (void)ageMsOut;
+    return false;
+  }
 };
 
 #endif  // ESPRACK_IMOTHERSHIP_PROVIDER_H

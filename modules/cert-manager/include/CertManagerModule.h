@@ -17,7 +17,7 @@
 class CertManagerModule : public ESPRack::Module {
  public:
   void describe(ESPRack::ModuleDescriptor& d) override {
-    d.id = "cert-manager"; d.version = "0.1.1"; d.priority = 12;
+    d.id = "cert-manager"; d.version = "0.1.2"; d.priority = 12;
     d.requires_ = {"wifi"};
   }
 

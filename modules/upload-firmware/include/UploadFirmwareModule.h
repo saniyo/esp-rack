@@ -9,7 +9,7 @@
 class UploadFirmwareModule : public ESPRack::Module {
  public:
   void describe(ESPRack::ModuleDescriptor& d) override {
-    d.id = "uploadFirmware"; d.version = "1.0.0"; d.priority = 40;
+    d.id = "uploadFirmware"; d.version = "1.0.1"; d.priority = 40;
   }
   void onInstall(ESPRack::ModuleContext& ctx) override {
     svc_.reset(new UploadFirmwareService(ctx.server, ctx.security));

@@ -139,7 +139,7 @@ This is an audit snapshot of `feature/ses-light-support`, dated 2026-10-13:
   - `onBegin`: binds `app->wireguard()` (`:47-57`);
   - `onLoop`.
 - **Public API:**
-  - `ICertProvider` (`modules/cert-manager/include/ICertProvider.h:19-64`): `state()`, `hasValidCert()`, `daysUntilExpiry()`, `subjectCN()`, `serialHex()`, `rotate(renewUrl)`. Reached through `app->cert()` (`lib/ESPRack/include/App.h:111-112`).
+  - `ICertProvider` (core since LIB-FIX-012: `lib/ESPRack/include/ICertProvider.h`): `state()`, `hasValidCert()`, `daysUntilExpiry()`, `subjectCN()`, `serialHex()`, `rotate(renewUrl)`. Reached through `app->cert()` (`lib/ESPRack/include/App.h:111-112`).
   - Concrete service: `beginRecovery()` (`modules/cert-manager/include/CertManagerService.h:180`).
   - `CertManagerModule::service()` (`modules/cert-manager/include/CertManagerModule.h:60`).
 - **Web/REST/WS:**
@@ -278,7 +278,7 @@ This is an audit snapshot of `feature/ses-light-support`, dated 2026-10-13:
   - `onBegin`;
   - `onLoop` (empty body, `modules/mothership/src/MothershipService.cpp:365-369`).
 - **Public API:**
-  - `IMothershipProvider` (`modules/mothership/include/IMothershipProvider.h:21-41`) through `app->mothership()`.
+  - `IMothershipProvider` (core since LIB-FIX-012: `lib/ESPRack/include/IMothershipProvider.h`, plus `heapAtLastCheckin()`) through `app->mothership()`.
   - `IMothershipProfileProvider` (`lib/ESPRack/include/IMothershipProfileProvider.h:26-48`) through `app->mothershipProfile()`.
   - `static MothershipService::lastSentHeap()` (`modules/mothership/include/MothershipService.h:199`), used by system-status.
   - `service()` (`modules/mothership/include/MothershipModule.h:56`).
@@ -446,7 +446,7 @@ This is an audit snapshot of `feature/ses-light-support`, dated 2026-10-13:
   - Page `systemStatus` (Authenticated) with `GET /api/v1/system/health`, `/api/v1/system/status/form` and `/api/v1/system/identity/form` (`modules/system-status/include/SystemStatus.h:20-22`; `modules/system-status/src/SystemStatus.cpp:41-94`).
   - Tabs `identity` (order 10) and `status`, titled "Resources" (order 12), on `system` (`:99-119`).
 - **Persistence:** None.
-- **library.json deps:** `ESPRack`. There is also an undeclared compile-time coupling to `MothershipService.h` through `__has_include` (`:18-23, 190-205`).
+- **library.json deps:** `ESPRack`. (Before LIB-FIX-012 it also included `MothershipService.h` under `__has_include`, which pulled the mothership module into every build; it now reads `app->mothership()`.)
 - **Cost notes:** Allocates a `TaskStatus_t[]` per request (`:242-261`). 1792 B start hint for `/health` (`:332`). The proxy handler uses a 4096 B scratch doc (`:59`). Not measured.
 - **Caveats:**
   - The proxy `internalHandler` for `/api/v1/system/health` returns the form's `status` section, not the flat JSON the HTTP handler sends (`:52-65` vs `:273-332`).
@@ -560,7 +560,7 @@ This is an audit snapshot of `feature/ses-light-support`, dated 2026-10-13:
 - **Install:** `.install<WireGuardModule>()`. The class is `WireGuardModule`, declared in `WireguardModule.h`. It needs the external `<WireGuard-ESP32.h>` header. Without it the module compiles as a stub whose `up()` returns false (`modules/wireguard/src/WireguardService.cpp:24-29, 463-467`). Preset: none.
 - **Module identity:** id `"wireguard"`, version `"0.2.0"` (`WIREGUARD_MODULE_VERSION`), priority 14, requires `{"wifi","cert-manager"}` (`modules/wireguard/include/WireguardModule.h:28-37`). Hooks: `onInstall` (`app->setWireguard`, `:43`), `onBegin`, `onLoop`.
 - **Public API:**
-  - `IWireguardProvider` (`modules/wireguard/include/IWireguardProvider.h:21-91`): `publicKey`, `isUp`, `hasTriplet`, `assignedIp`, `lastHandshakeAgeSec`, `txBytes`, `rxBytes`, `up(serverPub, endpoint, ip)`, `down()`. Reached through `app->wireguard()` (`lib/ESPRack/include/App.h:133-134`).
+  - `IWireguardProvider` (core since LIB-FIX-012: `lib/ESPRack/include/IWireguardProvider.h`): `publicKey`, `isUp`, `hasTriplet`, `assignedIp`, `lastHandshakeAgeSec`, `txBytes`, `rxBytes`, `up(serverPub, endpoint, ip)`, `down()`. Reached through `app->wireguard()` (`lib/ESPRack/include/App.h:133-134`).
   - `service()` (`modules/wireguard/include/WireguardModule.h:50`).
 - **Web/REST/WS:**
   - Typed feature `"wireguard"` (menu "Tunnel", order 380, Admin), tabs `status` (`live=true`) and `internals` (`modules/wireguard/src/WireguardService.cpp:198-238`): `/api/v1/wireguard/form`, `/api/v1/wireguard/state`.
@@ -698,7 +698,7 @@ This is an audit snapshot of `feature/ses-light-support`, dated 2026-10-13:
 - **Undeclared module dependencies.**
   - factory-reset and upload-firmware `#include <RestartService.h>` (`modules/factory-reset/include/FactoryResetService.h:14`, `modules/upload-firmware/include/UploadFirmwareService.h:17`) without `requires_ {"restart"}` and without a `library.json` entry.
   - `ap` nests under `"wifi"` without requiring it (`modules/ap/src/APSettingsService.cpp:146`).
-  - system-status links actions from restart and factory-reset (`modules/system-status/src/SystemStatus.cpp:269-270`) and couples to `MothershipService.h` through `__has_include` (`:18-23`).
+  - system-status links actions from restart and factory-reset (`modules/system-status/src/SystemStatus.cpp:269-270`) and used to couple to `MothershipService.h` through `__has_include` (fixed in LIB-FIX-012).
 
 - **External libraries missing from `library.json` files.**
   - `AsyncMqttClient` (`modules/mqtt/include/MqttSettingsService.h:15`) and `UniversalTelegramBot` (`modules/telegram/include/TelegramService.h:15`) are declared only in the root `library.json:49-56`, not in their module manifests.

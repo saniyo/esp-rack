@@ -74,6 +74,7 @@ verified by compiling C3/C6/S3, not yet on hardware):
 | LIB-FIX-009 | State readers had side effects (MQTT); NTP, Telegram and cert-manager pushed WS twice. | `2d33977` |
 | LIB-FIX-010 | The root bundle was missing 4 modules and the third-party deps; versions disagreed (now 0.3.0 in `Version.h`, with `scripts/check_versions.py`). | `88c66c9` |
 | LIB-FIX-011 | Tab auth was UI-only; writes are now authorized per key on the server. | `8915d31` |
+| LIB-FIX-012 | Modules included other modules' headers without declaring them (one under `__has_include`), so PlatformIO's LDF pulled modules a consumer didn't install and the build broke. Provider interfaces moved to the core, `scripts/check_module_deps.py`. | see `git log` |
 
 On-device check of the security fixes: `scripts/check_security.py`
 (`fb80f69`).
@@ -105,13 +106,7 @@ On-device check of the security fixes: `scripts/check_security.py`
      (suspected race).
    - OTA recreates `ArduinoOTA` from the WiFi event task.
    - WireGuard `g_wg` is used across tasks without a lock.
-7. **Queued library fixes:**
-   - LIB-FIX-012 (P2): `system-status` includes `<MothershipService.h>` under
-     `__has_include`. PlatformIO's LDF (chain mode) ignores the condition and
-     pulls `MothershipModule`, which needs the undeclared `CertManagerModule`,
-     so a consumer with a trimmed module set fails to build unless it
-     `lib_ignore`s the unused modules.
-8. **Smaller issues:**
+7. **Smaller issues:**
    - Presence log and history are keyed by a client-supplied header.
    - Telegram is never started if it's enabled after boot.
    - Discovery's `deviceId` is truncated for long project names.

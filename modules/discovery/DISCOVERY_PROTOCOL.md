@@ -331,5 +331,5 @@ Stream RFC 6690 CoRE Link-Format from the **same BSS table** via the chunked gen
 - `esp-rack/modules/discovery/mdns/include/IMdnsResolver.h` — documents the `gethostbyname()` `.local` hook needs `MDNS.begin()`.
 - `esp-rack/modules/mothership/include/MothershipService.h` — **`FACTORY_MOTHERSHIP_BASE_URL = "https://mothership.local:8443"` (41) — the sneaky blocker.**
 - `esp-rack/modules/mothership/src/MothershipService.cpp` — checkin body `{deviceId=_cert->subjectCN(), fwVer, hwRev, …}` + `wg{pubkey,has_triplet,is_up}` (581, 620–625).
-- `esp-rack/modules/wireguard/include/IWireguardProvider.h` — `assignedIp()` (58), `isUp()` (41) — WG pull entry.
+- `esp-rack/lib/ESPRack/include/IWireguardProvider.h` — `assignedIp()` (58), `isUp()` (41) — WG pull entry.
 - `esp-rack/modules/ota/src/OTASettingsService.cpp` — `app->mdns()` advertise for `.local` OTA (148): a second responder consumer under R2.

@@ -10,17 +10,13 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
-// MothershipService is an optional sibling module — guard the include
-// so SystemStatus still links when the consumer didn't wire mothership
-// into Builder. Without the include, the "Heap @ last checkin" row is
-// skipped automatically (see buildForm). __has_include is supported by
-// every compiler arduino-esp32 ships with.
-#if __has_include(<MothershipService.h>)
-  #include <MothershipService.h>
-  #define SYSTEM_STATUS_HAS_MOTHERSHIP 1
-#else
-  #define SYSTEM_STATUS_HAS_MOTHERSHIP 0
-#endif
+// Mothership is an optional sibling module: read it through the core
+// interface (App::mothership()), never its header. An `#if
+// __has_include(<MothershipService.h>)` here made PlatformIO's LDF pull the
+// whole mothership module into every build that used system-status
+// (LIB-FIX-012). Without mothership the "Heap @ last checkin" row is skipped.
+#include <App.h>
+#include <IMothershipProvider.h>
 
 SystemStatus::SystemStatus(AsyncWebServer* server, SecurityManager* securityManager, WebManager* web)
     : _server(server), _sec(securityManager), _web(web) {
@@ -187,14 +183,12 @@ void SystemStatus::buildForm(JsonObject& root,
                 .label("Heap @ idle (last 60s tick)").icon("Memory"));
   }
 
-#if SYSTEM_STATUS_HAS_MOTHERSHIP
-  // Mirror of what mothership last shipped. Pre-checkin (or
-  // mothership module disabled at build time) the accessor returns
-  // false and we skip the row entirely — no point in a "—" placeholder
-  // when the whole concept doesn't apply.
+  // Mirror of what mothership last shipped. Pre-checkin (or mothership
+  // not installed) there is nothing to show and the row is skipped.
   {
+    IMothershipProvider* ms = _app ? _app->mothership() : nullptr;
     uint32_t fh_ck = 0, ma_ck = 0, age_ms = 0;
-    if (MothershipService::lastSentHeap(fh_ck, ma_ck, age_ms)) {
+    if (ms && ms->heapAtLastCheckin(fh_ck, ma_ck, age_ms)) {
       uint32_t age_s = age_ms / 1000;
       String heap_ck = String(fh_ck) + " / " + String(ma_ck) + " bytes  ("
                      + String(age_s) + "s ago)";
@@ -202,7 +196,6 @@ void SystemStatus::buildForm(JsonObject& root,
                   .label("Heap @ last checkin (server mirror)").icon("CloudSync"));
     }
   }
-#endif
 
   if (ESP.getPsramSize() > 0) {
     String psram = String(ESP.getPsramSize()) + " / " + String(ESP.getFreePsram()) + " bytes";

@@ -199,6 +199,9 @@ class MothershipService : public StatefulService<MothershipSettings>,
   static bool lastSentHeap(uint32_t& free_out,
                             uint32_t& max_out,
                             uint32_t& age_ms_out);
+  bool heapAtLastCheckin(uint32_t& free_out, uint32_t& max_out, uint32_t& age_ms_out) const override {
+    return lastSentHeap(free_out, max_out, age_ms_out);
+  }
 
  private:
   ConfigDelegate<MothershipSettings>      _cfg;

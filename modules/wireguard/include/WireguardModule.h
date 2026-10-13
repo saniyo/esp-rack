@@ -25,7 +25,7 @@
 // as WIREGUARD_BACKEND_NAME so it can be surfaced through the
 // /uiManifest WG form without WireguardModule.h being on the include
 // path of WireguardService.cpp.
-#define WIREGUARD_MODULE_VERSION  "0.2.0"
+#define WIREGUARD_MODULE_VERSION  "0.2.1"
 
 class WireGuardModule : public ESPRack::Module {
  public:

@@ -14,7 +14,7 @@
 
 #include <ESPAsyncWebServer.h>
 #include <SecurityManager.h>
-#include <RestartService.h>
+#include <App.h>  // ESPRack::restartDevice (core) — not the restart module
 
 #define UPLOAD_FIRMWARE_PATH      "/api/v1/system/upload/firmware"
 #define UPLOAD_FIRMWARE_FORM_PATH "/api/v1/system/upload/form"

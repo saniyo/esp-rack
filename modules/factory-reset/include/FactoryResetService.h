@@ -11,7 +11,7 @@
 
 #include <ESPAsyncWebServer.h>
 #include <SecurityManager.h>
-#include <RestartService.h>
+#include <App.h>  // ESPRack::restartDevice (core) — not the restart module
 #include <FS.h>
 
 #define FS_CONFIG_DIRECTORY "/config"

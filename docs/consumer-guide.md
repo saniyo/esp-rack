@@ -106,7 +106,11 @@ build_flags     = ${factory_settings.build_flags}
     heap-budget work relies on.
   - AsyncTCP and ESPAsyncWebServer must come from the **same** owner
     (`ESP32Async`). Mixed owners link two AsyncTCPs (commit `7f92fe2`).
-- `lib_ldf_mode` is left at the default `chain`.
+- `lib_ldf_mode` is left at the default `chain`. Install only the modules you
+  need: a module that isn't in `lib_deps` and isn't included by another one
+  isn't compiled. Since LIB-FIX-012 no module includes an undeclared module,
+  so a trimmed set builds without `lib_ignore`. (With an older esp-rack,
+  `lib_ignore` the modules you don't install.)
 
 ### 2.2 Board environments
 

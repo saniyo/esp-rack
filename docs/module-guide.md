@@ -753,7 +753,16 @@ which peripheral or pins to use.
    `submitGps()`, it doesn't depend on the location module. Code that needs
    a trustworthy clock checks `ESPRack::TimeSync::clockSane()` or
    `isValid()`, and can `subscribe()` (in `onBegin`) to clock events.
-8. **Reboot only through `ESPRack::restartDevice(reason)`**, never
+8. **Never include another module's header** unless your `library.json`
+   lists that module in `dependencies`. PlatformIO's library finder (chain
+   mode) follows every `#include` without evaluating `#if` or
+   `__has_include`, so such an include drags the other module (and its own
+   dependencies) into every build that uses yours. Contracts between modules
+   are interfaces in the core (`lib/ESPRack/include`, e.g. `ICertProvider`,
+   `IMothershipProvider`, `IWireguardProvider`), late-bound through `App`;
+   restart goes through the core's `ESPRack::restartDevice()`.
+   `scripts/check_module_deps.py` checks this.
+9. **Reboot only through `ESPRack::restartDevice(reason)`**, never
    `ESP.restart()`, and make `onShutdown()` leave the hardware safe: outputs
    off, counters persisted, within 500 ms. A stray `esp_restart()` still
    runs the hooks through the shutdown handler, but on whatever task called

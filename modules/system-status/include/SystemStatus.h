@@ -22,6 +22,7 @@
 #define SYSTEM_IDENTITY_FORM_PATH    "/api/v1/system/identity/form"
 
 class WebManager;
+namespace ESPRack { class App; }
 
 class SystemStatus {
  public:
@@ -36,6 +37,9 @@ class SystemStatus {
   // registers the empty shell; each cooperating service adds its own
   // tab via WebManager::addTabToFeature() in its own registerManifest.
   void registerManifest(WebManager* web);
+
+  // For late-bound providers (App::mothership()) read at form time.
+  void setApp(ESPRack::App* app) { _app = app; }
 
   // Builds the 'status' sub-form into `root`. Non-static now because it
   // reads the WebManager* captured at construction to surface module
@@ -59,6 +63,7 @@ class SystemStatus {
   void buildIdentityForm(JsonObject& root);
 
  private:
+  ESPRack::App* _app{nullptr};
   AsyncWebServer*  _server{nullptr};
   SecurityManager* _sec{nullptr};
   WebManager*      _web{nullptr};
