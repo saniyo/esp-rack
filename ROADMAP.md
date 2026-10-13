@@ -47,6 +47,9 @@ Work beyond the plan that has landed:
   - SES-LIB-016 (UI pack B): dated table columns (`date/time/datetime/duration`),
     `Message.levelKey`, `Action.withClientTime`, `updateValue` for 32/64-bit
     integers, 13 icons. Plan: `docs/plans/ses-lib-016-ui-pack-b.md`.
+  - SES-LIB-003: per-consumer UI bundles in `<project>/.pio/www/`, the library
+    root taken from `lib_extra_dirs` (any path), and canonical consumer scripts in
+    `scripts/consumer/`. Plan: `docs/plans/ses-lib-003-build-isolation.md`.
   - SES-LIB-014 (core 0.6.0): `BootGuard` (crash-run counter, sticky advisory
     safe mode, NVS `esprack/boot`) and `LoopWdt` (opt-in loop task watchdog;
     OTA and restart hooks pause it). Plan: `docs/plans/ses-lib-014-bootguard-loopwdt.md`.

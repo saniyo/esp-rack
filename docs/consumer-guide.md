@@ -14,8 +14,9 @@ Related: [`module-guide.md`](module-guide.md) (writing modules),
 
 ## 0. The model in one paragraph
 
-A consumer is an ordinary PlatformIO Arduino project. It sits **next to** an
-`esp-rack` clone (`../esp-rack`).
+A consumer is an ordinary PlatformIO Arduino project. It uses an `esp-rack`
+checkout anywhere on disk (`lib_extra_dirs`), or the esp-rack git URL in
+`lib_deps`.
 
 - PlatformIO finds the core and every module through `lib_extra_dirs`.
   `lib_deps` names the ones to link.
@@ -23,7 +24,8 @@ A consumer is an ordinary PlatformIO Arduino project. It sits **next to** an
   1. Work out a hardware **flavor** tag.
   2. Copy the library's React UI into a throw-away `interface/` folder and
      lay your branding overrides on top.
-  3. Run npm, which writes a gzip'd PROGMEM header `WWWData.h`.
+  3. Run npm, which writes a gzip'd PROGMEM header `WWWData.h` into the
+     consumer's own `.pio/www/`.
 - `src/main.cpp` is the composition root: one
   `ESPRack::Builder(...).install<...>()...build()` chain plus your own
   application module(s).
@@ -38,7 +40,7 @@ A consumer is an ordinary PlatformIO Arduino project. It sits **next to** an
 | `platformio.ini` | yes | Project config (§2). |
 | `factory_settings.ini` | yes | `FACTORY_*` defaults: identity, WiFi, AP, users, NTP, OTA, MQTT, JWT (§3). |
 | `features.ini` | yes | `FT_*` flags not tied to a module (§3). |
-| `scripts/` | yes | `compute_flavor.py`, `sync_ui.py`, `build_interface.py` (§4). |
+| `scripts/` | yes | `compute_flavor.py`, `sync_ui.py`, `build_interface.py` (§4): copies of `esp-rack/scripts/consumer/`. |
 | `interface_overrides/` | yes | Branding laid over the UI after each sync: `public/app/icon.png`, `public/app/manifest.json`, `public/favicon.ico` (§5). |
 | `interface/` | **no** (`.gitignore:22`) | Build artefact: UI copy + `node_modules` + build output. Never edit it. |
 | `data/` | `.gitkeep` only | LittleFS image source (`pio run -t uploadfs`). Gets `data/www/` only when `PROGMEM_WWW` is off. |
@@ -47,11 +49,11 @@ A consumer is an ordinary PlatformIO Arduino project. It sits **next to** an
 | `build/` | no | A CMake cache an IDE produced by configuring the root `CMakeLists.txt`. Junk. |
 | `.pio/` | no | PlatformIO output. |
 
-**Placement is hard-coded.** `esp-rack` must be at `../esp-rack`. That path
-appears in:
-- `lib_extra_dirs` (`platformio.ini:23-25`)
-- `scripts/sync_ui.py:89`
-- the fallback output path in `esp-rack/ui/config-overrides.js:18`
+**Placement is free** (SES-LIB-003). `sync_ui.py` takes the library root
+from the `lib_extra_dirs` entry that holds `ESPRack/library.json`
+(`<esp-rack>/lib`), so the checkout can have any name and live anywhere,
+with a relative or absolute path. Without such an entry it uses the
+released-mode clone in `.pio/libdeps/<env>/ESPRack`.
 
 ---
 
@@ -208,17 +210,24 @@ demo sets `-D FT_PROJECT=1`, which enables the app module body
      mismatches, and the comments warn that a wrong-flavor image panics.
    - If PSRAM is present but its size is unknown, the flavor gets `r?`.
 2. **`sync_ui.py`**
-   - **Mode.** If `lib_extra_dirs` mentions `esp-rack`, it uses local-dev
-     mode with library root `../esp-rack`. Otherwise it uses "released" mode
-     with root `.pio/libdeps/<env>/ESPRack`.
+   - **Mode.** If a `lib_extra_dirs` entry holds `ESPRack/library.json`, it
+     uses local-dev mode with the library root at that entry's parent.
+     Otherwise it uses "released" mode with root `.pio/libdeps/<env>/ESPRack`.
    - **Copy.** It copies `esp-rack/ui/{src,public,package.json,config-overrides.js,progmem-generator.js,tsconfig.json}`
      into `interface/`, keeping `node_modules` and `build`, then lays
      `interface_overrides/` over it.
    - **Seeding.** It seeds missing branding files into `interface_overrides/`
      (it never overwrites) and derives `favicon.ico` from `icon.png`.
-   - **Output location.** It exports `ESPRACK_INCLUDE_DIR`, so the UI build
-     writes `WWWData.h` into `<libroot>/lib/ESPRack/include/`.
-   - **Skip.** `ESPRACK_SKIP_UI=1` skips it.
+   - **Output location** (SES-LIB-003). The UI build writes `WWWData.h` into
+     the consumer's `<project>/.pio/www/`. `sync_ui.py` exports
+     `ESPRACK_WWW_DIR` and prepends that dir to the include path, so
+     `App.cpp`'s `#include <WWWData.h>` finds it. There is one bundle per
+     consumer, shared by its envs (it doesn't depend on the env).
+   - **Guard.** A `WWWData.h` left in `<libroot>/lib/ESPRack/include/` by
+     the old scheme fails the build. The message gives the path and the
+     `rm` command.
+   - **Skip.** `ESPRACK_SKIP_UI=1` skips the copy. The build then fails
+     clearly if `.pio/www/WWWData.h` doesn't exist yet.
 3. **`build_interface.py`**
    - Runs on a plain `pio run` or on `-t upload`. It's skipped for
      `uploadfs`/`buildfs`/`clean`/`monitor` and when `ESPRACK_SKIP_UI` is set.
@@ -244,10 +253,10 @@ build must exist): `$env:ESPRACK_SKIP_UI=1; pio run -t upload`.
   you stop getting framework UI updates. **Keep overrides to branding**:
   `icon.png`, `manifest.json` (the library default still says
   "ESP8266 React") and `favicon.ico`.
-- `WWWData.h` is written **into the esp-rack checkout**
-  (`esp-rack/lib/ESPRack/include/WWWData.h`, ignored there). Two consumers
-  that share one esp-rack clone overwrite each other's bundle and branding;
-  the last one built wins.
+- `WWWData.h` is the consumer's own (`<project>/.pio/www/WWWData.h`).
+  Consumers that share one esp-rack checkout no longer overwrite each
+  other's bundle and branding (SES-LIB-003; before that, the last one built
+  won).
 - `App::begin()` serves the bundle with three cache tiers
   (`esp-rack/lib/ESPRack/src/App.cpp:283-344`):
 
@@ -265,6 +274,25 @@ build must exist): `$env:ESPRACK_SKIP_UI=1; pio run -t upload`.
   optional; it downsizes the icon.
 
 ---
+
+### 5.1 Migrating a consumer to per-consumer UI bundles (SES-LIB-003)
+
+For consumers whose scripts predate esp-rack `wip/ses-lib-003`
+(`feature/ses-light-support` after `ff69bca`):
+
+1. Copy `esp-rack/scripts/consumer/{sync_ui.py,build_interface.py,compute_flavor.py}`
+   over your `scripts/`, keeping your own extra scripts.
+2. Keep `extra_scripts` in this order: `pre:scripts/compute_flavor.py`,
+   `pre:scripts/sync_ui.py`, `pre:scripts/build_interface.py`. `sync_ui.py`
+   must run before the build, because it adds the include path.
+3. Build once **without** `ESPRACK_SKIP_UI`. The bundle appears in
+   `.pio/www/WWWData.h`.
+4. Once every consumer of the shared checkout has migrated, delete the old
+   bundle `esp-rack/lib/ESPRack/include/WWWData.h`. Until then the new
+   scripts refuse to build and print the `rm` command. Old scripts keep
+   working with the new esp-rack UI: `ESPRACK_INCLUDE_DIR` is still
+   honoured, with a warning.
+5. `.pio/` is already ignored, so nothing new needs committing.
 
 ## 6. What not to commit
 
