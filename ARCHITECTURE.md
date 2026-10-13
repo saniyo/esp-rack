@@ -329,6 +329,15 @@ knows no driver.
   `restoreFactoryHw()` on every instance on the loop task, then restarts.
   `-D ESPRACK_HW_TAB=0` compiles the tab out (about 4.3 KB on C3); the
   registry and the action stay.
+- **Follow-ups** (SES-LIB-023..025):
+  - `reserve(kind, index, reason)` keeps a UART or a channel away from
+    instances, as `reserveGpio()` does for pins.
+  - Hardware an instance gives up stays claimed as "releasing" until it calls
+    `released()`, so another instance can't start driving it before it's let
+    go. Only if the instance was Ok, i.e. set the hardware up; past 10 s the
+    tab warns, and the claim stays.
+  - `setRuntimeNote(who, note, level)` lets an instance report a runtime
+    fault (`Ok · fault` in the tab).
 - **Threading.** `validate()`/`update()`/`state()` may run on any task. The
   registry mutex is a leaf lock: module code (`describeHw()`) is never called
   while it's held.

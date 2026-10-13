@@ -825,9 +825,22 @@ Start from `modules/template-ext-hw/`. Its pieces:
 4. **After a change, `hw()->update(*this)`.** Call it in the update handler,
    then switch pins in `loop()`.
 5. **`hwState()` other than `Ok` means: hands off.** Don't drive the pins
-   of an instance in `Conflict`, and release the pins it drove before, but
-   only if `hw()->heldByOther(*this, HwKind::Gpio, pin)` is false: the pin
-   may already belong to another instance that drives it.
+   of an instance in `Conflict`.
+   - **Release, then say so** (SES-LIB-024). Hardware an instance gives up
+     (new pins, Disabled, Conflict, NotConfigured) stays claimed as
+     "releasing". Other instances get "GPIO18 being released by meter".
+   - Once the loop has let it go (pins back to input, `Serial2.end()`),
+     call `hwReleased()` (or `hw()->released(*this)`).
+   - An instance that never says so keeps that hardware blocked. System →
+     Hardware shows "releasing N". After 10 s the state reads `· warn` and the
+     note "releasing N for 14 s, no released()". The claim stays.
+   - Only hardware the instance set up waits for `released()`. An instance
+     that never was `Ok` (a conflict since boot) gives its claims up at once.
+   - **Report what the hardware does** (SES-LIB-025). `Ok` only means the
+     resources are free. Use `hwNote("no answer from the meter",
+     HwNoteLevel::Fault)` (or `hw()->setRuntimeNote(...)`) and
+     `hwNote(nullptr)` once it works. System → Hardware shows
+     `Ok · fault` and the note.
 6. **Interfaces.** Other code finds the instance with
    `app->hw()->find<IThing>("relay1")`. Implement
    `queryInterface()` with `ESPRack::ifaceIs(ifaceId, IThing::kIfaceId)`.
@@ -837,7 +850,22 @@ Start from `modules/template-ext-hw/`. Its pieces:
    Hardware's "Restore factory pins" calls it, then restarts.
 8. **Framework modules** that own pins don't become instances. They call
    `ctx.app->hw()->reserveGpio(pin, "reason")` in `onInstall`, as the
-   filesystem module does for the SD card.
+   filesystem module does for the SD card. For a UART, an RMT/LEDC channel
+   or an I2C address use `ctx.app->hw()->reserve(HwKind::Uart, 2, "reason")`.
+   Consumers use `Builder::reserve(...)` / `reserveUart(port, reason)`
+   (SES-LIB-023).
+9. **Strings the form uses exist before the `ConfigDelegate`** (SES-LIB-026).
+   `ConfigDelegate`'s constructor registers the config, and that runs the
+   form reader once (the secret-key probe). Any instance string the form
+   reader reads (an action id, a title) must already be filled in by then.
+   Either declare those buffers before the `ConfigDelegate` member and fill
+   them in its initializer, or keep the form reader a pure function of the
+   state, as `template-ext-hw` does.
+10. **UARTs: map to `Serial0/1/2`, never `new HardwareSerial`.** The Arduino
+    core keeps a pointer to the first serial object started on each UART for
+    good. A `HardwareSerial` you create and delete leaves it dangling. Take a
+    `HardwareSerial&`, or map the configured port number to
+    `Serial0`/`Serial1`/`Serial2` and only call `begin()`/`end()` on it.
 
 `install<M>()` on an `ExtHwModule` and `installExtHw<M>()` on a plain module
 both fail to compile with a message saying which one to use. An invalid id

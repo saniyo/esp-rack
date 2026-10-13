@@ -47,6 +47,12 @@ Work beyond the plan that has landed:
   - SES-LIB-016 (UI pack B): dated table columns (`date/time/datetime/duration`),
     `Message.levelKey`, `Action.withClientTime`, `updateValue` for 32/64-bit
     integers, 13 icons. Plan: `docs/plans/ses-lib-016-ui-pack-b.md`.
+  - SES-LIB-023..026 (hardware registry follow-ups from the first real ExtHw
+    module):
+    - non-GPIO reservations (`reserve`, `reserveUart`);
+    - "releasing" claims until `released()`;
+    - runtime notes per instance;
+    - module-guide rules for form strings and UART objects.
   - SES-LIB-003: per-consumer UI bundles in `<project>/.pio/www/`, the library
     root taken from `lib_extra_dirs` (any path), and canonical consumer scripts in
     `scripts/consumer/`. Plan: `docs/plans/ses-lib-003-build-isolation.md`.
