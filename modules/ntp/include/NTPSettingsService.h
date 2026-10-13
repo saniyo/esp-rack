@@ -8,6 +8,7 @@
 #include <FormBuilder.h>   // still used for updateValue() in update()
 #include <web/Form.h>
 #include <WebFeatureDelegate.h>
+#include <time/TimeSync.h>
 
 #include <time.h>
 #ifdef ESP32
@@ -54,6 +55,12 @@
 #endif
 
 #define NTP_FILE        "/config/ntpSettings.json"
+// SNTP poll interval. lwIP's default (3 h) equals the NTP freshness window of
+// TimeSync, so authority would lapse right before each resync.
+#ifndef NTP_SYNC_INTERVAL_MS
+#define NTP_SYNC_INTERVAL_MS 3600000UL
+#endif
+#define NTP_SERVER_MAX 64  // incl. NUL
 // Endpoint paths are derived by the registry now (C1): the typed feature
 // mounts /api/v1/ntp/form (GET) and /api/v1/ntp/state (GET+POST) from
 // spec.id — no per-module form-path #define. WS is unchanged (/ws/*).
@@ -95,7 +102,33 @@ class NTPSettings {
     root["tz_format"] = s.tzFormat;
   }
 
+  /* ----- clock validity (core TimeSync, SES-LIB-002) ----- */
+  // Two compact lines:
+  //   clock      "Valid, ntp, ±1 s" (+ ", sources disagree")
+  //   clock_diag "last step 12 ms, 0 rejected"
+  struct ClockView {
+    bool valid;
+    char clock[64];
+    char diag[48];
+  };
+  static ClockView clockView() {
+    const ESPRack::TimeStatus st = ESPRack::TimeSync::instance().status();
+    ClockView v;
+    v.valid = st.valid;
+    if (st.uncertaintyMs == UINT32_MAX) {
+      snprintf(v.clock, sizeof(v.clock), "Not set");
+    } else {
+      snprintf(v.clock, sizeof(v.clock), "%s, %s, \u00b1%lu s%s", st.valid ? "Valid" : "Not valid",
+               ESPRack::timeSourceName(st.source), (unsigned long)((st.uncertaintyMs + 500) / 1000),
+               st.disputed ? ", sources disagree" : "");
+    }
+    snprintf(v.diag, sizeof(v.diag), "last step %ld ms, %u rejected", (long)st.lastStepMs, (unsigned)st.rejects);
+    return v;
+  }
+
   /* ----- live WS snapshot (runtime + config echo) ----- */
+  // `set_time` is deliberately absent: a tick must not overwrite the value
+  // the user is picking.
   static void staRead(NTPSettings& s, JsonObject& root) {
     time_t now = time(nullptr);
     bool active = (bool)WIFI_SAFE_SNTP_ENABLED();
@@ -106,6 +139,10 @@ class NTPSettings {
     root["local_time"] = formatTime(localtime(&now), "%b %d, %Y %H:%M:%S");
     root["utc_time"]   = formatTime(gmtime(&now),    "%b %d, %Y %H:%M:%S");
     root["uptime"]     = formatDurationSec((uint32_t)(millis() / 1000UL));
+
+    ClockView cv = clockView();       // non-const: char[] is copied, const char* would be linked
+    root["clock"]      = cv.clock;
+    root["clock_diag"] = cv.diag;
 
     root["enabled"]   = s.enabled;
     root["server"]    = s.server;
@@ -140,6 +177,15 @@ class NTPSettings {
                .readOnly().label("UTC time").icon("SwapVerticalCircle"));
     st.add(web::Text("uptime", formatDurationSec((uint32_t)(millis() / 1000UL)).c_str())
                .readOnly().label("Uptime").icon("AvTimer"));
+    const ClockView cv = clockView();
+    st.add(web::Text("clock", cv.clock).readOnly().label("Clock").icon("Info")
+               .color(cv.valid ? "success" : "warning"));
+    st.add(web::Text("clock_diag", cv.diag).readOnly().label("Time sync").icon("Timeline"));
+    // Operator time set (admin): pick a local time, the browser sends UTC
+    // seconds; it outranks an external RTC and the soft-reset hold, never
+    // GPS or NTP.
+    st.add(web::DateTime("set_time", (int32_t)now).dateTime().label("Set clock to").icon("CalendarToday"));
+    st.add(web::Action("a_set_time", "Set time").ref("system.setTime").withFields("epoch=set_time"));
 
     // SETTINGS
     web::Form set(root, "settings", "Settings");
@@ -155,6 +201,10 @@ class NTPSettings {
       src = root["settings"].as<JsonObject>();
     }
 
+    // lwIP keeps the server name in a fixed buffer (NTP_SERVER_MAX)
+    if (src.containsKey("server") && strlen(src["server"] | "") >= NTP_SERVER_MAX) {
+      return StateUpdateResult::ERROR;
+    }
     bool changed = false;
     changed |= FormBuilder::updateValue(src, "enabled", s.enabled);
     changed |= FormBuilder::updateValue(src, "server", s.server);
@@ -179,6 +229,8 @@ class NTPSettingsService : public StatefulService<NTPSettings> {
   ConfigDelegate<NTPSettings> _cfg;
   WebFeatureEntry<NTPSettings>* _feature{nullptr};
   unsigned long _lastTickMs{0};
+  char _serverBuf[2][NTP_SERVER_MAX]{};  // lwIP keeps a pointer to the SNTP server name (double-buffered)
+  uint8_t _serverSel{0};
 
 #ifdef ESP32
   void onStationModeGotIP(WiFiEvent_t event, WiFiEventInfo_t info);
@@ -191,6 +243,9 @@ class NTPSettingsService : public StatefulService<NTPSettings> {
 #endif
 
   void configureNTP();
+#ifdef ESP32
+  void configureNTPLocked(const NTPSettings& s);  // caller holds the service lock
+#endif
 };
 
 #endif  // NTPSettingsService_h

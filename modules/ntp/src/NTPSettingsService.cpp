@@ -11,6 +11,9 @@ NTPSettingsService::NTPSettingsService(ConfigManager* cfgMgr)
            NTPSettings::readConfig,
            NTPSettings::update,
            false /*autoSave*/) {
+  // NTP is a time source of core TimeSync. With the module installed (even
+  // disabled) the clock counts as sane only once a source made it valid.
+  ESPRack::TimeSync::instance().registerSource(ESPRack::TimeSource::Ntp);
 #ifdef ESP32
   WiFi.onEvent(
       std::bind(&NTPSettingsService::onStationModeDisconnected, this, std::placeholders::_1, std::placeholders::_2),
@@ -119,25 +122,53 @@ void NTPSettingsService::onStationModeDisconnected(const WiFiEventStationModeDis
 #endif
 
 void NTPSettingsService::configureNTP() {
+#ifdef ESP32
+  // Called from the WiFi event task, the settings update handler and
+  // begin(): run the whole thing under the service's (recursive) lock, so
+  // the calls are serialized and the last caller's settings win.
+  read([this](NTPSettings& s) { configureNTPLocked(s); });
+#elif defined(ESP8266)
   if (WiFi.isConnected() && _state.enabled) {
-    log_d("Starting NTP...");
-#ifdef ESP32
-    configTzTime(_state.tzFormat.c_str(), _state.server.c_str());
-#elif defined(ESP8266)
     configTime(_state.tzFormat.c_str(), _state.server.c_str());
-#endif
   } else {
-#ifdef ESP32
-    setenv("TZ", _state.tzFormat.c_str(), 1);
-    tzset();
-#elif defined(ESP8266)
     setTZ(_state.tzFormat.c_str());
-#endif
-    // IDF 5 panics with "Required to lock TCPIP core functionality!"
-    // when sntp_stop() is called bare from a non-tcpip thread.
-    // WIFI_SAFE_SNTP_STOP() routes to esp_sntp_stop() (locked wrapper)
-    // on IDF 5+ and to sntp_stop() on older cores where the bare call
-    // is still safe.
     WIFI_SAFE_SNTP_STOP();
   }
+#endif
 }
+
+#ifdef ESP32
+void NTPSettingsService::configureNTPLocked(const NTPSettings& st) {
+  // The timezone belongs to core TimeSync (libc TZ and everything that reads it), not
+  // to the SNTP client: set it whether or not NTP runs.
+  if (!ESPRack::TimeSync::instance().setTimezone(st.tzFormat.c_str(), st.tzLabel.c_str())) {
+    log_w("[ntp] timezone '%s' rejected, keeping the previous one", st.tzFormat.c_str());
+  }
+  const bool run = WiFi.isConnected() && st.enabled;
+  // SNTP results go through TimeSync (its sntp_sync_time() hook), which
+  // decides whether they may step the clock.
+  //
+  // The esp_sntp_* wrappers are the thread-safe IDF 5 API: setservername
+  // runs through tcpip_api_call, which takes the (non-recursive) TCPIP core
+  // lock itself, and init/stop are queued to the tcpip thread with
+  // tcpip_callback. So they must be called WITHOUT holding that lock
+  // (holding it deadlocks), and stop/init execute later, in call order.
+  // setoperatingmode is not called: POLL is lwIP's default, and setting the
+  // mode while the queued stop hasn't run yet would trip lwIP's assert.
+  //
+  // The stop is unconditional: esp_sntp_enabled() can't see an init that is
+  // still queued, and a queued stop runs after it (FIFO), so the client
+  // always ends up in the state of the last call.
+  esp_sntp_stop();
+  if (run) {
+    log_d("[ntp] starting SNTP (%s)", st.server.c_str());
+    // lwIP keeps the pointer; the client may still read the previous name
+    // until the queued stop runs, so write the other buffer.
+    _serverSel ^= 1;
+    strlcpy(_serverBuf[_serverSel], st.server.c_str(), sizeof(_serverBuf[0]));
+    esp_sntp_setservername(0, _serverBuf[_serverSel]);
+    esp_sntp_set_sync_interval(NTP_SYNC_INTERVAL_MS);
+    esp_sntp_init();
+  }
+}
+#endif

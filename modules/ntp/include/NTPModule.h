@@ -9,7 +9,7 @@
 class NTPModule : public ESPRack::Module {
  public:
   void describe(ESPRack::ModuleDescriptor& d) override {
-    d.id = "ntp"; d.version = "1.0.0"; d.priority = 30;
+    d.id = "ntp"; d.version = "1.1.0"; d.priority = 30;
     d.requires_ = {"wifi"};
   }
   void onInstall(ESPRack::ModuleContext& ctx) override {
