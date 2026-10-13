@@ -140,7 +140,7 @@ void TemplateExtHwService::registerManifest(WebManager* web) {
   _feature = web->registerFeature<TemplateExtHwState>(
       WebFeature(_owner.featureId())
           .title(_title)
-          .version("0.1.0")
+          .version("0.1.1")
           .component(WebComponent::DynamicSettings)
           .authenticated()
           .menu(WebMenu(_title).icon("ToggleOn").order(61))
@@ -235,13 +235,12 @@ void TemplateExtHwService::applyPins() {
   const int out = drive ? s.outPin : -1;
   const int button = drive ? s.buttonPin : -1;
 
-  // Release what we no longer own — unless another instance has claimed the
-  // pin since (it may already be driving it). Never touch a pin in Conflict.
-  auto release = [this](int pin) {
-    if (!_hw || !_hw->heldByOther(_owner, HwKind::Gpio, pin)) pinMode(pin, INPUT);
-  };
-  if (_drivenOut >= 0 && _drivenOut != out) release(_drivenOut);
-  if (_drivenButton >= 0 && _drivenButton != button) release(_drivenButton);
+  // Let go of what we no longer own. The registry keeps those pins claimed
+  // ("releasing") until we say released() below, so no other instance can
+  // have started driving them yet (SES-LIB-024). Never touch a pin in Conflict.
+  if (_drivenOut >= 0 && _drivenOut != out) pinMode(_drivenOut, INPUT);
+  if (_drivenButton >= 0 && _drivenButton != button) pinMode(_drivenButton, INPUT);
+  if (_hw) _hw->released(_owner);
 
   if (out >= 0) {
     if (_drivenOut != out) pinMode(out, OUTPUT);
@@ -250,6 +249,13 @@ void TemplateExtHwService::applyPins() {
   if (button >= 0 && _drivenButton != button) {
     pinMode(button, INPUT_PULLUP);
     _lastButton = digitalRead(button);
+  }
+  // Ok only says the pins are free. What the hardware does is the module's
+  // to report (SES-LIB-025): a button that reads low with its pull-up on is
+  // probably stuck or shorted.
+  if (_hw) {
+    const bool stuck = button >= 0 && !digitalRead(button);
+    _hw->setRuntimeNote(_owner, stuck ? "button reads low at start (stuck?)" : nullptr, ESPRack::HwNoteLevel::Warn);
   }
   if (out != _drivenOut || button != _drivenButton) {
     log_i("[%s] pins: out=%d button=%d (%s)", _owner.instanceId(), out, button, ESPRack::hwStateName(s.hwState));

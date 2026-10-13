@@ -50,7 +50,7 @@ class TemplateExtHwModule : public ESPRack::ExtHwModule, public ITemplateOutput 
 
   void describe(ESPRack::ModuleDescriptor& d) override {
     d.id       = instanceId();  // the instance id IS the module id
-    d.version  = "0.1.0";
+    d.version  = "0.1.1";
     d.priority = 60;
   }
 

@@ -1,6 +1,6 @@
 {
   "name": "TemplateExtHwModule",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "ESPRack external HW module skeleton (LIB-FEAT-001): an output pin with an optional button, installed as named instances (installExtHw), pins checked against the board and other instances. Copy and rename — see docs/module-guide.md.",
   "license": "MIT",
   "frameworks": [
