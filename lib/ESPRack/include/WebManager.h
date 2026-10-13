@@ -237,6 +237,11 @@ class WebManager {
   // with ESPRACK_VERSION_STR so the manifest's device block carries
   // the library rev independent of consumer-app versioning.
   void setFrameworkVersion(const char* v) { _frameworkVersion = v ? v : ""; }
+
+  // Re-bake the flash manifest cache (and its ETag) after a runtime change
+  // the manifest shows — the device timezone (SES-LIB-015). No-op before
+  // begin(). Loop task; rewrites only when the content signature changed.
+  void refreshManifestCache();
   const char* frameworkVersion() const { return _frameworkVersion; }
 
   // ---- public iteration over registered entries ----
@@ -412,6 +417,7 @@ class WebManager {
   // _entries / _modules are registered; by then heap is at boot
   // peak (max_alloc ~70-90 KB) so the one-shot build fits.
   void writeManifestCacheToFs();
+  static void addDeviceTz(JsonObject device);
 
   static constexpr const char* kManifestCacheAnonPath
       = "/config/.manifest.anon.json";

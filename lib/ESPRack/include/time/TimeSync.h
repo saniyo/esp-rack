@@ -42,7 +42,7 @@
 #define ESPRACK_DEFAULT_TZ_LABEL "Etc/UTC"
 #endif
 #ifndef ESPRACK_TIMESYNC_MAX_LISTENERS
-#define ESPRACK_TIMESYNC_MAX_LISTENERS 4
+#define ESPRACK_TIMESYNC_MAX_LISTENERS 6  // App uses one (manifest re-bake on TzChanged)
 #endif
 
 class WebManager;

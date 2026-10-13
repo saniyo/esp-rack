@@ -2,6 +2,7 @@
 #include <ESPFS.h>
 #include <ProblemJson.h>
 #include <esp_rom_crc.h>
+#include <time/TimeSync.h>
 
 // ── ManifestBuilder method definitions ─────────────────────────────
 // The class itself is declared in WebManager.h so the singleton
@@ -139,6 +140,7 @@ void ManifestBuilder::fillPhaseBuffer() {
       if (_mgr->_frameworkVersion && *_mgr->_frameworkVersion) {
         d["frameworkVersion"] = _mgr->_frameworkVersion;
       }
+      WebManager::addDeviceTz(d);
       renderDocIntoItem();
       return;
     }
@@ -247,6 +249,22 @@ void WebManager::begin() {
 // alternative that fills a pre-allocated JsonObject so Mothership can
 // snapshot the device's UI schema without an HTTPS round trip on each
 // poll.
+// device.tz = {iana, posix} (SES-LIB-015): the UI formats device-local
+// times with it. Omitted while no timezone is set.
+void WebManager::addDeviceTz(JsonObject device) {
+  char posix[64], iana[64];
+  ESPRack::TimeSync::instance().getTimezone(posix, sizeof(posix), iana, sizeof(iana));
+  if (!posix[0] && !iana[0]) return;
+  JsonObject tz = device.createNestedObject("tz");
+  if (iana[0]) tz["iana"] = (char*)iana;     // copied
+  if (posix[0]) tz["posix"] = (char*)posix;  // copied
+}
+
+void WebManager::refreshManifestCache() {
+  if (_manifestSig == 0) return;  // begin() bakes it
+  writeManifestCacheToFs();
+}
+
 void WebManager::buildManifestObject(JsonObject root) {
   root["schemaVersion"] = 3;
 
@@ -256,6 +274,7 @@ void WebManager::buildManifestObject(JsonObject root) {
   if (_frameworkVersion && *_frameworkVersion) {
     device["frameworkVersion"] = _frameworkVersion;
   }
+  addDeviceTz(device);
 
   JsonObject bf = root.createNestedObject("buildFeatures");
   for (const auto& b : _buildFeatures) {
@@ -383,33 +402,35 @@ void WebManager::writeManifestCacheToFs() {
   log_i("[web.manifest] cache sig changed (or missing) — rebuilding to flash, sig=0x%08x",
         (unsigned)sig);
 
-  {
-    fs::File f = ESPFS.open(kManifestCacheAnonPath, "w");
+  // Each tier goes to "<path>.tmp" first and replaces the file only when
+  // complete: a runtime re-bake (refreshManifestCache) must never let a
+  // concurrent GET stream a half-written file. Between remove and rename
+  // serveManifest finds no file and builds on the fly.
+  for (int authed = 0; authed < 2; ++authed) {
+    const char* path = authed ? kManifestCacheAuthedPath : kManifestCacheAnonPath;
+    char tmp[64];
+    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    fs::File f = ESPFS.open(tmp, "w");
     if (!f) {
-      log_w("[web.manifest] cannot open %s for write",
-            kManifestCacheAnonPath);
-    } else {
-      builder.reset(*this, /*authed=*/false);
-      bool ok = dumpBuilderToFile(builder, f);
-      size_t sz = f.size();
-      f.close();
-      log_i("[web.manifest] wrote anon cache: %u B (%s)",
-            (unsigned)sz, ok ? "ok" : "TRUNCATED");
+      log_w("[web.manifest] cannot open %s for write", tmp);
+      continue;
     }
-  }
-  {
-    fs::File f = ESPFS.open(kManifestCacheAuthedPath, "w");
-    if (!f) {
-      log_w("[web.manifest] cannot open %s for write",
-            kManifestCacheAuthedPath);
-    } else {
-      builder.reset(*this, /*authed=*/true);
-      bool ok = dumpBuilderToFile(builder, f);
-      size_t sz = f.size();
-      f.close();
-      log_i("[web.manifest] wrote authed cache: %u B (%s)",
-            (unsigned)sz, ok ? "ok" : "TRUNCATED");
+    builder.reset(*this, authed != 0);
+    const bool ok = dumpBuilderToFile(builder, f);
+    const size_t sz = f.size();
+    f.close();
+    if (!ok) {
+      log_w("[web.manifest] %s cache TRUNCATED (%u B), keeping the old one",
+            authed ? "authed" : "anon", (unsigned)sz);
+      ESPFS.remove(tmp);
+      continue;
     }
+    if (ESPFS.exists(path)) ESPFS.remove(path);
+    if (!ESPFS.rename(tmp, path)) {
+      log_w("[web.manifest] rename %s failed", tmp);
+      continue;
+    }
+    log_i("[web.manifest] wrote %s cache: %u B", authed ? "authed" : "anon", (unsigned)sz);
   }
   // Commit the new signature LAST. If a reboot interrupts the rewrite
   // mid-flight, the old (mismatching) signature stays — next boot
