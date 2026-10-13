@@ -13,6 +13,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <esp_system.h>
+#include <esp_task_wdt.h>
 #include <esp_timer.h>
 
 // Firmware-tag anchors — keep the strings emitted in FwTags.cpp
@@ -517,14 +518,21 @@ void App::shutdown() {
   runShutdownOnce("shutdown");
 }
 
-void App::runShutdownOnce(const char* reason) {
-  if (shutdownDone_.exchange(true)) return;   // another path got here first
-  if (!begun_) return;
+bool App::runShutdownOnce(const char* reason) {
+  if (shutdownDone_.exchange(true)) return false;   // another path owns the hooks
+  if (!begun_) {
+    hooksDone_ = true;
+    return true;
+  }
   begun_ = false;                             // App::loop stops ticking modules
   log_w("[restart] graceful shutdown (reason=%s)", reason ? reason : "?");
   // Reverse install order so dependents tear down first.
   for (auto it = modules_.rbegin(); it != modules_.rend(); ++it) {
     if (!*it) continue;
+    if (abandonHooks_.load()) {               // the caller gave up on us and resets
+      log_w("[restart] remaining onShutdown hooks skipped");
+      break;
+    }
     const uint32_t t0 = millis();
     (*it)->onShutdown();
     const uint32_t dt = millis() - t0;
@@ -535,11 +543,40 @@ void App::runShutdownOnce(const char* reason) {
             d.id ? d.id : "?", (unsigned)dt, (unsigned)ESPRACK_SHUTDOWN_BUDGET_MS);
     }
   }
+  hooksDone_ = true;
+  return true;
+}
+
+uint32_t App::shutdownGraceMs() const {
+  return (uint32_t)modules_.size() * ESPRACK_SHUTDOWN_BUDGET_MS + 2000;
+}
+
+bool App::waitHooks(uint32_t ms) const {
+  const uint32_t t0 = millis();
+  while (!hooksDone_.load() && millis() - t0 < ms) vTaskDelay(pdMS_TO_TICKS(20));
+  return hooksDone_.load();
+}
+
+void App::runAfterShutdownOnce() {
+  uint8_t expected = 0;
+  if (afterState_.compare_exchange_strong(expected, 1)) {
+    if (afterShutdown_) afterShutdown_();
+    afterState_ = 2;
+    return;
+  }
+  // Another task is inside afterShutdown (e.g. wiping /config): don't reset
+  // under it. Bounded, so a hang can't keep the device from rebooting.
+  const uint32_t t0 = millis();
+  while (afterState_.load() != 2 && millis() - t0 < 5000) vTaskDelay(pdMS_TO_TICKS(20));
 }
 
 void App::finishAndRestart() {
-  runShutdownOnce(restartReason_);
-  if (afterShutdown_ && !afterDone_.exchange(true)) afterShutdown_();
+  if (!runShutdownOnce(restartReason_) && !waitHooks(shutdownGraceMs())) {
+    // Another task owns the hooks and they overran: stop them between hooks
+    // and finish here.
+    abandonHooks_ = true;
+  }
+  runAfterShutdownOnce();
   esp_restart();
 }
 
@@ -558,6 +595,14 @@ void restartDevice(const char* reason, std::function<void()> afterShutdown) {
     esp_restart();
   }
 
+  const bool onLoop =
+      a->loopTask_ && xTaskGetCurrentTaskHandle() == static_cast<TaskHandle_t>(a->loopTask_);
+  // Off the loop task this caller parks for seconds (handoff + hook budget).
+  // async_tcp — where the restart/factory-reset/restore handlers run — is
+  // subscribed to the task watchdog (5 s, panic): unsubscribe, the device
+  // reboots anyway. Harmless (ESP_ERR_NOT_FOUND) for unsubscribed tasks.
+  if (!onLoop) (void)esp_task_wdt_delete(nullptr);
+
   // First caller wins. A later caller (any task) just waits for the reset
   // already under way — it must not cut the running hooks short.
   bool expected = false;
@@ -568,8 +613,6 @@ void restartDevice(const char* reason, std::function<void()> afterShutdown) {
   a->restartReason_ = reason ? reason : "unknown";
   a->afterShutdown_ = std::move(afterShutdown);
 
-  const bool onLoop =
-      a->loopTask_ && xTaskGetCurrentTaskHandle() == static_cast<TaskHandle_t>(a->loopTask_);
   if (!a->begun_ || onLoop) a->finishAndRestart();
 
   // Off the loop task: hand off to App::loop(), which runs the hooks there
@@ -580,12 +623,16 @@ void restartDevice(const char* reason, std::function<void()> afterShutdown) {
     vTaskDelay(pdMS_TO_TICKS(20));
   }
   if (a->shutdownDone_.load()) {
-    // The loop is running the hooks — give them their budget, then reset
-    // regardless (a hung hook must not keep the device from rebooting).
-    const uint32_t grace =
-        (uint32_t)a->modules_.size() * ESPRACK_SHUTDOWN_BUDGET_MS + 2000;
-    t0 = millis();
-    while (millis() - t0 < grace) vTaskDelay(pdMS_TO_TICKS(50));
+    // The loop is running the hooks — give them their budget. Normally the
+    // loop finishes, runs afterShutdown and resets the chip while we wait.
+    if (!a->waitHooks(a->shutdownGraceMs())) {
+      // A hook is stuck: stop the rest and finish here, so e.g. a factory
+      // reset still wipes /config before the reset the UI already reported.
+      log_w("[restart] shutdown hooks exceeded %u ms — finishing from the caller task",
+            (unsigned)a->shutdownGraceMs());
+      a->abandonHooks_ = true;
+    }
+    a->runAfterShutdownOnce();   // or wait for the loop that is running it
     esp_restart();
   }
   log_w("[restart] loop did not respond within 3 s — shutting down from the caller task");

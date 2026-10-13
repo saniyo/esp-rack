@@ -173,13 +173,20 @@ class App {
 
   // Restart plumbing (LIB-FIX-006). runShutdownOnce() is idempotent across
   // tasks: whichever path gets there first (loop, fallback, esp shutdown
-  // handler) runs the module hooks; the others skip them.
-  void runShutdownOnce(const char* reason);
+  // handler) runs the module hooks; the others skip them. Returns true when
+  // this call ran (or had nothing to run) the hooks, false when another task
+  // owns them — see hooksDone_.
+  bool runShutdownOnce(const char* reason);
   [[noreturn]] void finishAndRestart();    // hooks -> afterShutdown -> esp_restart
+  void runAfterShutdownOnce();             // runs it, or waits for the task that does
+  bool waitHooks(uint32_t ms) const;       // true when the hooks finished in time
+  uint32_t shutdownGraceMs() const;
   static void onEspShutdown();             // esp_register_shutdown_handler hook
   std::function<void()> afterShutdown_;
-  std::atomic<bool> afterDone_ {false};
-  std::atomic<bool> shutdownDone_ {false};
+  std::atomic<uint8_t> afterState_ {0};    // 0 not started, 1 running, 2 done
+  std::atomic<bool> shutdownDone_ {false}; // the hooks have been claimed
+  std::atomic<bool> hooksDone_ {false};    // ... and have finished
+  std::atomic<bool> abandonHooks_ {false}; // the caller took over: stop between hooks
   std::atomic<bool> restartRequested_ {false};
   std::atomic<bool> restartClaimed_ {false};   // first restartDevice() caller wins
   const char*       restartReason_ {"unknown"};
