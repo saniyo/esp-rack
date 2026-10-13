@@ -351,7 +351,8 @@ CertManagerService::CertManagerService(ConfigManager* cfgMgr,
   addUpdateHandler([this](const String& origin) {
     refreshRuntimeState();
     _cfg.saveIfChanged(origin);
-    if (_feature) _feature->broadcastWs(origin);
+    // No broadcastWs here (LIB-FIX-009): the feature's WS binding pushes on
+    // every propagated update, after this handler has refreshed state.
   }, false);
 }
 

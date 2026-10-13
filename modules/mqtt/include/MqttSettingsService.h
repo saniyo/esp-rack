@@ -222,7 +222,10 @@ class MqttSettings {
           break;
         }
       }
-      s.pendingSeenTopics.clear();
+      // NOT cleared here (LIB-FIX-009): this reader also serves
+      // GET /api/v1/mqtt/state and WS snapshots, which must not steal the
+      // rows from live subscribers. MqttSettingsService::pushLive() clears
+      // them after the frame is built.
     }
   }
 
@@ -582,6 +585,9 @@ class MqttSettingsService : public StatefulService<MqttSettings>,
   // emits this entry on the next WS tick.
   bool upsertSeenTopic(const String& topic, const String& payload);
   void markPendingSeen(const String& topic);
+  // Broadcast the live frame (built synchronously from staRead), then drop
+  // the pending seen-topic rows it carried — the only place they're cleared.
+  void pushLive(const char* origin);
 };
 
 #endif  // MqttSettingsService_h

@@ -410,7 +410,7 @@ void MqttSettingsService::onMqttConnect(bool sessionPresent) {
   _snifferActivePattern = "";
   applySnifferDiff();
 
-  if (_feature) _feature->broadcastWs("mqtt");
+  pushLive("mqtt");
 
   for (auto& cb : _connectListeners) cb(sessionPresent);
 }
@@ -430,7 +430,7 @@ void MqttSettingsService::onMqttDisconnect(AsyncMqttClientDisconnectReason reaso
   _brokerSubscribed.clear();
 
   refreshRuntime();
-  if (_feature) _feature->broadcastWs("mqtt");
+  pushLive("mqtt");
 
   for (auto& cb : _disconnectListeners) cb(reason);
 }
@@ -460,9 +460,13 @@ void MqttSettingsService::onMqttMessage(char* topic,
       for (size_t i = 0; i < take; ++i) body += payload[i];
       if (len > MQTT_SEEN_PAYLOAD_MAX) body += "...";
     }
+    // async_tcp context: mutate under the service lock — loopTask / WS
+    // readers serialise the same vectors (LIB-FIX-009).
+    beginTransaction();
     upsertSeenTopic(t, body);
+    endTransaction();
 
-    if (_feature && _feature->hasSubscribers()) _feature->broadcastWs("mqtt");
+    if (_feature && _feature->hasSubscribers()) pushLive("mqtt");
   }
 
   // Hand off to subscription handlers (new IMqttProvider model).
@@ -742,7 +746,7 @@ void MqttSettingsService::configureMqtt() {
   captureTransportSnapshot();
 
   refreshRuntime();
-  if (_feature) _feature->broadcastWs("mqtt");
+  pushLive("mqtt");
 }
 
 /* ---------- runtime mirrors ---------- */
@@ -895,6 +899,15 @@ bool MqttSettingsService::upsertSeenTopic(const String& topic, const String& pay
   _state.seenTopics.push_back(std::move(e));
   markPendingSeen(topic);
   return true;
+}
+
+void MqttSettingsService::pushLive(const char* origin) {
+  if (!_feature) return;
+  _feature->broadcastWs(origin);   // frame (incl. pending rows) built here
+  updateWithoutPropagation([](MqttSettings& s) {
+    s.pendingSeenTopics.clear();
+    return StateUpdateResult::UNCHANGED;
+  });
 }
 
 void MqttSettingsService::markPendingSeen(const String& topic) {
