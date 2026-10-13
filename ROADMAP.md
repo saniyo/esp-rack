@@ -36,14 +36,17 @@ Work beyond the plan that has landed:
 
 - **SES series** on `feature/ses-light-support`, the library side of the
   `esp-rack-ses-light` consumer (ESP32-S3):
-  - SES-LIB-001 documentation (this update).
-  - Next: a time-source arbitration interface in the core (NTP/GPS/RTC
-    priority plus validity), replacing the three hard-coded "clock sane after
-    1700000000" checks in `PersistentTlsClient.cpp`,
-    `CertManagerService.cpp` and `SecuritySettingsService.cpp`.
-  - Next: a location-provider interface.
-  - Next: `gps` (UART/NMEA) and `pzem` (PZEM-004T v3 Modbus) modules, and
-    possibly `sun`/astro.
+  - SES-LIB-001 documentation.
+  - SES-LIB-002: core `TimeSync` + `TimeArbiter` (time-source arbitration and
+    clock validity), SNTP routed through it, `system.setTime`, the
+    `ILocationProvider` interface; `clockSane()` replaces the three
+    hard-coded clock checks. Plan: `docs/plans/ses-lib-002-timesync.md`.
+  - **Scope rule (owner, 2026-10-13):** esp-rack takes framework fixes and
+    improvements only. Product logic for SES Light (astro, energy counting,
+    schedules: the former `ESPRackPure`, reverted in `33c07e6`) lives in
+    `esp-rack-ses-light`. New modules or subsystems need the owner's approval.
+  - Proposed, pending approval: `gps` (UART/NMEA) and `pzem` (PZEM-004T v3
+    Modbus) modules.
 
 ### 0.3 Branches
 
@@ -102,7 +105,13 @@ On-device check of the security fixes: `scripts/check_security.py`
      (suspected race).
    - OTA recreates `ArduinoOTA` from the WiFi event task.
    - WireGuard `g_wg` is used across tasks without a lock.
-7. **Smaller issues:**
+7. **Queued library fixes:**
+   - LIB-FIX-012 (P2): `system-status` includes `<MothershipService.h>` under
+     `__has_include`. PlatformIO's LDF (chain mode) ignores the condition and
+     pulls `MothershipModule`, which needs the undeclared `CertManagerModule`,
+     so a consumer with a trimmed module set fails to build unless it
+     `lib_ignore`s the unused modules.
+8. **Smaller issues:**
    - Presence log and history are keyed by a client-supplied header.
    - Telegram is never started if it's enabled after boot.
    - Discovery's `deviceId` is truncated for long project names.

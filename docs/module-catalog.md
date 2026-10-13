@@ -28,6 +28,10 @@ This is an audit snapshot of `feature/ses-light-support`, dated 2026-10-13:
 > - tab-level write auth is enforced on the server (011);
 > - the root bundle and versions are fixed (010).
 >
+> SES-LIB-002 then moved clock ownership into the core: `TimeSync` decides
+> which time may set the clock, owns the TZ, and replaces the hard-coded
+> clock checks in security, cert-manager and the TLS client (see `ntp`).
+>
 > The current list is [`ROADMAP.md` §0.4](../ROADMAP.md#04-known-issues).
 > Entries below are kept as audited.
 
@@ -334,7 +338,7 @@ This is an audit snapshot of `feature/ses-light-support`, dated 2026-10-13:
   - Only single-frame inbound messages reach subscription handlers (`:473`).
 
 ### `ntp` — NTPModule
-- **Purpose:** Starts SNTP with `configTzTime` once STA has an IP, sets the process TZ, and shows a live status tab with local time, UTC time and uptime.
+- **Purpose:** Runs the SNTP client once STA has an IP and shows a live status tab with local time, UTC time and uptime. Since SES-LIB-002 (version 1.1.0): SNTP results go through core `TimeSync`, which decides whether they may step the clock; the timezone is handed to `TimeSync::setTimezone()`; the SNTP interval is 1 h; the status tab adds a clock line ("Valid, ntp, ±1 s"), a sync line ("last step … ms, N rejected") and an admin "Set time" control (`system.setTime`).
 - **Install:** `.install<NTPModule>()`. Preset: listed for `.networking()`, stub.
 - **Module identity:** id `"ntp"`, version `"1.0.0"`, priority 30, requires `{"wifi"}` (`modules/ntp/include/NTPModule.h:11-14`). Hooks: `onInstall`, `onBegin`, `onLoop`.
 - **Public API:** None (no accessor).
@@ -347,7 +351,7 @@ This is an audit snapshot of `feature/ses-light-support`, dated 2026-10-13:
 - **Caveats:**
   - The WS updater is the full `update()` (`modules/ntp/include/NTPSettingsService.h:116-118`), so any authenticated WS client can change the server and TZ.
   - `configureNTP` runs from the WiFi event task (`modules/ntp/src/NTPSettingsService.cpp:99-106`).
-  - The process TZ it sets affects cert-manager's `mktime` (see cert-manager).
+  - The process TZ (now owned by `TimeSync`) affects cert-manager's `mktime` (see cert-manager).
 
 ### `ota` — OTAModule
 - **Purpose:** ArduinoOTA listener for espota / PlatformIO network uploads, with configurable port and password. ArduinoOTA's own mDNS responder is disabled.

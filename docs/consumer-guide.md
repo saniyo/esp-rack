@@ -385,6 +385,20 @@ To write your own app module, start from `esp-rack/modules/template/` and
 follow [`module-guide.md`](module-guide.md). An app module can live in the
 consumer's `src/`, like the demo's, or as a module library.
 
+### 9.3 Time and timezone
+
+- The core owns the clock (`ESPRack::TimeSync`, ARCHITECTURE §2.7). Don't call
+  `configTime()`, `configTzTime()` or `settimeofday()` from app code; install
+  `NTPModule` for network time.
+- The timezone comes from the NTP module's settings (its `tz_format`) through
+  `TimeSync::setTimezone()`. Read the current one with
+  `TimeSync::instance().getTimezone(...)`; `tzRevision()` changes when it does.
+- Before trusting `time(nullptr)` for anything that matters (schedules,
+  expiry), check `TimeSync::instance().isValid()` (or `clockSane()`), and
+  `subscribe()` to clock events if the app must react to steps.
+- Without network time an admin can set the clock on the NTP status tab
+  ("Set time") or with `POST /api/v1/actions/system.setTime?epoch=<UTC s>`.
+
 ---
 
 ## 10. Checklist: a new consumer from scratch

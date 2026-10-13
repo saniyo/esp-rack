@@ -45,8 +45,10 @@ installs. When several modules must cooperate on one concept, the
 interface goes into the core and each implementation stays in its module.
 Messaging already works this way: `lib/ESPRack/include/messaging/IMessagingProvider.h`
 is the core interface, and `modules/telegram` and `modules/mqtt` implement
-it. Planned interfaces such as time-source arbitration and a location
-provider (SES-LIB-002+) follow the same pattern.
+it. Time works the same way (§2.7): core `time/TimeSync.h` owns the clock and
+arbitrates sources; `modules/ntp` (and later GPS or RTC modules) submit samples.
+`geo/ILocationProvider.h` is the location interface; no module implements it
+yet.
 
 The React UI (`ui/`) is part of the library. Consumers don't write
 frontend code: every module describes its UI in C++, and the UI renders it
@@ -159,6 +161,7 @@ running.
 | `loopTask` (Arduino) | `setup()` (and therefore `build()`/`onInstall`/`begin()`/`onBegin`), `onLoop()`, `processAllQueues()` from `App::loop` |
 | `async_tcp` task | every HTTP handler: feature form/state GET/POST, actions, page endpoints, the manifest, the static UI. Also the WS event handler, which **also calls `processAllQueues()`** (`WsManager.h:733`), so WS writes can be applied on this task too. |
 | WiFi/lwIP/system event tasks | `WiFi.onEvent` callbacks (e.g. NTP's `configureNTP`) |
+| lwIP `tcpip` thread | `sntp_sync_time()` — TimeSync's SNTP hook only stashes the sample for `loop()` |
 | module-owned tasks | e.g. the mothership check-in task; see the module catalog |
 
 `StatefulService<T>` holds a recursive mutex per service, and every
@@ -182,6 +185,7 @@ that provide a cross-module service register it on the App during their
 | `setCert` | `ICertProvider` | cert-manager |
 | `setMothership` / `setMothershipProfile` | `IMothershipProvider` / `IMothershipProfileProvider` | mothership |
 | `setWireguard` | `IWireguardProvider` | wireguard |
+| `setLocation` | `ILocationProvider` (`geo/ILocationProvider.h`) | a location module (none yet) |
 
 `App.h:72-134` defines these. Consumers read them through `app->mqtt()` and
 similar getters and must null-check. `app->tls()` is App-owned and always
@@ -195,6 +199,39 @@ to do exactly that (LIB-FIX-005). Now:
 
 - presence resolves `app->security()` on every handshake;
 - uiDyn takes the manager in `onBegin()`.
+
+### 2.7 Time (`time/TimeSync.h`, SES-LIB-002)
+
+`TimeSync` is a core singleton, always present. `App::begin()` starts it first
+and `App::loop()` ticks it first.
+
+- **Who may set the clock.** Sources offer samples; `TimeArbiter`
+  (`time/TimeArbiter.h`, Arduino-free, host-tested in `test-host/`) decides.
+  Rank NTP > GPS > external RTC > operator (Manual) > RtcHold, each with a
+  freshness window, a plausibility window (2026..2099), per-source step
+  thresholds, confirmation of jumps over 1 h, and a 2-of-3 dispute check (NTP
+  vs a GPS that agrees with the RTC).
+- **SNTP.** TimeSync defines the strong `sntp_sync_time()` (lwIP's is weak),
+  so lwIP hands the server time to TimeSync instead of stepping the clock. An
+  implausible NTP time never reaches the clock. A *disputed* one (NTP far from
+  a GPS that agrees with the RTC) is still applied, since NTP ranks first:
+  `disputed()` and the `Disputed` event let the application decide, e.g. to
+  treat the time as invalid.
+- **Validity.** `isValid()` = an accepted sample whose uncertainty
+  (accuracy + 30 ppm drift) is under 10 min, and a plausible system clock.
+  `clockSane()` (valid now, or valid earlier this boot, or no source
+  registered and the clock is past 2026) gates JWT `iat/exp`, the TLS X.509
+  time and certificate expiry; read `time(nullptr)` after it.
+- **Soft resets.** A 32-byte `RTC_NOINIT` record lets the clock stay valid
+  across software/panic/watchdog resets (RtcHold), for up to 7 days. Not
+  after deep sleep: the RC slow clock drifts far more than 30 ppm.
+- **Timezone.** TimeSync owns libc `TZ` (`setTimezone(posix, label)`,
+  `tzRevision()`); the NTP module passes its setting through it.
+- **Operator.** Admin action `system.setTime?epoch=<s>[&ms=<ms>]`, exposed as
+  "Set time" on the NTP status tab.
+- **Events.** `subscribe()` listeners get `BecameValid`, `BecameInvalid`,
+  `Stepped` (valid before and after), `SourceChanged`, `Stale`, `Disputed`,
+  `TzChanged`, always on the loop task.
 
 ---
 
@@ -512,8 +549,8 @@ first three.
 
 - **Humans.**
   - JWTs are HS256 with `{username, admin, role, iat, exp}` and a 24 h TTL.
-  - `iat`/`exp` are only minted when the clock is sane (later than
-    1700000000), so tokens minted before NTP sync never expire.
+  - `iat`/`exp` are only minted when `TimeSync::clockSane()` holds, so
+    tokens minted before a time source made the clock valid never expire.
   - Validation checks that the user still exists and that the `admin` flag
     still matches.
   - Factory users are `admin`/`admin` and `guest`/`guest` (role `user`).

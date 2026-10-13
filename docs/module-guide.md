@@ -733,12 +733,26 @@ which peripheral or pins to use.
    - ESP32-S3 has 3 UARTs: GPS on `Serial1` and PZEM on `Serial2` fit next
      to the console.
    - The module mustn't assume any of this. The consumer passes the port.
-7. **Shared concepts belong in the core as interfaces.** A GPS module that
-   provides time and location should implement the core time-source and
-   location-provider interfaces (planned in SES-LIB-002) instead of calling
-   `settimeofday()` on its own. Note that the NTP module's
-   `configTzTime()` keeps SNTP running, and SNTP overwrites any clock that
-   someone else sets (`NTPSettingsService.cpp:116-138`).
+7. **Shared concepts belong in the core as interfaces.** A module that
+   provides time never calls `settimeofday()`. It registers with core
+   `TimeSync` and offers samples from `onLoop()`:
+
+   ```cpp
+   #include <time/TimeSync.h>
+   // onInstall:
+   ESPRack::TimeSync::instance().registerSource(ESPRack::TimeSource::Gps);
+   // onLoop, when a fix arrives; stamp it when it was TAKEN, with
+   // TimeSync::monoMs() (64-bit; millis() wraps after 49.7 days):
+   ESPRack::TimeSync::instance().submit({ESPRack::TimeSource::Gps, utcMs,
+                                         fixMonoMs, /*accuracyMs*/ 100, 0});
+   ```
+
+   The arbiter decides whether the sample may step the clock (NTP > GPS >
+   external RTC > operator > soft-reset hold). Location goes through
+   `App::location()` (`geo/ILocationProvider.h`): a GPS module calls
+   `submitGps()`, it doesn't depend on the location module. Code that needs
+   a trustworthy clock checks `ESPRack::TimeSync::clockSane()` or
+   `isValid()`, and can `subscribe()` (in `onBegin`) to clock events.
 8. **Reboot only through `ESPRack::restartDevice(reason)`**, never
    `ESP.restart()`, and make `onShutdown()` leave the hardware safe: outputs
    off, counters persisted, within 500 ms. A stray `esp_restart()` still
