@@ -24,6 +24,7 @@
 
 #include "App.h"
 #include "Module.h"
+#include "hw/ExtHwModule.h"
 
 class AsyncWebServer;
 
@@ -41,7 +42,32 @@ class Builder {
   Builder& install(Args&&... args) {
     static_assert(std::is_base_of<Module, M>::value,
                   "ESPRack::Builder::install<M>() — M must derive from ESPRack::Module");
+    static_assert(!std::is_base_of<ExtHwModule, M>::value,
+                  "ESPRack::Builder::install<M>() — M is an external HW module: use installExtHw<M>(\"id\", ...)");
     modules_.emplace_back(std::unique_ptr<Module>(new M(std::forward<Args>(args)...)));
+    return *this;
+  }
+
+  // Install an external HW module instance (hw/ExtHwModule.h) as
+  // new M(instanceId, args...). instanceId: [a-z0-9_-], 1..23 chars, unique
+  // among all modules — an invalid or duplicate id is logged and that
+  // instance is not installed (System -> Hardware lists it).
+  //
+  //   .installExtHw<MeterModule>("meter1", Serial1)
+  //   .installExtHw<MeterModule>("meter2", Serial2)
+  template <typename M, typename... Args>
+  Builder& installExtHw(const char* instanceId, Args&&... args) {
+    static_assert(std::is_base_of<ExtHwModule, M>::value,
+                  "ESPRack::Builder::installExtHw<M>() — M must derive from ESPRack::ExtHwModule; use install<M>()");
+    modules_.emplace_back(std::unique_ptr<Module>(new M(instanceId, std::forward<Args>(args)...)));
+    return *this;
+  }
+
+  // Keep a GPIO away from every external HW instance: a board's SD card,
+  // status LED, a pin the consumer drives itself. `reason` is shown in
+  // System -> Hardware (static literal).
+  Builder& reserveGpio(int8_t pin, const char* reason) {
+    reserved_.push_back(Reservation{pin, reason});
     return *this;
   }
 
@@ -100,6 +126,11 @@ class Builder {
   uint32_t         ws_pong_ms_  {60000};
 
   std::vector<std::unique_ptr<Module>> modules_;
+  struct Reservation {
+    int8_t pin;
+    const char* reason;
+  };
+  std::vector<Reservation> reserved_;
 };
 
 }  // namespace ESPRack

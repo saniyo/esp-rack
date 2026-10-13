@@ -48,6 +48,7 @@ class IWireguardProvider;           // forward — populated by WireGuardModule
 namespace ESPRack {
 
 class ILocationProvider;   // forward — populated by a location module (geo/ILocationProvider.h)
+class HwRegistry;          // hw/HwRegistry.h — owned by App
 
 // Graceful device restart (LIB-FIX-006) — THE way to reboot. Runs every
 // installed module's onShutdown() in reverse install order on the loop task
@@ -164,6 +165,11 @@ class App {
   ILocationProvider*  location()                        { return location_; }
   void                setLocation(ILocationProvider* p) { location_ = p; }
 
+  // Hardware registry (LIB-FEAT-001, hw/HwRegistry.h): reserved pins,
+  // external HW module instances and their claims, find<I>(id) /
+  // forEach<I>(fn) lookup. Always present.
+  HwRegistry*         hw()                              { return hw_.get(); }
+
   // Read-only device identity — useful for AutoUpdateModule etc. that
   // pass these to their underlying service ctor. Set once at App
   // construction.
@@ -222,6 +228,7 @@ class App {
   IMothershipProfileProvider* mothershipProfile_ {nullptr};  // ditto
   IWireguardProvider* wireguard_ {nullptr};  // populated by WireGuardModule
   ILocationProvider*  location_  {nullptr};  // populated by a location module
+  std::unique_ptr<HwRegistry> hw_;           // created in the ctor
 
   std::vector<std::unique_ptr<Module>> modules_;
   bool             begun_ {false};

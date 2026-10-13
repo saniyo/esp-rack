@@ -51,6 +51,7 @@ class PresenceService;
 namespace ESPRack {
 
 class App;
+class ExtHwModule;
 
 // Framework singletons handed to a module during onInstall. Pointers
 // may be nullptr when the corresponding subsystem is compiled out via
@@ -136,6 +137,10 @@ class Module {
   // Phase E. Reverse-order shutdown before a restart (see header comment).
   // Must finish quickly (budget 500 ms) and must not block on the network.
   virtual void onShutdown() {}
+
+  // Non-null for an external HW module instance (hw/ExtHwModule.h) — the
+  // framework's way to find instances without RTTI. Don't override.
+  virtual ExtHwModule* asExtHw() { return nullptr; }
 };
 
 }  // namespace ESPRack

@@ -17,6 +17,7 @@
 #include "App.h"
 #include "time/TimeSync.h"
 #include "geo/ILocationProvider.h"
+#include "hw/HwRegistry.h"
 
 #include "ConfigManager.h"
 #include "ConfigDelegate.h"

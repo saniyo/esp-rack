@@ -178,6 +178,17 @@ WebManager::WebManager(AsyncWebServer* server,
       _deviceName(deviceName ? deviceName : ""),
       _deviceVersion(deviceVersion ? deviceVersion : "") {}
 
+void WebManager::warnIfDuplicate(const IWebFeatureEntry& n) const {
+  const char* id = n.id();
+  if (!id || !*id) return;
+  for (const auto& e : _entries) {
+    if (e->kind() == n.kind() && strcmp(e->id(), id) == 0) {
+      log_e("[web] duplicate entry id '%s'", id);
+      return;
+    }
+  }
+}
+
 void WebManager::begin() {
   if (_begun || !_server) return;
 

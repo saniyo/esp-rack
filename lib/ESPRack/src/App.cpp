@@ -10,6 +10,7 @@
 #include "HeapMonitor.h"
 #include "ProblemJson.h"
 #include "time/TimeSync.h"
+#include "hw/HwRegistry.h"
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -97,7 +98,8 @@ App::App(AsyncWebServer* server, const char* deviceName, const char* deviceVersi
     // entry needed). C++ runs ctors in declaration order regardless
     // of init-list sequence; -Wreorder fires if these don't match.
     tlsContext_   {std::unique_ptr<TLSContextService>(new TLSContextService())},
-    tls_          {tlsContext_.get()} {
+    tls_          {tlsContext_.get()},
+    hw_           {new HwRegistry()} {
   // Publish the canonical identity strings to DeviceIdentity so every
   // consumer reads the same source of truth — CertManagerService
   // (Subject CN), AutoUpdateService (HTTP headers / URL query),
@@ -171,6 +173,8 @@ void App::begin() {
   // i.e. before webManager_.begin() mounts the endpoints.
   TimeSync::instance().begin();
   TimeSync::instance().registerManifest(&webManager_);
+  // System -> Hardware tab + "Restore factory pins" (LIB-FEAT-001).
+  hw_->registerManifest(&webManager_);
 
   // Anchor the fragmentation-watchdog reference. tick() in loop()
   // will append per-minute samples from here forward; this first
@@ -271,6 +275,11 @@ void App::begin() {
   // module(s) actually use STA vs AP.
   WiFi.mode(WIFI_AP_STA);
   HeapMonitor::logSnapshot("boot:wifi-mode-set");
+
+  // 3.5 Hardware claims (LIB-FEAT-001): every external HW instance
+  // describes its pins (configs can load now), first claimer wins. An
+  // instance in Conflict leaves its hardware alone in onBegin/onLoop.
+  hw_->boot();
 
   // 4. Modules' onInstall has already happened in Builder.build();
   // here we run their onBegin in the same install order. Per-module
@@ -451,6 +460,8 @@ void App::loop() {
   if (restartRequested_.load()) {
     finishAndRestart();
   }
+
+  hw_->loop();  // a pending "Restore factory pins" (restarts)
 
   // Module loop fan-out. The per-module profiler and the heap-drift
   // sampler that bracket it are DEBUG instrumentation (FT_LOOP_PROFILE /

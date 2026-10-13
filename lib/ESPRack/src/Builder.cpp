@@ -1,5 +1,6 @@
 #include "Builder.h"
 #include "App.h"
+#include "hw/HwRegistry.h"
 
 #include <algorithm>
 #include <map>
@@ -63,25 +64,52 @@ inline void rinfo(const char* fmt, ...) {
 }  // namespace
 
 std::unique_ptr<App> Builder::build() {
-  // Step 1 — collect descriptors.
+  // Step 1 — collect descriptors. An external HW instance with an invalid
+  // id is dropped here (LIB-FEAT-001): reported, listed in System ->
+  // Hardware, never installed.
+  struct HwRejected {
+    size_t idx;
+    const char* why;
+  };
+  std::vector<HwRejected> hwRejected;
   std::vector<ModuleDescriptor> descs(modules_.size());
   for (size_t i = 0; i < modules_.size(); ++i) {
     if (!modules_[i]) continue;
     modules_[i]->describe(descs[i]);
+    if (ExtHwModule* x = modules_[i]->asExtHw()) {
+      if (!x->instanceIdValid()) {
+        rerr("external HW instance '%s' (%s): invalid id, [a-z0-9_-] 1..%u chars; not installed",
+             x->instanceId(), x->typeName(), (unsigned)ExtHwModule::kIdMax);
+        hwRejected.push_back(HwRejected{i, "invalid instance id"});
+        descs[i].id = nullptr;
+        continue;
+      }
+      descs[i].id = x->instanceId();  // whatever describe() said: the id is the instance's
+    }
     if (!descs[i].id || descs[i].id[0] == '\0') {
       rerr("module %zu has empty id", i);
     }
   }
 
-  // Step 2 — index by id, detect duplicates.
+  // Step 2 — index by id, detect duplicates. External HW instances come
+  // second, so an instance id never displaces a framework module; a
+  // duplicate instance is dropped like an invalid one.
   std::map<String, size_t> id_index;
-  for (size_t i = 0; i < descs.size(); ++i) {
-    if (!descs[i].id) continue;
-    String key{descs[i].id};
-    if (id_index.count(key)) {
-      rerr("duplicate module id '%s'", descs[i].id);
-    } else {
-      id_index[key] = i;
+  for (int pass = 0; pass < 2; ++pass) {
+    for (size_t i = 0; i < descs.size(); ++i) {
+      if (!descs[i].id) continue;
+      const bool ext = modules_[i] && modules_[i]->asExtHw();
+      if (ext != (pass == 1)) continue;
+      String key{descs[i].id};
+      if (id_index.count(key)) {
+        rerr("duplicate module id '%s'", descs[i].id);
+        if (ext) {
+          hwRejected.push_back(HwRejected{i, "duplicate id"});
+          descs[i].id = nullptr;
+        }
+      } else {
+        id_index[key] = i;
+      }
     }
   }
 
@@ -155,6 +183,13 @@ std::unique_ptr<App> Builder::build() {
   ctx.deviceName    = app->deviceName();
   ctx.deviceVersion = app->deviceVersion();
 
+  // Hardware: consumer reservations before any module installs; rejected
+  // instances are listed in System -> Hardware.
+  for (const Reservation& r : reserved_) app->hw()->reserveGpio(r.pin, r.reason);
+  for (const HwRejected& r : hwRejected) {
+    app->hw()->addRejected(*modules_[r.idx]->asExtHw(), descs[r.idx].version, r.why);
+  }
+
   // Reorder modules_ to match `order` then transfer to App.
   std::vector<std::unique_ptr<Module>> sorted;
   sorted.reserve(modules_.size());
@@ -163,8 +198,14 @@ std::unique_ptr<App> Builder::build() {
       // Skip disabled modules (build-flag opt-out).
       if (!descs[idx].enabled) {
         rinfo("skipping disabled module '%s'", descs[idx].id);
+        if (ExtHwModule* x = modules_[idx]->asExtHw()) {
+          app->hw()->addRejected(*x, descs[idx].version, "disabled at build time");
+        }
         continue;
       }
+      // An external HW instance gets its registry (ExtHwModule::hw())
+      // before onInstall.
+      if (ExtHwModule* x = modules_[idx]->asExtHw()) app->hw()->addInstance(x);
       modules_[idx]->onInstall(ctx);
       sorted.push_back(std::move(modules_[idx]));
       rinfo("installed '%s' v%s priority=%d",

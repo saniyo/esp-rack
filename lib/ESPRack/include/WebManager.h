@@ -110,6 +110,7 @@ class WebManager {
     static_assert(std::is_base_of<IWebFeatureEntry, T>::value,
                   "WebManager::registerEntry requires IWebFeatureEntry subclass");
     T* raw = entry.get();
+    warnIfDuplicate(*raw);
     _entries.push_back(std::move(entry));
     return raw;
   }
@@ -384,6 +385,11 @@ class WebManager {
 
  private:
   void serveManifest(AsyncWebServerRequest* request);
+
+  // Two entries of one kind under one id shadow each other's routes and
+  // tabs (e.g. an external HW instance named like a consumer feature): log
+  // it. Not a template, so registerEntry<T> stays small.
+  void warnIfDuplicate(const IWebFeatureEntry& e) const;
 
   // Build the manifest ONCE per firmware build into two on-flash
   // files (anon + authed tiers). The two files are rewritten only
