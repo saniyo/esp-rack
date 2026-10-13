@@ -1057,7 +1057,7 @@ String MothershipService::actionReboot(JsonObjectConst params) {
   // the reset follows immediately after the hooks.
   log_d("[mship.action.reboot] restartDevice()");
   Serial.flush();
-  ESPRack::restartDevice("mothership.reboot");   // does not return
+  ESPRack::restartDevice(ESPRack::kRestartMothership);   // does not return
   return "rebooting";
 }
 
@@ -1367,12 +1367,13 @@ String MothershipService::actionConfigRestore(JsonObjectConst params) {
     size_t written = mgr->restoreAll(configs);
     log_w("[mship.config.restore] no heap for deferred restore — wrote %u now",
           (unsigned)written);
-    ESPRack::restartDevice("mothership.configRestore");
+    ESPRack::restartDevice(ESPRack::kRestartConfigRestore);  // asked by the mothership
   }
   log_d("[mship.config.restore] %u entries match; restoring after shutdown",
         (unsigned)matching);
   vTaskDelay(pdMS_TO_TICKS(500));   // let the action result reach the ring
-  ESPRack::restartDevice("mothership.configRestore", [mgr, blob]() {
+  // Reason = what happened (config restore); the initiator is in the log.
+  ESPRack::restartDevice(ESPRack::kRestartConfigRestore, [mgr, blob]() {
     DynamicJsonDocument doc(blob->length() * 2 + 1024);
     if (deserializeJson(doc, *blob) == DeserializationError::Ok) {
       size_t written = mgr->restoreAll(doc.as<JsonObjectConst>());

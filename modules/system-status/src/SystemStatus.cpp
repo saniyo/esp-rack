@@ -130,6 +130,10 @@ void SystemStatus::buildForm(JsonObject& root,
   String cpuFreq = String(ESP.getCpuFreqMHz()) + " MHz";
   sta.add(web::Text("cpu_frequency", cpuFreq.c_str()).readOnly()
               .label("CPU frequency").icon("ShowChart"));
+  // Why this boot happened (SES-LIB-007): restartDevice() reason or the
+  // hardware reset reason.
+  sta.add(web::Text("last_restart", ESPRack::lastRestartReason()).readOnly()
+              .label("Last restart").icon("History"));
 
   // ── Three heap views, each captured at a different observer cost ──
   //
@@ -276,6 +280,7 @@ void SystemStatus::systemStatus(AsyncWebServerRequest* request) {
     root["psram_size"]      = ESP.getPsramSize();
     root["free_psram"]      = ESP.getFreePsram();
     root["cpu_freq_mhz"]    = ESP.getCpuFreqMHz();
+    root["last_restart"]    = ESPRack::lastRestartReason();
     root["free_heap"]       = fh_entry;
     root["sketch_size"]     = ESP.getSketchSize();
     root["free_sketch_space"] = ESP.getFreeSketchSpace();

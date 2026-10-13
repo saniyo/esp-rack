@@ -9,7 +9,7 @@
 class OTAModule : public ESPRack::Module {
  public:
   void describe(ESPRack::ModuleDescriptor& d) override {
-    d.id = "ota"; d.version = "1.0.0"; d.priority = 40;
+    d.id = "ota"; d.version = "1.0.1"; d.priority = 40;
     d.requires_ = {"wifi"};
   }
   void onInstall(ESPRack::ModuleContext& ctx) override {

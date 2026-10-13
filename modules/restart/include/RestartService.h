@@ -27,7 +27,7 @@ class RestartService {
 
   // Graceful restart through the framework (LIB-FIX-006): every module's
   // onShutdown() runs (reverse order, on the loop task) before the reset.
-  static void restartNow(const char* reason = "system.restart") {
+  static void restartNow(const char* reason = ESPRack::kRestartUser) {
     ESPRack::restartDevice(reason);
   }
 

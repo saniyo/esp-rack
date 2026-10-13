@@ -100,7 +100,7 @@ void ConfigManagerService::registerManifest(WebManager* web) {
     // overwrite the restored files.
     ConfigManager* cfg = _cfg;
     r->onDisconnect([cfg]() {
-      ESPRack::restartDevice("config.restore", [cfg]() { (void)cfg->restoreAllFromSnapshot(); });
+      ESPRack::restartDevice(ESPRack::kRestartConfigRestore, [cfg]() { (void)cfg->restoreAllFromSnapshot(); });
     });
     r->send(200);
   };

@@ -23,7 +23,7 @@ class IWireguardProvider;
 class MothershipModule : public ESPRack::Module {
  public:
   void describe(ESPRack::ModuleDescriptor& d) override {
-    d.id = "mothership"; d.version = "0.1.1"; d.priority = 35;
+    d.id = "mothership"; d.version = "0.1.2"; d.priority = 35;
     d.requires_ = {"wifi", "cert-manager"};
   }
 

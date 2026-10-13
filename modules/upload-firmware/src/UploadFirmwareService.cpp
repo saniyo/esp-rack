@@ -133,7 +133,7 @@ void UploadFirmwareService::handleUpload(AsyncWebServerRequest* request,
 void UploadFirmwareService::uploadComplete(AsyncWebServerRequest* request) {
   // if no error, send the success response
   if (!request->_tempObject) {
-    request->onDisconnect([]() { ESPRack::restartDevice("firmware.upload"); });
+    request->onDisconnect([]() { ESPRack::restartDevice(ESPRack::kRestartUpload); });
     AsyncWebServerResponse* response = request->beginResponse(200);
     request->send(response);
   }

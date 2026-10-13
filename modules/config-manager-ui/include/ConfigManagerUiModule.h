@@ -9,7 +9,7 @@
 class ConfigManagerUiModule : public ESPRack::Module {
  public:
   void describe(ESPRack::ModuleDescriptor& d) override {
-    d.id = "configManagerUi"; d.version = "1.0.0"; d.priority = 85;
+    d.id = "configManagerUi"; d.version = "1.0.1"; d.priority = 85;
   }
   void onInstall(ESPRack::ModuleContext& ctx) override {
     svc_.reset(new ConfigManagerService(ctx.server, ctx.security, ctx.cfgMgr));

@@ -1,5 +1,6 @@
 #include <OTASettingsService.h>
 
+#include <App.h>  // ESPRack::restartDevice (SES-LIB-007)
 #include <web/Form.h>
 #include <WebManager.h>
 
@@ -114,7 +115,14 @@ void OTASettingsService::configureArduinoOTA() {
     _arduinoOTA->setPort(_state.port);
     _arduinoOTA->setPassword(_state.password.c_str());
     _arduinoOTA->onStart([]() { Serial.println(F("Starting")); });
-    _arduinoOTA->onEnd([]() { Serial.println(F("\r\nEnd")); });
+    // Reboot through the framework (SES-LIB-007): the modules' onShutdown()
+    // runs on the loop task and the next boot reports lastRestartReason()
+    // "ota". ArduinoOTA has already answered OK when onEnd runs.
+    _arduinoOTA->setRebootOnSuccess(false);
+    _arduinoOTA->onEnd([]() {
+      Serial.println(F("\r\nEnd"));
+      ESPRack::restartDevice(ESPRack::kRestartOta);
+    });
     _arduinoOTA->onProgress([](unsigned int progress, unsigned int total) {
       log_d("Progress: %u%%", (progress / (total / 100)));
     });

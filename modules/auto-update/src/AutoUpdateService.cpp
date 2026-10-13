@@ -176,7 +176,8 @@ void AutoUpdateService::loop() {
       // ESP32 OTA is partition-safe: partial writes never get booted.
       // vTaskDelay yields the scheduler instead of busy-blocking the loop.
       vTaskDelay(pdMS_TO_TICKS(1000));
-      ESPRack::restartDevice("autoUpdate.timeout");
+      log_w("[AutoUpdate] OTA timeout — restarting");
+      ESPRack::restartDevice(ESPRack::kRestartAutoUpdate);
     }
   }
 
@@ -447,7 +448,7 @@ void AutoUpdateService::handleOtaResult(t_httpUpdate_return ret, const char* ser
       setOtaState(AU_SUCCESS);
       setLastResult("success");
       vTaskDelay(pdMS_TO_TICKS(1000));
-      ESPRack::restartDevice("autoUpdate");
+      ESPRack::restartDevice(ESPRack::kRestartAutoUpdate);
       break;
   }
 }

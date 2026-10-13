@@ -1,6 +1,6 @@
 {
   "name": "MothershipModule",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "ESPRack module: mothership client (HTTPS adaptive check-in + command dispatcher). Phase 2 of mothership roadmap.",
   "license": "MIT",
   "frameworks": [
