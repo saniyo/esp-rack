@@ -575,6 +575,14 @@ class ConfigManager {
 
       mgr.lock();
 
+      // Member defaults first: updaters treat absent keys as "unchanged"
+      // (partial UI saves), so an empty-doc pass alone would reset nothing.
+      // The empty pass then still runs for updaters that seed derived
+      // defaults on an empty payload (e.g. security's factory users).
+      _d.service->updateWithoutPropagation([](T& s) {
+        s = T{};
+        return StateUpdateResult::CHANGED;
+      });
       DynamicJsonDocument emptyDoc(_d.bufferSize);
       JsonObject empty = emptyDoc.to<JsonObject>();
       _d.service->updateWithoutPropagation(empty, _d.updater);

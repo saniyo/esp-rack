@@ -79,9 +79,18 @@ class APSettings {
   uint8_t channel = FACTORY_AP_CHANNEL;
   bool ssidHidden = FACTORY_AP_SSID_HIDDEN;
   uint8_t maxClients = FACTORY_AP_MAX_CLIENTS;
-  IPAddress localIP;
-  IPAddress gatewayIP;
-  IPAddress subnetMask;
+  // Factory addresses live in the member initialisers: updaters treat an
+  // absent key as "unchanged", so the first-boot empty-doc pass no longer
+  // supplies them.
+  IPAddress localIP    = ipOrNone(FACTORY_AP_LOCAL_IP);
+  IPAddress gatewayIP  = ipOrNone(FACTORY_AP_GATEWAY_IP);
+  IPAddress subnetMask = ipOrNone(FACTORY_AP_SUBNET_MASK);
+
+  static IPAddress ipOrNone(const char* s) {
+    IPAddress ip;
+    if (!s || !ip.fromString(s)) ip = INADDR_NONE;
+    return ip;
+  }
 
   bool operator==(const APSettings& o) const {
     return provisionMode == o.provisionMode && ssid == o.ssid && password == o.password &&

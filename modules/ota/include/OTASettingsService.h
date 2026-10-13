@@ -53,15 +53,15 @@ class OTASettings {
     if (root.containsKey("settings") && root["settings"].is<JsonObject>()) {
       src = root["settings"].as<JsonObject>();
     }
-    OTASettings n = s;
-    n.enabled  = src["enabled"]  | (bool)FACTORY_OTA_ENABLED;
-    n.port     = src["port"]     | (int)FACTORY_OTA_PORT;
-    n.password = src["pwd"] | String(FACTORY_OTA_PASSWORD);
-    if (n.enabled == s.enabled && n.port == s.port && n.password == s.password) {
-      return StateUpdateResult::UNCHANGED;
-    }
-    s = n;
-    return StateUpdateResult::CHANGED;
+    // Absent keys leave the field unchanged: the UI saves only the keys
+    // the operator edited, so a "{enabled:false}" save must not reset the
+    // port and password to factory. Defaults come from the member
+    // initialisers (first boot / resetToDefaults), not from here.
+    bool changed = false;
+    changed |= FormBuilder::updateValue(src, "enabled", s.enabled);
+    changed |= FormBuilder::updateValue(src, "port", s.port);
+    changed |= FormBuilder::updateValue(src, "pwd", s.password);
+    return changed ? StateUpdateResult::CHANGED : StateUpdateResult::UNCHANGED;
   }
 
   // ---- Form schema (DynamicSettings UI) ---------------------------------

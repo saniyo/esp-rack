@@ -19,7 +19,12 @@ class JsonUtils {
     }
     readIP(root, key, ip, defaultIp);
   }
+  // Absent key = leave `ip` unchanged (partial updates: the UI posts only the
+  // edited keys). A present but empty/invalid value resets to `defaultIp`,
+  // which is how a field is cleared. First-boot defaults come from the
+  // state's member initialisers, so file loads behave as before.
   static void readIP(JsonObject& root, const String& key, IPAddress& ip, const IPAddress& defaultIp = INADDR_NONE) {
+    if (!root.containsKey(key)) return;
     if (!root[key].is<String>() || !ip.fromString(root[key].as<String>())) {
       ip = defaultIp;
     }

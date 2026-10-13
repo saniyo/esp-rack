@@ -20,6 +20,13 @@ import { DynamicFormContext, DynamicFormCtx } from './DynamicFormContext';
 const toAxiosPath = (absPath: string) =>
   absPath.startsWith('/api/v1/') ? absPath.slice(7) : absPath;
 
+// C1 path contract: a typed feature serves its UI form at /api/v1/<id>/form
+// (GET only) and its write face at /api/v1/<id>/state (POST). Postable tabs
+// always reference a typed feature's form — their own, or another one via
+// formOf — so the save target is that form path with /form -> /state.
+// Bespoke paths (no /form suffix) keep posting where they read.
+const toSavePath = (formPath: string) => formPath.replace(/\/form$/, '/state');
+
 // Per-tab panel. Owns its own REST fetch keyed by tab.restPath — crucial
 // for features whose tabs live on different endpoints (e.g. 'system' with
 // /api/v1/system/status/form + /api/v1/ota/form + /api/v1/system/upload/form).
@@ -46,12 +53,15 @@ const DynamicTabPanel: FC<DynamicTabPanelProps> = ({ tab, ws }) => {
     () =>
       tab.postable
         ? (d: Record<string, any>): AxiosPromise<Record<string, any>> =>
-            AXIOS.post(toAxiosPath(tab.restPath), d)
+            AXIOS.post(toAxiosPath(toSavePath(tab.restPath)), d)
         : undefined,
     [tab.restPath, tab.postable]
   );
 
-  const { data, saveData, saving, setData, errorMessage, loadData } = useRest<any>({ read, update });
+  // The state POST echoes flat values, not this tab's form envelope —
+  // re-read the form after a save instead of adopting the echo.
+  const { data, save, saving, setData, errorMessage, loadData } =
+    useRest<any>({ read, update, refetchOnSave: true });
 
   // --- Form-level context shared by descendants (ActionField refetch,
   // TableField loader, …). Pending-action tracking is a tiny scheduler:
@@ -141,14 +151,15 @@ const DynamicTabPanel: FC<DynamicTabPanelProps> = ({ tab, ws }) => {
     [setData, tab.key]
   );
 
+  // One POST of the changed keys only (DynamicSettings sends a partial flat
+  // dict), then a silent form refetch. The old path posted the changed keys
+  // and then the whole form envelope a second time.
   const handleSaveData = useCallback(
     (updated: Partial<any>) => {
       if (!update) return;
-      update(updated)
-        .then(() => saveData())
-        .catch((err) => console.error('Error saving data:', err));
+      void save(updated);
     },
-    [update, saveData]
+    [update, save]
   );
 
   if (!formData || !Array.isArray((formData as any).fields)) {

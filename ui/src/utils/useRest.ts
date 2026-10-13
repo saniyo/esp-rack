@@ -7,9 +7,14 @@ import { extractErrorMessage } from ".";
 export interface RestRequestOptions<D> {
   read: () => AxiosPromise<D>;
   update?: (value: D) => AxiosPromise<D>;
+  // When the write endpoint answers with a different shape than `read`
+  // (e.g. POST /api/v1/<id>/state echoes flat state while the panel renders
+  // the /form envelope), re-read after a successful save instead of
+  // adopting the response as the new data.
+  refetchOnSave?: boolean;
 }
 
-export const useRest = <D>({ read, update }: RestRequestOptions<D>) => {
+export const useRest = <D>({ read, update, refetchOnSave = false }: RestRequestOptions<D>) => {
   const { enqueueSnackbar } = useSnackbar();
 
   const [saving, setSaving] = useState<boolean>(false);
@@ -45,7 +50,12 @@ export const useRest = <D>({ read, update }: RestRequestOptions<D>) => {
     setSaving(true);
     setErrorMessage(undefined);
     try {
-      setData((await update(toSave)).data);
+      const res = await update(toSave);
+      if (refetchOnSave) {
+        await loadData({ silent: true });
+      } else {
+        setData(res.data);
+      }
       enqueueSnackbar("Update successful", { variant: 'success' });
     } catch (error: any) {
       const message = extractErrorMessage(error, 'Problem saving data');
@@ -54,7 +64,7 @@ export const useRest = <D>({ read, update }: RestRequestOptions<D>) => {
     } finally {
       setSaving(false);
     }
-  }, [update, enqueueSnackbar]);
+  }, [update, refetchOnSave, loadData, enqueueSnackbar]);
 
   const saveData = () => data && save(data);
 
@@ -100,5 +110,5 @@ export const useRest = <D>({ read, update }: RestRequestOptions<D>) => {
   // full response is retained by DevTools indefinitely, inflating tab heap
   // especially on high-cadence live tabs. Re-enable locally when debugging.
 
-  return { loadData, saveData, saving, setData, data, errorMessage } as const;
+  return { loadData, save, saveData, saving, setData, data, errorMessage } as const;
 };
