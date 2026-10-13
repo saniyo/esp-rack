@@ -51,6 +51,22 @@
 #define WS_MUX_PATH "/ws/app"
 #endif
 
+// Device-wide cap on concurrent clients of the single multiplexed socket.
+// AsyncWebSocket::cleanupClients(n) CLOSES THE OLDEST client whenever more
+// than n are connected, so this is a hard limit on live browser tabs /
+// devices. It used to be a literal 2 applied per feature socket; with one
+// socket for everything that meant two clients per device. Each client
+// holds one lwIP PCB (16-slot pool shared with HTTP and /ws/presence) plus
+// its AsyncWebSocket queue, so the no-PSRAM C3 gets a conservative default.
+// Override per consumer: -D ESPRACK_WS_MAX_CLIENTS=<n>.
+#ifndef ESPRACK_WS_MAX_CLIENTS
+#if defined(CONFIG_IDF_TARGET_ESP32C3)
+#define ESPRACK_WS_MAX_CLIENTS 3
+#else
+#define ESPRACK_WS_MAX_CLIENTS 6
+#endif
+#endif
+
 // Per-client back-pressure threshold for outbound broadcasts. When a
 // client's queue is at or above this depth, we skip the next frame for
 // THAT client (fast clients keep getting broadcasts). Default is half of
@@ -318,7 +334,7 @@ class WsManager {
 
   // Processing queues (call from loop)
   void processAllQueues() {
-    if (_ws) _ws->cleanupClients(2);  // free TCP slots for HTTP
+    if (_ws) _ws->cleanupClients(ESPRACK_WS_MAX_CLIENTS);  // cap + reap closed clients
     processRx();
     processTx();
     // Keepalive — inline on the queue-pump task so ping/eviction share the
