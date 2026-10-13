@@ -2,6 +2,7 @@
 #define FORMBUILDER_H
 
 #include <ArduinoJson.h>
+#include <web/IntCoerce.h>
 #include <vector>
 #include <math.h>  // для sin, cos
 
@@ -546,6 +547,44 @@ class FormBuilder {
       return true;
     }
     return false;
+  }
+
+  // long / unsigned long / long long / unsigned long long (SES-LIB-016).
+  // On ESP32 these are int32_t / uint32_t / int64_t / uint64_t, which the
+  // strict template above used to take: it dropped numeric strings and
+  // doubles silently. Same rules as int& now, clamped to the type's range
+  // (web/IntCoerce.h, host-tested); a non-numeric string is ignored.
+  static bool updateValue(JsonObject& root, const char* key, long& value) { return updateInt(root, key, value); }
+  static bool updateValue(JsonObject& root, const char* key, unsigned long& value) { return updateInt(root, key, value); }
+  static bool updateValue(JsonObject& root, const char* key, long long& value) { return updateInt(root, key, value); }
+  static bool updateValue(JsonObject& root, const char* key, unsigned long long& value) {
+    return updateInt(root, key, value);
+  }
+
+  template <typename I>
+  static bool updateInt(JsonObject& root, const char* key, I& value) {
+    if (!root.containsKey(key)) return false;
+    JsonVariant v = root[key];
+    I nv;
+    if (v.is<long long>()) {
+      nv = web::coerce::fromSigned<I>(v.as<long long>());
+    } else if (v.is<unsigned long long>()) {
+      nv = web::coerce::fromUnsigned<I>(v.as<unsigned long long>());
+    } else if (v.is<double>()) {
+      nv = web::coerce::fromDouble<I>(v.as<double>());
+    } else if (v.is<const char*>()) {
+      if (!web::coerce::fromString<I>(v.as<const char*>(), nv)) {
+#ifdef log_d
+        log_d("[form] %s: \"%s\" is not an integer, ignored", key, v.as<const char*>());
+#endif
+        return false;
+      }
+    } else {
+      return false;
+    }
+    if (nv == value) return false;
+    value = nv;
+    return true;
   }
 
   // double
