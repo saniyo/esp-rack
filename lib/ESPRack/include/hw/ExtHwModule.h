@@ -90,6 +90,11 @@ class ExtHwModule : public Module {
  protected:
   HwRegistry* hw() const { return _hw; }  // set before onInstall
   HwState hwState() const;                // Ok / NotConfigured / Conflict / Disabled
+  // After switching the hardware off the resources it gave up (from loop):
+  // they stop blocking other instances (SES-LIB-024).
+  void hwReleased();
+  // Runtime state for System -> Hardware (SES-LIB-025); nullptr clears.
+  void hwNote(const char* note, HwNoteLevel level = HwNoteLevel::Warn);
 
  private:
   friend class HwRegistry;

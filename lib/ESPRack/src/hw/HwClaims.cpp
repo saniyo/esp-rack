@@ -275,6 +275,9 @@ uint8_t HwClaims::countOthers(HwKind kind, const char* owner) const {
   for (const HwClaim& c : _claims) {
     if (c.res.kind == kind && !sameOwner(c.owner, owner) && c.res.index != kHwNotConfigured) ++n;
   }
+  for (const HwClaim& c : _reserved) {
+    if (c.res.kind == kind) ++n;  // a reserved channel is used by someone
+  }
   return n;
 }
 
@@ -366,13 +369,23 @@ HwCheck HwClaims::check(const char* owner, const HwDescriptor& d) const {
       if (sameThing(r, o, sharedRmt) && !sharable(r, o)) fail(c, "%s used twice (%s, %s)", what, roleOf(o), roleOf(r));
     }
 
-    // --- other owners
+    // --- reserved for the consumer / framework (SES-LIB-023)
     if (r.index == kHwAnyChannel) continue;
+    for (const HwClaim& o : _reserved) {
+      if (sameThing(r, o.res, sharedRmt)) {
+        fail(c, "%s reserved: %s", what, o.owner ? o.owner : "?");
+        break;
+      }
+    }
+    if (!c.ok) break;
+
+    // --- other owners (a releasing claim still holds the hardware, SES-LIB-024)
     const bool busPin = isPinKind(r.kind) && (r.flags & kHwShared) && r.bus >= 0;
     for (const HwClaim& o : _claims) {
       if (sameOwner(o.owner, owner) || o.res.index == kHwNotConfigured || o.res.index == kHwAnyChannel) continue;
       if (sameThing(r, o.res, sharedRmt) && !sharable(r, o.res)) {
-        fail(c, "%s used by %s (%s)", what, o.owner ? o.owner : "?", roleOf(o.res));
+        fail(c, o.releasing ? "%s being released by %s (%s)" : "%s used by %s (%s)", what,
+             o.owner ? o.owner : "?", roleOf(o.res));
         break;
       }
       // A shared bus has one set of pins: SDA of bus 0 can't be GPIO8 for
@@ -400,6 +413,140 @@ void HwClaims::remove(const char* owner) {
   for (size_t i = _claims.size(); i-- > 0;) {
     if (sameOwner(_claims[i].owner, owner)) _claims.erase(_claims.begin() + static_cast<ptrdiff_t>(i));
   }
+}
+
+namespace {
+bool sameResource(const HwResource& a, const HwResource& b) {
+  return a.kind == b.kind && a.index == b.index && a.bus == b.bus;
+}
+}  // namespace
+
+void HwClaims::replace(const char* owner, const HwDescriptor& d, bool applied, uint32_t nowMs) {
+  // The owner's active claims: kept ones are re-added from d below, dropped
+  // ones become releasing (or just go, if nothing was set up under them).
+  for (size_t i = _claims.size(); i-- > 0;) {
+    HwClaim& c = _claims[i];
+    if (!sameOwner(c.owner, owner) || c.releasing) continue;
+    bool kept = false;
+    for (uint8_t j = 0; j < d.count && !kept; ++j) kept = sameResource(c.res, d.res[j]);
+    if (kept || !applied) {
+      _claims.erase(_claims.begin() + static_cast<ptrdiff_t>(i));
+    } else {
+      c.releasing = true;
+      c.releasingSince = nowMs;
+    }
+  }
+  for (uint8_t j = 0; j < d.count; ++j) {
+    if (d.res[j].index == kHwNotConfigured) continue;
+    // Taken back before it was released: it's simply active again.
+    for (size_t i = _claims.size(); i-- > 0;) {
+      const HwClaim& c = _claims[i];
+      if (c.releasing && sameOwner(c.owner, owner) && sameResource(c.res, d.res[j])) {
+        _claims.erase(_claims.begin() + static_cast<ptrdiff_t>(i));
+      }
+    }
+    _claims.push_back(HwClaim{owner, d.res[j], false, 0});
+  }
+}
+
+void HwClaims::releaseAll(const char* owner, bool applied, uint32_t nowMs) {
+  for (size_t i = _claims.size(); i-- > 0;) {
+    HwClaim& c = _claims[i];
+    if (!sameOwner(c.owner, owner) || c.releasing) continue;
+    if (!applied) {
+      _claims.erase(_claims.begin() + static_cast<ptrdiff_t>(i));
+    } else {
+      c.releasing = true;
+      c.releasingSince = nowMs;
+    }
+  }
+}
+
+void HwClaims::released(const char* owner) {
+  for (size_t i = _claims.size(); i-- > 0;) {
+    if (_claims[i].releasing && sameOwner(_claims[i].owner, owner)) {
+      _claims.erase(_claims.begin() + static_cast<ptrdiff_t>(i));
+    }
+  }
+}
+
+size_t HwClaims::releasingCount(const char* owner) const {
+  size_t n = 0;
+  for (const HwClaim& c : _claims) {
+    if (c.releasing && sameOwner(c.owner, owner)) ++n;
+  }
+  return n;
+}
+
+uint32_t HwClaims::releasingAgeMs(const char* owner, uint32_t nowMs) const {
+  uint32_t age = 0;
+  for (const HwClaim& c : _claims) {
+    if (!c.releasing || !sameOwner(c.owner, owner)) continue;
+    const uint32_t a = nowMs - c.releasingSince;  // wraps correctly
+    if (a > age) age = a;
+  }
+  return age;
+}
+
+const char* hwStateLabel(HwState s) {
+  switch (s) {
+    case HwState::Ok: return "Ok";
+    case HwState::NotConfigured: return "Not configured";
+    case HwState::Conflict: return "Conflict";
+    case HwState::Disabled: return "Disabled";
+  }
+  return "?";
+}
+
+void hwUtf8Trim(char* s) {
+  if (!s) return;
+  const size_t n = strlen(s);
+  size_t i = n;
+  while (i > 0 && (static_cast<unsigned char>(s[i - 1]) & 0xC0) == 0x80) --i;  // continuation bytes
+  if (i == 0) return;
+  const unsigned char lead = static_cast<unsigned char>(s[i - 1]);
+  const size_t need = lead >= 0xF0 ? 4 : lead >= 0xE0 ? 3 : lead >= 0xC0 ? 2 : 1;
+  if (n - (i - 1) < need) s[i - 1] = '\0';
+}
+
+namespace {
+// Appends `part` to buf, " · "-separated; stops quietly when full.
+void appendPart(char* buf, size_t len, const char* part) {
+  if (!part || !*part) return;
+  const size_t n = strlen(buf);
+  if (n + 1 >= len) return;
+  snprintf(buf + n, len - n, "%s%s", n ? " · " : "", part);
+  hwUtf8Trim(buf);
+}
+}  // namespace
+
+void hwStatusText(const HwInstStatus& s, char* state, size_t stateLen, char* note, size_t noteLen) {
+  const bool hasNote = s.note && *s.note;
+  const bool overdue = s.releasing && s.releasingAgeMs > kHwReleasingWarnMs;
+  const char* level = hasNote && s.noteLevel == HwNoteLevel::Fault           ? " · fault"
+                      : (hasNote && s.noteLevel == HwNoteLevel::Warn) || overdue ? " · warn"
+                                                                             : "";
+  if (state && stateLen) snprintf(state, stateLen, "%s%s", hwStateLabel(s.state), level);
+  if (!note || !noteLen) return;
+  note[0] = '\0';
+  appendPart(note, noteLen, s.reason);
+  appendPart(note, noteLen, s.note);
+  if (s.releasing) {
+    char rel[48];
+    if (overdue) {
+      snprintf(rel, sizeof(rel), "releasing %u for %u s, no released()", (unsigned)s.releasing,
+               (unsigned)(s.releasingAgeMs / 1000));
+    } else {
+      snprintf(rel, sizeof(rel), "releasing %u", (unsigned)s.releasing);
+    }
+    appendPart(note, noteLen, rel);
+  }
+}
+
+bool HwClaims::reserve(const HwResource& r, const char* reason) {
+  if (isPinKind(r.kind) || r.index < 0) return false;
+  _reserved.push_back(HwClaim{reason ? reason : "reserved", r, false, 0});
+  return true;
 }
 
 }  // namespace ESPRack

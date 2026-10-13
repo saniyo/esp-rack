@@ -379,6 +379,173 @@ static void test_tables_consistent(void) {
   }
 }
 
+
+// SES-LIB-023: non-GPIO reservations
+static void test_reserved_non_gpio(void) {
+  HwClaims c = claims(HwChip::Esp32S3);
+  TEST_ASSERT_TRUE(c.reserve(HwResource{HwKind::Uart, 2, -1, 0, "port"}, "modbus bridge"));
+  TEST_ASSERT_FALSE(c.reserve(HwResource{HwKind::Gpio, 5, -1, 0, "x"}, "led"));  // pins: board notes
+  ASSERT_ERR("UART2 reserved: modbus bridge", c.check("meter", one(HwKind::Uart, 2, "port")));
+  ASSERT_OK(c.check("meter", one(HwKind::Uart, 1, "port")));
+  TEST_ASSERT_EQUAL_UINT(1, c.reservedCount());
+
+  HwClaims c3 = claims(HwChip::Esp32C3);  // 2 RMT TX: one reserved leaves one
+  c3.reserve(HwResource{HwKind::RmtTx, 0, -1, 0, "tx"}, "ir blaster");
+  ASSERT_ERR("rmt-tx 0 reserved: ir blaster", c3.check("a", one(HwKind::RmtTx, 0, "led")));
+  ASSERT_OK(c3.check("a", one(HwKind::RmtTx, kHwAnyChannel, "led")));
+  HwDescriptor two;
+  two.add(HwKind::RmtTx, kHwAnyChannel, "a");
+  two.add(HwKind::RmtTx, kHwAnyChannel, "b");
+  ASSERT_ERR("RMT TX channels exhausted", c3.check("a", two));
+}
+
+// SES-LIB-024: a claim lives until the hardware is released
+static void test_releasing(void) {
+  HwClaims c = claims(HwChip::Esp32C3);
+  HwDescriptor a;
+  a.add(HwKind::Uart, 1, "port");
+  a.add(HwKind::Gpio, 4, "tx", kHwOutput);
+  c.set("meter1", a);
+
+  HwDescriptor b;  // moves tx 4 -> 6, keeps the UART
+  b.add(HwKind::Uart, 1, "port");
+  b.add(HwKind::Gpio, 6, "tx", kHwOutput);
+  c.replace("meter1", b, true, 0);
+  TEST_ASSERT_EQUAL_UINT(1, c.releasingCount("meter1"));
+  ASSERT_ERR("GPIO4 being released by meter1 (tx)", c.check("meter2", one(HwKind::Gpio, 4, "rx")));
+  ASSERT_ERR("UART1 used by meter1 (port)", c.check("meter2", one(HwKind::Uart, 1, "port")));
+  ASSERT_OK(c.check("meter1", a));  // never blocks its owner
+
+  c.released("meter1");
+  TEST_ASSERT_EQUAL_UINT(0, c.releasingCount("meter1"));
+  ASSERT_OK(c.check("meter2", one(HwKind::Gpio, 4, "rx")));
+  ASSERT_ERR("GPIO6 used by meter1", c.check("meter2", one(HwKind::Gpio, 6, "rx")));
+
+  // taken back before it was released: active again, no duplicate
+  c.replace("meter1", a, true, 0);  // 6 releasing, 4 active
+  c.replace("meter1", b, true, 0);  // 4 releasing, 6 active again
+  TEST_ASSERT_EQUAL_UINT(1, c.releasingCount("meter1"));
+  TEST_ASSERT_EQUAL_UINT(3, c.size());  // uart1, gpio6 active + gpio4 releasing
+
+  // losing everything (Conflict / Disabled): all releasing until released()
+  c.releaseAll("meter1", true, 0);
+  TEST_ASSERT_EQUAL_UINT(3, c.releasingCount("meter1"));
+  ASSERT_ERR("being released by meter1", c.check("meter2", one(HwKind::Uart, 1, "port")));
+  c.released("meter1");
+  TEST_ASSERT_EQUAL_UINT(0, c.size());
+
+  // a releasing channel still counts toward the budget
+  HwClaims c3 = claims(HwChip::Esp32C3);
+  HwDescriptor rmt;
+  rmt.add(HwKind::RmtTx, kHwAnyChannel, "a");
+  rmt.add(HwKind::RmtTx, kHwAnyChannel, "b");
+  c3.set("x", rmt);
+  c3.releaseAll("x", true, 0);
+  ASSERT_ERR("RMT TX channels exhausted", c3.check("y", one(HwKind::RmtTx, kHwAnyChannel, "led")));
+}
+
+// SES-LIB-024: only an owner that set the hardware up (was Ok) holds it
+// while releasing; one that never did gives it up at once.
+static void test_releasing_needs_applied(void) {
+  HwClaims c = claims(HwChip::Esp32C3);
+  HwDescriptor a;
+  a.add(HwKind::Uart, 1, "port");
+  a.add(HwKind::Gpio, 4, "tx", kHwOutput);
+  c.set("meter1", a);
+  c.releaseAll("meter1", false, 0);  // e.g. never was Ok, now Disabled
+  TEST_ASSERT_EQUAL_UINT(0, c.releasingCount("meter1"));
+  TEST_ASSERT_EQUAL_UINT(0, c.size());
+  ASSERT_OK(c.check("meter2", one(HwKind::Gpio, 4, "rx")));
+
+  c.set("meter1", a);
+  c.replace("meter1", one(HwKind::Gpio, 6, "tx", kHwOutput), false, 0);
+  TEST_ASSERT_EQUAL_UINT(0, c.releasingCount("meter1"));
+  TEST_ASSERT_EQUAL_UINT(1, c.size());  // only GPIO6
+  ASSERT_OK(c.check("meter2", one(HwKind::Uart, 1, "port")));
+
+  // claims already releasing stay so: that hardware was set up earlier
+  c.replace("meter1", a, true, 0);  // GPIO6 releasing
+  c.releaseAll("meter1", false, 0);  // drops the active UART1/GPIO4
+  TEST_ASSERT_EQUAL_UINT(1, c.releasingCount("meter1"));
+  ASSERT_ERR("GPIO6 being released by meter1", c.check("meter2", one(HwKind::Gpio, 6, "rx")));
+  ASSERT_OK(c.check("meter2", one(HwKind::Gpio, 4, "rx")));
+}
+
+// SES-LIB-024: releasing too long without released() is a warning in the
+// tab; the claim stays.
+static void test_releasing_overdue(void) {
+  HwClaims c = claims(HwChip::Esp32C3);
+  c.set("meter1", one(HwKind::Gpio, 4, "tx", kHwOutput));
+  TEST_ASSERT_EQUAL_UINT32(0, c.releasingAgeMs("meter1", 5000));
+  c.releaseAll("meter1", true, 0xFFFFF000u);  // stamped just before millis() wraps
+  TEST_ASSERT_EQUAL_UINT32(0x1000u + 3000u, c.releasingAgeMs("meter1", 3000));
+  TEST_ASSERT_EQUAL_UINT(1, c.releasingCount("meter1"));  // never dropped by age
+
+  char state[32], note[160];
+  HwInstStatus s;
+  s.state = HwState::Disabled;
+  s.releasing = 1;
+  s.releasingAgeMs = kHwReleasingWarnMs;  // not yet
+  hwStatusText(s, state, sizeof(state), note, sizeof(note));
+  TEST_ASSERT_EQUAL_STRING("Disabled", state);
+  TEST_ASSERT_EQUAL_STRING("releasing 1", note);
+  s.releasingAgeMs = 14500;
+  hwStatusText(s, state, sizeof(state), note, sizeof(note));
+  TEST_ASSERT_EQUAL_STRING("Disabled · warn", state);
+  TEST_ASSERT_EQUAL_STRING("releasing 1 for 14 s, no released()", note);
+}
+
+// SES-LIB-025: the instance's runtime note in System -> Hardware
+static void test_runtime_note_text(void) {
+  char state[32], note[160];
+  HwInstStatus s;
+  s.state = HwState::Ok;
+  hwStatusText(s, state, sizeof(state), note, sizeof(note));
+  TEST_ASSERT_EQUAL_STRING("Ok", state);
+  TEST_ASSERT_EQUAL_STRING("", note);
+
+  s.note = "no answer from the meter";
+  s.noteLevel = HwNoteLevel::Fault;
+  hwStatusText(s, state, sizeof(state), note, sizeof(note));
+  TEST_ASSERT_EQUAL_STRING("Ok · fault", state);
+  TEST_ASSERT_EQUAL_STRING("no answer from the meter", note);
+
+  s.noteLevel = HwNoteLevel::Info;  // shown, but no level on the state
+  hwStatusText(s, state, sizeof(state), note, sizeof(note));
+  TEST_ASSERT_EQUAL_STRING("Ok", state);
+
+  // registry reason first, then the runtime note, then releasing
+  s.reason = "GPIO9 is a strapping pin";
+  s.noteLevel = HwNoteLevel::Warn;
+  s.releasing = 2;
+  s.releasingAgeMs = 20000;  // fault beats the releasing warning; warn stays warn
+  hwStatusText(s, state, sizeof(state), note, sizeof(note));
+  TEST_ASSERT_EQUAL_STRING("Ok · warn", state);
+  TEST_ASSERT_EQUAL_STRING("GPIO9 is a strapping pin · no answer from the meter · releasing 2 for 20 s, no released()",
+                           note);
+  s.noteLevel = HwNoteLevel::Fault;
+  hwStatusText(s, state, sizeof(state), note, sizeof(note));
+  TEST_ASSERT_EQUAL_STRING("Ok · fault", state);
+
+  char small[12];  // truncates, stays terminated
+  hwStatusText(s, state, sizeof(state), small, sizeof(small));
+  TEST_ASSERT_EQUAL_UINT(sizeof(small) - 1, strlen(small));
+  TEST_ASSERT_EQUAL_STRING("Not configured", hwStateLabel(HwState::NotConfigured));
+
+  // a cut never leaves half a UTF-8 character
+  char uk[8];  // 5 Cyrillic letters, 10 bytes: 7 fit, the 4th letter is cut in half
+  snprintf(uk, sizeof(uk), "%s", "\xD0\xBD\xD0\xB5\xD0\xBC\xD0\xB0\xD1\x94");
+  hwUtf8Trim(uk);
+  TEST_ASSERT_EQUAL_STRING("\xD0\xBD\xD0\xB5\xD0\xBC", uk);
+  char whole[] = "\xD0\xBD\xD0\xB5";  // complete: kept
+  hwUtf8Trim(whole);
+  TEST_ASSERT_EQUAL_STRING("\xD0\xBD\xD0\xB5", whole);
+  char sep[8];  // "ab · cd" cut inside the dot
+  snprintf(sep, 5, "%s", "ab \xC2\xB7 cd");
+  hwUtf8Trim(sep);
+  TEST_ASSERT_EQUAL_STRING("ab ", sep);
+}
+
 int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_names);
@@ -398,5 +565,10 @@ int main(void) {
   RUN_TEST(test_first_error_kept);
   RUN_TEST(test_unknown_chip_permissive);
   RUN_TEST(test_tables_consistent);
+  RUN_TEST(test_reserved_non_gpio);
+  RUN_TEST(test_releasing);
+  RUN_TEST(test_releasing_needs_applied);
+  RUN_TEST(test_releasing_overdue);
+  RUN_TEST(test_runtime_note_text);
   return UNITY_END();
 }

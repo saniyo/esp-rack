@@ -15,16 +15,6 @@ namespace ESPRack {
 
 namespace {
 
-[[maybe_unused]] const char* stateLabel(HwState s) {  // logs only, at a low log level
-  switch (s) {
-    case HwState::Ok: return "Ok";
-    case HwState::NotConfigured: return "Not configured";
-    case HwState::Conflict: return "Conflict";
-    case HwState::Disabled: return "Disabled";
-  }
-  return "?";
-}
-
 #if ESPRACK_HW_TAB
 // "GPIO17 tx, GPIO18 rx, UART1 port" into buf.
 void describeText(const HwDescriptor& d, char* buf, size_t len) {
@@ -116,18 +106,23 @@ const HwRegistry::Inst* HwRegistry::instOf(const ExtHwModule& who) const {
 
 void HwRegistry::evaluate(Inst& x, const HwDescriptor& d) {
   const char* id = x.m->instanceId();
+  // Hardware the instance gave up stays claimed ("releasing") until it says
+  // released(): it may still be driving it until its next loop. Only if it
+  // was Ok, though; an instance that never was set nothing up (SES-LIB-024).
+  const bool applied = x.state == HwState::Ok;
+  const uint32_t now = millis();
   x.desc = d;
   x.reason[0] = '\0';
   if (d.disabled) {
     x.state = HwState::Disabled;
-    _claims.remove(id);
+    _claims.releaseAll(id, applied, now);
     return;
   }
   const HwCheck c = _claims.check(id, d);
   if (!c.ok) {
     x.state = HwState::Conflict;
     strlcpy(x.reason, c.reason, sizeof(x.reason));
-    _claims.remove(id);
+    _claims.releaseAll(id, applied, now);
     return;
   }
   for (uint8_t i = 0; i < d.count; ++i) {
@@ -135,13 +130,13 @@ void HwRegistry::evaluate(Inst& x, const HwDescriptor& d) {
     if (r.index == kHwNotConfigured && !(r.flags & kHwOptional)) {
       x.state = HwState::NotConfigured;
       snprintf(x.reason, sizeof(x.reason), "%s not set", r.role ? r.role : hwKindName(r.kind));
-      _claims.remove(id);
+      _claims.releaseAll(id, applied, now);
       return;
     }
   }
   x.state = HwState::Ok;
   if (c.warning) strlcpy(x.reason, c.reason, sizeof(x.reason));
-  _claims.set(id, d);
+  _claims.replace(id, d, applied, now);
 }
 
 void HwRegistry::boot() {
@@ -161,9 +156,9 @@ void HwRegistry::boot() {
     if (st == HwState::Conflict) {
       log_e("[hw] %s: Conflict — %s (hardware left untouched)", x.m->instanceId(), reason);
     } else if (reason[0]) {
-      log_w("[hw] %s: %s — %s", x.m->instanceId(), stateLabel(st), reason);
+      log_w("[hw] %s: %s — %s", x.m->instanceId(), hwStateLabel(st), reason);
     } else {
-      log_i("[hw] %s: %s", x.m->instanceId(), stateLabel(st));
+      log_i("[hw] %s: %s", x.m->instanceId(), hwStateLabel(st));
     }
   }
 }
@@ -197,7 +192,7 @@ HwState HwRegistry::update(ExtHwModule& who) {
     if (after == HwState::Conflict) {
       log_e("[hw] %s: Conflict — %s", who.instanceId(), reason);
     } else {
-      log_i("[hw] %s: %s%s%s", who.instanceId(), stateLabel(after), reason[0] ? " — " : "", reason);
+      log_i("[hw] %s: %s%s%s", who.instanceId(), hwStateLabel(after), reason[0] ? " — " : "", reason);
     }
   }
   return after;
@@ -225,6 +220,31 @@ bool HwRegistry::reserveGpio(int8_t pin, const char* reason) {
   const bool ok = b.exists(pin) && b.addNote(pin, PinLevel::Reserved, reason ? reason : "reserved");
   unlock();
   if (!ok) log_w("[hw] reserveGpio(%d, %s) ignored: no such GPIO or the table is full", pin, reason ? reason : "");
+  return ok;
+}
+
+void HwRegistry::released(const ExtHwModule& who) {
+  lock();
+  _claims.released(who.instanceId());
+  unlock();
+}
+
+void HwRegistry::setRuntimeNote(const ExtHwModule& who, const char* note, HwNoteLevel level) {
+  lock();
+  if (Inst* x = instOf(who)) {
+    strlcpy(x->note, note ? note : "", sizeof(x->note));
+    hwUtf8Trim(x->note);
+    x->noteLevel = level;
+  }
+  unlock();
+}
+
+bool HwRegistry::reserve(HwKind kind, int16_t index, const char* reason, int8_t bus) {
+  if (hwIsPin(kind)) return reserveGpio(static_cast<int8_t>(index), reason);
+  lock();
+  const bool ok = _claims.reserve(HwResource{kind, index, bus, 0, nullptr}, reason);
+  unlock();
+  if (!ok) log_w("[hw] reserve(%s %d) ignored", hwKindName(kind), index);
   return ok;
 }
 
@@ -359,8 +379,19 @@ void HwRegistry::buildForm(JsonObject& root) const {
     r["type"] = line;
     describeText(x.desc, line, sizeof(line));
     r["hw"] = line;
-    r["state"] = stateLabel(x.state);
-    r["note"] = (char*)x.reason;  // copied: the doc outlives the lock
+    // State + runtime level (SES-LIB-025); note = registry reason, runtime
+    // note, hardware still being released (SES-LIB-024).
+    HwInstStatus st;
+    st.state = x.state;
+    st.reason = x.reason;
+    st.note = x.note;
+    st.noteLevel = x.noteLevel;
+    st.releasing = _claims.releasingCount(x.m->instanceId());
+    st.releasingAgeMs = _claims.releasingAgeMs(x.m->instanceId(), millis());
+    char state[32];
+    hwStatusText(st, state, sizeof(state), line, sizeof(line));
+    r["state"] = state;  // char arrays: copied, the doc outlives the lock
+    r["note"] = line;
   }
   for (const Rejected& x : _rejected) {
     JsonObject r = rows.createNestedObject();
@@ -373,16 +404,25 @@ void HwRegistry::buildForm(JsonObject& root) const {
   }
 
   f.add(web::Table("pins")
-            .col("gpio", "GPIO", "number", "0")
+            .col("res", "Resource", "text")
             .col("level", "Use", "text")
             .col("reason", "Why", "text")
-            .label("Reserved and caution pins"));
+            .label("Reserved and caution resources"));
   JsonArray pins = f.rowsOf("pins");
   for (uint8_t i = 0; i < b.noteCount; ++i) {
     JsonObject r = pins.createNestedObject();
-    r["gpio"] = b.notes[i].gpio;
+    snprintf(line, sizeof(line), "GPIO%d", b.notes[i].gpio);
+    r["res"] = line;
     r["level"] = b.notes[i].level == PinLevel::Reserved ? "reserved" : "caution";
     r["reason"] = b.notes[i].reason;
+  }
+  for (size_t i = 0; i < _claims.reservedCount(); ++i) {  // SES-LIB-023
+    const HwClaim& rc = _claims.reservedAt(i);
+    JsonObject r = pins.createNestedObject();
+    hwResourceText(rc.res, line, sizeof(line));
+    r["res"] = line;
+    r["level"] = "reserved";
+    r["reason"] = rc.owner;
   }
   unlock();
 

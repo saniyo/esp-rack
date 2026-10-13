@@ -71,6 +71,10 @@ inline bool hwIsPin(HwKind k) { return k == HwKind::Gpio || k == HwKind::Adc || 
 
 enum class HwState : uint8_t { Ok, NotConfigured, Conflict, Disabled };
 
+// A runtime note an instance attaches to itself (SES-LIB-025): the registry's
+// Ok only says the resources are free — not that the UART answered.
+enum class HwNoteLevel : uint8_t { Info, Warn, Fault };
+
 struct HwCheck {
   bool ok = true;
   bool warning = false;  // ok, but see reason (strapping pin, ADC2 with Wi-Fi)

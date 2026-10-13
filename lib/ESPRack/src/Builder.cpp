@@ -185,7 +185,7 @@ std::unique_ptr<App> Builder::build() {
 
   // Hardware: consumer reservations before any module installs; rejected
   // instances are listed in System -> Hardware.
-  for (const Reservation& r : reserved_) app->hw()->reserveGpio(r.pin, r.reason);
+  for (const Reservation& r : reserved_) app->hw()->reserve(r.kind, r.index, r.reason, r.bus);
   for (const HwRejected& r : hwRejected) {
     app->hw()->addRejected(*modules_[r.idx]->asExtHw(), descs[r.idx].version, r.why);
   }

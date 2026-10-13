@@ -23,6 +23,14 @@ ExtHwModule::ExtHwModule(const char* instanceId) : _idValid(isValidInstanceId(in
 
 HwState ExtHwModule::hwState() const { return _hw ? _hw->state(*this) : HwState::Ok; }
 
+void ExtHwModule::hwReleased() {
+  if (_hw) _hw->released(*this);
+}
+
+void ExtHwModule::hwNote(const char* note, HwNoteLevel level) {
+  if (_hw) _hw->setRuntimeNote(*this, note, level);
+}
+
 const char* ExtHwModule::actionId(const char* verb, char* buf, size_t len) const {
   if (!buf || !len) return "";
   snprintf(buf, len, "%s.%s", _id, verb ? verb : "");

@@ -67,9 +67,16 @@ class Builder {
   // status LED, a pin the consumer drives itself. `reason` is shown in
   // System -> Hardware (static literal).
   Builder& reserveGpio(int8_t pin, const char* reason) {
-    reserved_.push_back(Reservation{pin, reason});
+    return reserve(HwKind::Gpio, pin, reason);
+  }
+
+  // Any resource (SES-LIB-023): reserve(HwKind::Uart, 2, "modbus bridge"),
+  // an RMT/LEDC channel, an I2C address (bus) ... the consumer drives itself.
+  Builder& reserve(HwKind kind, int16_t index, const char* reason, int8_t bus = -1) {
+    reserved_.push_back(Reservation{kind, index, bus, reason});
     return *this;
   }
+  Builder& reserveUart(uint8_t port, const char* reason) { return reserve(HwKind::Uart, port, reason); }
 
   // ----- Preset bundles -------------------------------------------------
   //
@@ -127,7 +134,9 @@ class Builder {
 
   std::vector<std::unique_ptr<Module>> modules_;
   struct Reservation {
-    int8_t pin;
+    HwKind kind;
+    int16_t index;
+    int8_t bus;
     const char* reason;
   };
   std::vector<Reservation> reserved_;

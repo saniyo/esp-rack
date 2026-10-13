@@ -65,9 +65,38 @@ struct BoardInfo {
 BoardInfo boardInfoFor(HwChip chip, const BoardFlags& flags);
 
 struct HwClaim {
-  const char* owner;  // instance id (stable storage, the module's)
+  const char* owner;  // instance id (stable storage, the module's); a reason for reserved ones
   HwResource res;
+  // SES-LIB-024: the owner gave it up in its settings but hasn't confirmed
+  // yet that the hardware is let go (HwClaims::released). Still blocks others.
+  bool releasing = false;
+  uint32_t releasingSince = 0;  // ms on the caller's clock
 };
+
+// Releasing this long without released() shows as a warning: the module
+// probably never says so. The claims stay, since only the module knows the
+// hardware is let go (SES-LIB-024).
+constexpr uint32_t kHwReleasingWarnMs = 10000;
+
+// One instance's columns in System -> Hardware (SES-LIB-024/025). Pure, so
+// the wording is unit-tested.
+struct HwInstStatus {
+  HwState state = HwState::NotConfigured;
+  const char* reason = "";      // the registry's: conflict, strapping-pin warning
+  const char* note = "";        // the instance's runtime note
+  HwNoteLevel noteLevel = HwNoteLevel::Info;
+  size_t releasing = 0;         // claims still being released
+  uint32_t releasingAgeMs = 0;  // the oldest one's age
+};
+// state: "Ok", "Ok · fault", "Conflict · warn" ...
+// note:  reason · runtime note · "releasing 2" (or "releasing 2 for 14 s,
+//        no released()" past kHwReleasingWarnMs, which also adds "· warn")
+void hwStatusText(const HwInstStatus& s, char* state, size_t stateLen, char* note, size_t noteLen);
+// "Ok", "Not configured", "Conflict", "Disabled"
+const char* hwStateLabel(HwState s);
+// Cuts an incomplete UTF-8 character off the end of s, as a truncating copy
+// of a non-ASCII note (Cyrillic, say) leaves it.
+void hwUtf8Trim(char* s);
 
 class HwClaims {
  public:
@@ -80,8 +109,32 @@ class HwClaims {
   // OTHER owner's claims? (owner's own current claims are ignored)
   HwCheck check(const char* owner, const HwDescriptor& d) const;
 
-  void set(const char* owner, const HwDescriptor& d);  // replaces owner's claims
+  void set(const char* owner, const HwDescriptor& d);  // replaces owner's claims outright
   void remove(const char* owner);
+
+  // SES-LIB-024. replace(): like set(), but the owner's claims that `d` no
+  // longer holds become `releasing` (they keep blocking others) instead of
+  // vanishing. releaseAll(): every active claim of the owner becomes
+  // releasing. released(): drops the owner's releasing claims — the owner
+  // has let go of that hardware.
+  // `applied`: the owner set the hardware up under its active claims (it was
+  // Ok). If not, there is nothing to let go and they're simply dropped;
+  // waiting for released() from an owner that never opened anything would
+  // block that hardware for good. `nowMs` stamps new releasing claims.
+  void replace(const char* owner, const HwDescriptor& d, bool applied, uint32_t nowMs);
+  void releaseAll(const char* owner, bool applied, uint32_t nowMs);
+  void released(const char* owner);
+  size_t releasingCount(const char* owner) const;
+  // Age of the owner's oldest releasing claim (0 = none).
+  uint32_t releasingAgeMs(const char* owner, uint32_t nowMs) const;
+
+  // SES-LIB-023: a non-GPIO resource nobody may claim (a UART, an RMT
+  // channel ... the consumer or a framework module uses itself). GPIOs are
+  // reserved through the board notes (BoardInfo::addNote). `reason` is a
+  // static literal. false for pin kinds.
+  bool reserve(const HwResource& r, const char* reason);
+  size_t reservedCount() const { return _reserved.size(); }
+  const HwClaim& reservedAt(size_t i) const { return _reserved[i]; }
 
   size_t size() const { return _claims.size(); }
   const HwClaim& at(size_t i) const { return _claims[i]; }
@@ -91,6 +144,7 @@ class HwClaims {
  private:
   BoardInfo _b;
   std::vector<HwClaim> _claims;
+  std::vector<HwClaim> _reserved;  // owner = reason
 };
 
 }  // namespace ESPRack

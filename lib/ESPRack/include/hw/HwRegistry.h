@@ -70,6 +70,22 @@ class HwRegistry {
     }
   }
 
+  // SES-LIB-024: `who` has let go of the hardware it gave up (pins switched
+  // back to input, UART ended). Until then that hardware stays claimed as
+  // "releasing" and other instances can't take it. Call it from the loop
+  // that switches the hardware (ExtHwModule::hwReleased()).
+  void released(const ExtHwModule& who);
+
+  // SES-LIB-025: a runtime note on `who` — Ok only means the resources are
+  // free, not that the device answered. nullptr clears it. Any task.
+  void setRuntimeNote(const ExtHwModule& who, const char* note, HwNoteLevel level = HwNoteLevel::Warn);
+
+  // SES-LIB-023: keep any resource away from every instance — a UART, an
+  // RMT/LEDC channel ... that the consumer or a framework module drives
+  // itself. GPIO kinds go to reserveGpio(). Before the boot pass; `reason`
+  // is a static literal.
+  bool reserve(HwKind kind, int16_t index, const char* reason, int8_t bus = -1);
+
   // Keep a GPIO away from every instance (a board's SD card, a status
   // LED, a consumer's own pin). Call before the boot pass: from
   // Builder::reserveGpio() or a framework module's onInstall. `reason` is
@@ -98,6 +114,8 @@ class HwRegistry {
     HwState state;
     HwDescriptor desc;    // as last described
     char reason[sizeof(HwCheck::reason)];
+    char note[48];        // SES-LIB-025 runtime note ("" = none)
+    HwNoteLevel noteLevel;
   };
   struct Rejected {
     char id[ExtHwModule::kIdMax + 1];
