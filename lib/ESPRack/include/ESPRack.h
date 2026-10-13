@@ -15,6 +15,8 @@
 #include "Module.h"
 #include "Builder.h"
 #include "App.h"
+#include "time/TimeSync.h"
+#include "geo/ILocationProvider.h"
 
 #include "ConfigManager.h"
 #include "ConfigDelegate.h"

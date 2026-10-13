@@ -47,6 +47,8 @@ class IWireguardProvider;           // forward — populated by WireGuardModule
 
 namespace ESPRack {
 
+class ILocationProvider;   // forward — populated by a location module (geo/ILocationProvider.h)
+
 // Graceful device restart (LIB-FIX-006) — THE way to reboot. Runs every
 // installed module's onShutdown() in reverse install order on the loop task
 // (so it never races that module's onLoop), each timed against
@@ -156,6 +158,12 @@ class App {
   IWireguardProvider* wireguard()                    { return wireguard_; }
   void                setWireguard(IWireguardProvider* p) { wireguard_ = p; }
 
+  // ILocationProvider late-binding — populated by a location module. A GPS
+  // module feeds fixes in through it; consumers (astro, status) read it.
+  // Null when no location module is installed.
+  ILocationProvider*  location()                        { return location_; }
+  void                setLocation(ILocationProvider* p) { location_ = p; }
+
   // Read-only device identity — useful for AutoUpdateModule etc. that
   // pass these to their underlying service ctor. Set once at App
   // construction.
@@ -213,6 +221,7 @@ class App {
   IMothershipProvider* mothership_ {nullptr}; // populated by MothershipModule
   IMothershipProfileProvider* mothershipProfile_ {nullptr};  // ditto
   IWireguardProvider* wireguard_ {nullptr};  // populated by WireGuardModule
+  ILocationProvider*  location_  {nullptr};  // populated by a location module
 
   std::vector<std::unique_ptr<Module>> modules_;
   bool             begun_ {false};

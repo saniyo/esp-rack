@@ -9,6 +9,7 @@
 #include "DataApi.h"
 #include "HeapMonitor.h"
 #include "ProblemJson.h"
+#include "time/TimeSync.h"
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -164,6 +165,12 @@ void App::begin() {
   if (esp_register_shutdown_handler(&App::onEspShutdown) != ESP_OK) {
     log_w("[restart] esp_register_shutdown_handler failed — only restartDevice() runs onShutdown");
   }
+
+  // Time first (SES-LIB-002): restores a soft-reset hold and owns the TZ
+  // before any module looks at the clock. system.setTime is registered here,
+  // i.e. before webManager_.begin() mounts the endpoints.
+  TimeSync::instance().begin();
+  TimeSync::instance().registerManifest(&webManager_);
 
   // Anchor the fragmentation-watchdog reference. tick() in loop()
   // will append per-minute samples from here forward; this first
@@ -435,6 +442,9 @@ void App::begin() {
 void App::loop() {
   if (!begun_) return;
 
+  // Time first: SNTP / operator samples, clock events (SES-LIB-002).
+  TimeSync::instance().loop();
+
   // A restart requested from another task is performed HERE, on the loop
   // task, so onShutdown() never runs concurrently with the same module's
   // onLoop() (LIB-FIX-006).
@@ -543,6 +553,9 @@ bool App::runShutdownOnce(const char* reason) {
             d.id ? d.id : "?", (unsigned)dt, (unsigned)ESPRACK_SHUTDOWN_BUDGET_MS);
     }
   }
+  // The clock keeps running across a soft reset: note that it was valid
+  // until now, so the next boot can hold it (RtcHold).
+  TimeSync::instance().flushHold();
   hooksDone_ = true;
   return true;
 }
