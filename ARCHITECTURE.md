@@ -134,10 +134,23 @@ App**. `App::begin()` hard-codes `beginPingPong(20, 60000)` (`App.cpp:270`).
   - `FT_HEAP_MONITOR` runs a 60 s heap-drift sampler and logs a "soak"
     snapshot every 5 min.
 
-`App::shutdown()` calls `onShutdown()` in reverse order (`:487-494`).
-Only `~App()` calls it. The restart, factory-reset, OTA, auto-update and
-config-restore paths call `ESP.restart()` directly, so **in practice
-`onShutdown()` never runs**.
+**Restart and shutdown** (LIB-FIX-006). Every built-in reboot path calls
+`ESPRack::restartDevice(reason, afterShutdown)`:
+
+1. A call from another task (HTTP handler, mothership task) hands the
+   restart to `App::loop()`, so hooks never run concurrently with a module's
+   `onLoop()`. If the loop doesn't respond within 3 s, the caller runs them
+   itself.
+2. `onShutdown()` runs in reverse install order, once, each module timed
+   against `ESPRACK_SHUTDOWN_BUDGET_MS` (500 ms; overruns are logged).
+3. The optional `afterShutdown` step runs. Factory reset wipes `/config`
+   here, and the config restores write their files here, so a hook can't
+   resurrect or overwrite them.
+4. `esp_restart()`.
+
+An `esp_register_shutdown_handler` hook covers reboots that bypass this,
+such as ArduinoOTA's own. `ESPRack::restartReason()` tells a hook why it is
+running.
 
 ### 2.5 Threads
 
@@ -175,19 +188,13 @@ similar getters and must null-check. `app->tls()` is App-owned and always
 set. Reading a provider in `onBegin()` is always safe. Reading it in
 `onInstall()` works only if the provider's module was installed earlier.
 
-> ⚠ `uiDyn` (priority 6) and `presence` (priority 7) install **before**
-> `security` (priority 8), so they get the `NullSecurityManager` from
-> `ctx.security`:
-> - `UiDynService` wraps `GET /api/v1/ui/dynamic` with that null manager,
->   whose `wrapRequest` lets every request through
->   (`NullSecurityManager.h:49-52`, `modules/ui-dyn/src/UiDynService.cpp:44-48`).
->   The endpoint is effectively **unauthenticated**.
-> - `PresenceService::mountWs` installs a handshake check, but the check
->   uses the `NullSecurityManager` it captured
->   (`modules/presence/src/PresenceService.cpp:84-91`). That manager
->   authenticates everyone as admin, so `/ws/presence` is effectively open.
->
-> The comment at `Module.h:60-62` still says security has priority 5.
+Modules that install **before** `security` (priority 8) must not capture
+`ctx.security`, because at that point it's still the `NullSecurityManager`,
+which authenticates everyone as admin. `uiDyn` (6) and `presence` (7) used
+to do exactly that (LIB-FIX-005). Now:
+
+- presence resolves `app->security()` on every handshake;
+- uiDyn takes the manager in `onBegin()`.
 
 ---
 
@@ -436,10 +443,17 @@ The UI (`ui/src/contexts/ws/WsProvider.tsx`, `useWsChannel.ts`):
   token travels as `?access_token=`.
 - **Rejected upgrade.** A rejected upgrade falls through to `onNotFound` and
   gets the SPA shell, not a 401.
-- **No per-channel checks.** After the upgrade, neither `sub` nor `p`
-  checks the feature's auth level or the operator role
-  (`WsManager.h:646-667`). See the known issues in
-  [ROADMAP §0](ROADMAP.md#0-status-2026-10-13).
+- **Per-channel checks** (LIB-FIX-003/011). Each connection's access level
+  and operator right are resolved once at `WS_EVT_CONNECT`, through the
+  SecurityManager that SecurityModule hands to `WsManager`.
+  - `sub` needs at least the channel's (feature's) auth level.
+  - `p` additionally needs the operator role and the per-key write level
+    (`WriteAuthMap`).
+  - Denials are logged and dropped.
+  - Identity is per connection: a revoked token keeps its socket until it
+    reconnects.
+- **Client cap.** `ESPRACK_WS_MAX_CLIENTS` concurrent clients (3 on C3,
+  6 elsewhere).
 
 ---
 
@@ -451,9 +465,9 @@ The UI (`ui/src/contexts/ws/WsProvider.tsx`, `useWsChannel.ts`):
 |---|---|---|
 | Typed feature, UI face | `GET /api/v1/<id>/form` | feature `auth` |
 | Typed feature, machine face | `GET /api/v1/<id>/state` | feature `auth` |
-| Typed feature, write | `POST /api/v1/<id>/state` | feature `auth` **and** `IS_OPERATOR` |
+| Typed feature, write | `POST /api/v1/<id>/state` | feature `auth` **and** `IS_OPERATOR` **and** the per-key write level (`WriteAuthMap`, LIB-FIX-011) |
 | Action | `/api/v1/actions/<id>` | action `auth` **and** `IS_OPERATOR` (`WebActionEntry.h:28-34`) |
-| Page endpoints | module-chosen, e.g. `/api/v1/fs/*`, `/api/v1/system/*/form`, `/api/v1/discovery/peers` | endpoint `auth` only, **no operator floor** (`WebPageEntry.h:38`) |
+| Page endpoints | module-chosen, e.g. `/api/v1/fs/*`, `/api/v1/system/*/form`, `/api/v1/discovery/peers` | endpoint `auth`; mutating methods also `IS_OPERATOR` (LIB-FIX-003) |
 | Manifest | `GET /api/v1/ui/manifest` | public, two tiers |
 | Auth | `POST /api/v1/auth/token`, `GET /api/v1/auth/verify` | public / token |
 | Features | `GET /api/v1/features` | public (raw `server->on`) |
@@ -513,8 +527,18 @@ first three.
 - **`NullSecurityManager`** is active until SecurityModule installs, at
   priority 8. It authenticates every request as admin. Modules that install
   earlier capture it (§2.6).
-- **Server-enforced levels.** The server enforces feature, action and
-  endpoint levels. **Tab and menu `auth` are UI-only.**
+- **Server-enforced levels.**
+  - Reads: the server enforces feature, action and endpoint levels.
+  - Writes to a typed feature need the **maximum** of:
+    - the feature's `auth`;
+    - its `writeAuth` floor;
+    - the write level of every touched key. That is the tab's `writeAuth`,
+      else the tab's `auth` (LIB-FIX-011).
+  - Menu `auth` is visibility only.
+- **Secrets on the web** (LIB-FIX-004, `SecretFields.h`):
+  - Values of `web::Secret` fields are masked for non-admins in GET `/form`
+    and `/state`, and always in WS pushes and POST echoes.
+  - A posted mask value is dropped.
 
 ---
 

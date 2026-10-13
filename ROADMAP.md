@@ -53,79 +53,60 @@ Work beyond the plan that has landed:
 | `feature/ses-light-support` | **Current integration line.** Contains `feature/ws-single-session` → `feature/api-v1` → `feature/device-mesh`, `feature/web-feature-builder`, `feature/web-buffer-auto-sizing`, `feature/wg-esprack-lib`, `feature/wireguard-tunnel`, `debug/esp32async-migration`, and the merged `mothership-phase1/2`. |
 | `feature/mothership-phase4-rotation`, `feature/mship-remote-control`, `feature/mship-ui-direct-monitor`, `feature/pki-approval-flow` | Side branches whose work was **partly** carried into the line under new commits. By subject: 3/5, 23/34, 24/44 and 9/15 commits respectively. The rest needs a keep-or-drop decision. |
 
-### 0.4 Known issues (verified by reading the code; not reproduced on hardware unless stated)
+### 0.4 Known issues
 
-**High: functional and security**
+**Fixed by the LIB-FIX series** (`feature/ses-light-support`, 2026-10-13;
+verified by compiling C3/C6/S3, not yet on hardware):
 
-1. **UI Save is broken since C1 (`2adff81`).** `DynamicTabPanel` POSTs to
-   `tab.restPath`, which is the GET-only `/api/v1/<id>/form`. The request
-   lands in the `/api/*` 404. The UI should POST to the manifest's
-   `rest.update` (`ui/src/components/dynamic-component/DynamicFeature.tsx:45-52`,
-   `lib/ESPRack/include/WebFeatureDelegate.h:81-107`).
-2. **WS has no per-channel authorization.** Any authenticated identity,
-   including a guest or a `reader` token, can `sub` to any channel and write
-   through `{"type":"p"}` (`lib/ESPRack/include/WsManager.h:646-667`).
-   - For example, it can replace cert-manager's device certificate, key, CA
-     bundle and PKI URL, because `CertManagerSettings::staUpd` is the full
-     `update()`.
-   - NTP and MQTT are also writable this way.
-3. **Tab-level `auth` is UI-only.**
-   - wifi, ap, mqtt and ntp are `Authenticated` features with admin-only
-     Settings tabs.
-   - So a non-admin user can `GET …/form`, which contains the WiFi, AP and
-     MQTT passwords in plaintext (`web::Secret` emits the value), and can
-     `POST …/state`.
-4. **MQTT's state reader echoes the broker password.** Every WS push and
-   `GET /api/v1/mqtt/state` carries it
-   (`modules/mqtt/include/MqttSettingsService.h:198`).
-5. **The device supports only two live browser clients.**
-   `cleanupClients(2)` used to apply to each socket. Now there's a single
-   socket, so the oldest client gets closed whenever more than two are
-   connected (`WsManager.h:321`).
-6. **Install-order auth holes.** `uiDyn` (priority 6) and `presence` (7)
-   install before `security` (8) and capture `NullSecurityManager`. As a
-   result, `/api/v1/ui/dynamic` and `/ws/presence` are effectively
-   unauthenticated.
-7. **`WebPageSpec` endpoints have no operator floor.** A `reader` token
-   passes the gate on mutating page POSTs (`WebPageEntry.h:38`).
-8. **Default credentials ship in the defaults:**
+| Fix | Issue | Commit |
+|---|---|---|
+| LIB-FIX-001 | UI Save went to the GET-only `/form` and got a 404. Partial saves reset OTA settings and WiFi/AP IPs. The Users page used the dead `/securitySettings`. | `76a1fee` |
+| LIB-FIX-002 | Only two live WS clients per device; now `ESPRACK_WS_MAX_CLIENTS`. | `cc8b997` |
+| LIB-FIX-003 | No per-channel WS authorization; page endpoints had no operator floor. | `e951c7c` |
+| LIB-FIX-004 | Secrets were plaintext in form/state/WS for non-admins; MQTT echoed its password; the secret probe could overflow silently. | `8877eb6`, `b5eb172` |
+| LIB-FIX-005 | `uiDyn` and `presence` captured `NullSecurityManager`, leaving `/api/v1/ui/dynamic` and `/ws/presence` open. | `0be64e9` |
+| LIB-FIX-006 | `onShutdown()` never ran. Now `ESPRack::restartDevice()` plus an esp shutdown hook. | `587497a`, `7534315` |
+| LIB-FIX-007 | The boot purge deleted every zero-byte file; uploads now go via `.partial`. | `96b8c78` |
+| LIB-FIX-008 | The `tokens.create` reply was built by string concatenation. | `6beaddf` |
+| LIB-FIX-009 | State readers had side effects (MQTT); NTP, Telegram and cert-manager pushed WS twice. | `2d33977` |
+| LIB-FIX-010 | The root bundle was missing 4 modules and the third-party deps; versions disagreed (now 0.3.0 in `Version.h`, with `scripts/check_versions.py`). | `88c66c9` |
+| LIB-FIX-011 | Tab auth was UI-only; writes are now authorized per key on the server. | `8915d31` |
+
+On-device check of the security fixes: `scripts/check_security.py`
+(`fb80f69`).
+
+**Remaining**
+
+1. **Builder.**
+   - Validation isn't fail-fast: a missing dependency logs a "cycle" and
+     falls back to insertion order.
+   - The presets are empty.
+   - `bufferSize()/cors()/wsKeepAlive()` are never applied.
+2. **The cert-manager state machine overwrites its transient states**
+   (Enrolling, Renewing, Failed), as described in `docs/module-catalog.md`.
+3. **`GET /state` contract.** For features with a separate WS reader it
+   returns the status payload, not the POST shape.
+4. **Default credentials ship in the defaults:**
    - admin/admin and guest/guest;
    - AP and OTA password `esp-react`, with OTA enabled by default;
    - the discovery PSK placeholder.
-9. **`tokens.create` builds JSON by concatenation.** A token name containing
-   `"` breaks the response, and the one-time token is lost
-   (`modules/security/src/SecuritySettingsService.cpp:265-266`).
-
-**Medium: correctness**
-
-10. **Builder validation isn't fail-fast.** A missing dependency is logged as
-    a "cycle", and install falls back to insertion order. Presets are empty.
-    `bufferSize()/cors()/wsKeepAlive()` are never applied.
-11. **`onShutdown()` never runs.** Every restart path calls `ESP.restart()`
-    directly.
-12. **Duplicate WS frames.** NTP, Telegram and cert-manager call
-    `broadcastWs` in their update handler as well as relying on the
-    binding's auto-broadcast.
-13. **OTA partial update resets the port and password to factory**
-    (`modules/ota/include/OTASettingsService.h:57-59`).
-14. **The filesystem boot purge deletes every zero-byte file on flash**
-    (`modules/filesystem/src/FileSystemManager.cpp:199`).
-15. **The secret-key auto-discovery probe uses `bufferSize`.** If a form
-    outgrows it, the secrets past that point are silently stored in
-    plaintext.
-16. **`GET /state` for features with a separate WS reader returns the status
-    payload, and some readers mutate state.** MQTT `pendingSeenTopics` and
-    the demo's `mqtt_pending` are cleared by a REST GET.
-17. **The cert-manager state machine overwrites its transient states.**
-    Enrolling, Renewing and Failed are replaced on the next update, as
-    reported in the module audit (`docs/module-catalog.md`).
-18. **Stale artefacts and comments:**
-    - `api/manifest-dump.json` and `openapi.*` still list `mdns` and per-feature `ws`;
-    - `App.cpp:154-161` refers to a `custom_sdkconfig` that doesn't exist;
-    - `Module.h:60-62` says security has priority 5 (it's 8);
-    - `WsManager.h:5` says `/ws`, but the socket is `/ws/app`;
-    - several `/rest/...` and "per-feature /ws/* path" comments remain;
-    - `DISCOVERY_PROTOCOL.md` is out of date.
+5. **Stale artefacts and comments:**
+   - `api/manifest-dump.json` and `openapi.*` still list `mdns` and
+     per-feature `ws`;
+   - `App.cpp:154-161` refers to a `custom_sdkconfig` that doesn't exist;
+   - `WsManager.h:5` says `/ws`;
+   - several `/rest/...` comments remain;
+   - `DISCOVERY_PROTOCOL.md` is out of date.
+6. **Concurrency.**
+   - Inside AsyncWebSocket, `processAllQueues()` runs on both tasks
+     (suspected race).
+   - OTA recreates `ArduinoOTA` from the WiFi event task.
+   - WireGuard `g_wg` is used across tasks without a lock.
+7. **Smaller issues:**
+   - Presence log and history are keyed by a client-supplied header.
+   - Telegram is never started if it's enabled after boot.
+   - Discovery's `deviceId` is truncated for long project names.
+   - See the catalog for more.
 
 **Carried over from `docs/plans/open-issues-2026-05-22.md`**
 

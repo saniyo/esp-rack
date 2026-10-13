@@ -123,7 +123,7 @@ class Module {
 | `onInstall(ctx)` | `Builder::build()` step 5, once, in sorted order (`Builder.cpp:161-178`) | **Filesystem not mounted, WiFi not initialized.** Construct services, `registerFeature/Action/Page`, `addTabToFeature`. Don't load config here. |
 | `onBegin()` | `App::begin()` step 4, in install order (`App.cpp:250-260`) | LittleFS mounted (step 1), `ConfigManager::begin()` done (step 2), `WiFi.mode(WIFI_AP_STA)` done (step 3). **HTTP endpoints and WS channels are not mounted yet.** That happens after all `onBegin`s in `WebManager::begin()` (step 5, `App.cpp:265`), and `server.begin()` is the last step (`App.cpp:408`). Load config, open peripherals, subscribe to providers here. |
 | `onLoop()` | `App::loop()`, every iteration, in install order, followed by `WsManager::processAllQueues()` (`App.cpp:461-465`) | Cooperative and single-threaded on `loopTask`. **Never block** (no `delay()`, no unbounded reads). |
-| `onShutdown()` | `App::shutdown()`, in reverse order (`App.cpp:487-494`) | **Currently never runs in practice.** `App::shutdown()` is only called from `~App()`, and the restart, factory-reset, OTA and auto-update paths call `ESP.restart()` directly (`modules/restart/src/RestartService.cpp:25-28`, `modules/auto-update/src/AutoUpdateService.cpp:178`). Implement it for correctness, but don't rely on it to flush state. |
+| `onShutdown()` | `ESPRack::restartDevice(reason)`, which every built-in reboot path uses, or the `esp_restart()` shutdown hook (`App.cpp`, LIB-FIX-006) | Runs **once**, in reverse install order, on the loop task when possible, with a budget of `ESPRACK_SHUTDOWN_BUDGET_MS` (500 ms) per module, then the chip resets. Persist counters and put outputs (relays, SSRs) into a safe state here. `ESPRack::restartReason()` says why: for example, on `kRestartFactoryReset` the `/config` wipe happens *after* your hook, so don't bother saving. Never block on the network. |
 
 ### 3.2 `ModuleDescriptor` (`Module.h:81-106`)
 
@@ -281,18 +281,19 @@ updater must therefore accept partial dicts.
   no-op when the key is absent.
 - Accept the `{settings:{...}}` envelope as well, like `NTPSettings::update`
   does (`NTPSettingsService.h:152-165`).
-- Never fill absent keys with factory defaults. `OTASettings::update` does
-  this (`modules/ota/include/OTASettingsService.h:57-59`), so a partial
-  `{"enabled":false}` resets the OTA port and password.
+- Never fill absent keys with factory defaults: a Save that edits one field
+  would reset all the others. Defaults belong in the state's member
+  initialisers. The first boot and `resetToDefaults()` start from `T{}`.
+  OTA and `JsonUtils::readIP` used to get this wrong; LIB-FIX-001 fixed both.
 
-> ⚠ **The UI Save is broken today.** Since C1 (`2adff81`), `DynamicTabPanel`
-> POSTs to `tab.restPath`, which is the **GET-only** `/api/v1/<id>/form`
-> (`ui/src/components/dynamic-component/DynamicFeature.tsx:45-52`). The
-> request falls through to the `/api/*` 404 (`App.cpp:332-336`), so settings
-> tabs don't save from the browser. This is clear from the code but hasn't
-> been reproduced on hardware. A fix is pending: the UI should POST to the
-> manifest's `rest.update`. Until then, test your updater with
-> `POST /api/v1/<id>/state`.
+The UI's Save path (since LIB-FIX-001):
+
+1. A postable tab reads `/api/v1/<id>/form`.
+2. On Save it POSTs the changed keys to `/api/v1/<id>/state` (the same path
+   with `/form` replaced by `/state`).
+3. It then refetches the form.
+
+Machine clients use the same POST.
 
 **Field types matter** (`lib/ESPRack/include/FormBuilder.h:467-562`):
 
@@ -320,12 +321,18 @@ Constraints:
 
 - The form key must equal the **top-level config key** (`"pwd"` in both
   `readConfig` and `web::Secret`, as in mqtt/ap/wifi/ota).
-- The probe document is sized by **`bufferSize`**. If the form is bigger,
-  the probe overflows and secret keys after the overflow point are silently
-  missed. Size `bufferSize` for the form, not just the config file.
-- The **form GET returns secrets in plaintext** to anyone who passes the
-  feature's auth level. Never echo secrets in the state/WS reader. MQTT
-  currently does this; see the findings list in `ARCHITECTURE.md`.
+- **Discovery probe.** It grows from 2 KB to 32 KB until the whole form
+  fits. If it still doesn't fit, ConfigManager logs `log_e` and encrypts
+  *every* top-level string key of that config. A secret is never silently
+  stored in plaintext (LIB-FIX-004).
+- **Masking on the web** (automatic, `SecretFields.h`):
+  - GET `/form` and `/state` return `********`, or `""` when nothing is
+    set, to non-admins. Admins see real values.
+  - WS pushes and POST echoes are always masked.
+  - A posted value equal to the mask is dropped, so it never overwrites the
+    stored secret.
+- **Still don't emit secrets from a state/WS reader.** The masking only
+  knows the keys that appear as `web::Secret` in the form.
 
 ---
 
@@ -405,7 +412,19 @@ than ~8 KB don't fit the no-PSRAM C3's `max_alloc` and need streaming.
 | `.postable()` | The tab shows Save. It **should** POST to `rest.update` (`/state`), but it currently POSTs to the tab's `restPath` (`/form`) and gets a 404; see §4.3. |
 | `.order(n)` | Sorting, used when tabs are contributed by several modules. |
 | `.icon(name)` | Icon for the tree leaf. |
-| `.auth(...)` | **UI hint only.** The server enforces the *feature* auth level for both GET and POST, so an admin-only Settings tab on an `Authenticated` feature can still be POSTed by any non-reader user. To really protect writes, make the whole feature `adminOnly()` or split it into two features. |
+| `.auth(...)` | Tab **visibility** in the UI, and since LIB-FIX-011 also the server-side **write level** of the keys rendered in the tab, unless `.writeAuth()` overrides it. Reads use the feature's auth level. |
+| `.writeAuth(level)` / `.adminWrite()` | Explicit server-side write level for this tab's keys. |
+
+The write rule (`lib/ESPRack/include/WriteAuth.h`):
+
+- A POST `/state` or a WS `p` frame needs the **maximum** of:
+  - the feature `auth`;
+  - `WebFeature::writeAuth()`, the write floor for the whole feature;
+  - the level of every key it touches, taken from the tab(s) whose form
+    renders that key.
+- Too low gets `403 problem+json` over REST; the frame is dropped over WS.
+- The keys of wifi, ap, mqtt and ntp are admin-write: users can see those
+  pages but can't change them.
 
 To contribute a tab to an existing feature, e.g. the framework's `system`
 shell (`App.cpp:120-130`):
@@ -528,21 +547,16 @@ Rules worth knowing:
   frames are built in one shared document sized to the largest channel's
   capacity (`WsManager.h:236-238`).
 
-> ⚠️ **At most two live clients.** `processAllQueues()` calls
-> `_ws->cleanupClients(2)` (`WsManager.h:321`). In ESPAsyncWebServer
-> 3.7.10 that closes the **oldest** client whenever more than two are
-> connected. Before the single-socket change this limit applied per
-> feature; now it applies to the whole device, so a third browser tab or
-> device causes reconnect churn.
-
-> ⚠️ **WS access control is coarse today.** The upgrade requires only
-> `IS_AUTHENTICATED` (`modules/security/include/SecurityModule.h:55-58`).
-> After that, `processRx` accepts `sub` and `p` writes for **any channel**
-> without checking the feature's auth level or the operator role
-> (`WsManager.h:646-667`). A non-admin user or a `reader` token can
-> therefore read and write admin-only live features. Until this is fixed in
-> the core, don't make a feature live if its state reader or WS updater
-> exposes something only admins may see or change.
+- **Client cap.** `ESPRACK_WS_MAX_CLIENTS` concurrent clients per device
+  (default 3 on C3, 6 elsewhere; override with `-D`). Above the cap
+  `cleanupClients()` closes the oldest one (LIB-FIX-002).
+- **Access control per channel** (LIB-FIX-003/011):
+  - Each connection's level and role are resolved at connect.
+  - `sub` needs at least the feature's auth level.
+  - A `p` write additionally needs the operator role (not a `reader` token)
+    and the per-key write level (see §5.2).
+  - Denials are logged and dropped.
+  - The identity is fixed for the connection's lifetime.
 
 ---
 
@@ -617,11 +631,9 @@ web->registerPage(std::move(page));
   pointer, while `char*` and `String` are *copied*. Responses are serialized
   after your lock is released (chunked, per TCP ack), so copy anything that
   points into mutable state (template `serveLines()` / `readState()`).
-- ⚠️ **Page endpoints don't get the operator floor.** `WebPageEntry`
-  applies only `webAuthLevelToPredicate(e.auth)` (`WebPageEntry.h:38-66`),
-  so a `reader` token passes the gate on a mutating POST. Check
-  `AuthenticationPredicates::IS_OPERATOR` yourself, or use an action for
-  mutations.
+- **Mutating page endpoints get the operator floor automatically.** That
+  covers any non-GET method and any `jsonHandler`: a `reader` token gets 403
+  (LIB-FIX-003).
 - **History and series data:** register a paged series with
   `DataApi::instance().registerSeries({id, title, unit}, fill)`.
   - It's served at `GET /api/v1/data/<id>?limit&cursor` (newest first,
@@ -727,6 +739,11 @@ which peripheral or pins to use.
    `settimeofday()` on its own. Note that the NTP module's
    `configTzTime()` keeps SNTP running, and SNTP overwrites any clock that
    someone else sets (`NTPSettingsService.cpp:116-138`).
+8. **Reboot only through `ESPRack::restartDevice(reason)`**, never
+   `ESP.restart()`, and make `onShutdown()` leave the hardware safe: outputs
+   off, counters persisted, within 500 ms. A stray `esp_restart()` still
+   runs the hooks through the shutdown handler, but on whatever task called
+   it.
 
 ---
 
@@ -765,5 +782,10 @@ which peripheral or pins to use.
       `formReader` is passed with enough `bufferSize`
 - [ ] Hardware is touched only from `onBegin/onLoop`, reads are bounded,
       there's no `delay()`, and no pin is hardcoded
-- [ ] Mutating endpoints are actions or check `IS_OPERATOR`
+- [ ] `onShutdown()` puts outputs in a safe state within 500 ms; reboots
+      go through `ESPRack::restartDevice()`
+- [ ] Settings that only admins may change use `adminOnly()`/`adminWrite()`
+      tabs or `WebFeature::adminWrite()` (server-enforced)
+- [ ] Mutating endpoints are actions or WebPageSpec endpoints (both get
+      the operator floor)
 - [ ] Builds for the demo envs (C3 at least, plus your target chip)

@@ -14,6 +14,23 @@ This is an audit snapshot of `feature/ses-light-support`, dated 2026-10-13:
 - **New modules.** See [`module-guide.md`](module-guide.md) and start from
   `modules/template/`.
 
+> **Status update (2026-10-13, after this audit).** Several findings below
+> were fixed by LIB-FIX-001…011 on `feature/ses-light-support`:
+>
+> - mqtt no longer echoes its password (004);
+> - ota partial updates no longer reset the port and password (001);
+> - the filesystem purge only removes `*.partial` (007);
+> - presence and uiDyn are authenticated (005);
+> - ntp, telegram and cert-manager no longer push WS twice (009);
+> - `tokens.create` builds valid JSON (008);
+> - restart paths run `onShutdown()` (006);
+> - WS and page-endpoint authorization (003);
+> - tab-level write auth is enforced on the server (011);
+> - the root bundle and versions are fixed (010).
+>
+> The current list is [`ROADMAP.md` §0.4](../ROADMAP.md#04-known-issues).
+> Entries below are kept as audited.
+
 ## Conventions used by all modules
 
 - **Lifecycle.** A module fills `describe()` (id, version, `requires_`, `priority`) and implements `onInstall`. It can also override `onBegin`, `onLoop` and `onShutdown` (`lib/ESPRack/include/Module.h:110-132`). `Builder::build()` runs Kahn's topological sort and always picks the lowest `(priority, id)` that is ready (`lib/ESPRack/src/Builder.cpp:97-133`). `App::begin()` calls `onBegin` in the same order (`lib/ESPRack/src/App.cpp:250-260`).

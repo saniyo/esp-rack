@@ -124,7 +124,15 @@ and every `FT_*`.
 | `node32s` | 4 MB, `min_spiffs.csv` | — | ⚠ 1.875 MiB app slots, likely too small for a full build (not verified) |
 
 Measured on 2026-10-13, C6 with the demo's full module set: static RAM
-80,824 B (24.7 %), flash image 2,519,703 B.
+80,824 B (24.7 %), flash image 2,519,703 B (before LIB-FIX; about +38 KB
+of flash after it).
+
+Useful build flags for a consumer's `[env]`:
+
+| Flag | Effect |
+|---|---|
+| `-D ESPRACK_WS_MAX_CLIENTS=<n>` | Concurrent live UI clients (default 3 on C3, 6 elsewhere). |
+| `-D ESPRACK_SHUTDOWN_BUDGET_MS=<ms>` | Per-module `onShutdown()` budget before a reboot (default 500). |
 
 > **Build from PowerShell or cmd, not Git Bash/MSYS.** On a fresh toolchain
 > install, pioarduino runs ESP-IDF's `idf_tools.py`, which aborts under MSYS
@@ -413,7 +421,12 @@ consumer's `src/`, like the demo's, or as a module library.
    Then replace `icon.png`, set the `"name"` in `manifest.json`, delete
    `favicon.ico` so it's derived again, rebuild and commit
    `interface_overrides/`.
-9. Build and flash:
+9. After the first flash, run the security check against the device:
+   ```powershell
+   python ..\esp-rack\scripts\check_security.py --host <ip> --admin admin:<pwd>
+   ```
+   Add `--reader-token <jwt>` to cover the reader-role checks.
+10. Build and flash:
    ```powershell
    pio run -e <env>
    pio run -e <env> -t upload
@@ -421,7 +434,7 @@ consumer's `src/`, like the demo's, or as a module library.
    ```
    Check the boot log for every module being installed (no
    `[ESPRack] ... requires` errors) and for `[boot] post-<id>` heap lines.
-10. Check `git status`: `interface/`, `.pio/` and `build/` must not appear.
+11. Check `git status`: `interface/`, `.pio/` and `build/` must not appear.
 
 ---
 
@@ -450,10 +463,9 @@ These matter if you copy from the demo.
 - The README describes an "RGB-light controller" with a constructor
   `(14, 27, 26)`, `.core()`, `ESPRACK_*` flags and files that don't exist.
   The code is a widget test bench.
-- Released mode (`lib_deps` = the esp-rack git URL) is broken today:
-  - The root `esp-rack/library.json` (v0.1.8) leaves the
-    cert-manager/discovery/mothership/wireguard modules out of its
-    `srcFilter`.
-  - It declares a different AsyncTCP owner.
-  - Versions disagree: 0.1.8, `lib/ESPRack/library.json` 0.3.0,
-    `Version.h` 0.2.5.
+- Released mode (`lib_deps` = the esp-rack git URL):
+  - The root bundle now includes every module and declares the tested
+    third-party set (ESP32Async AsyncTCP/ESPAsyncWebServer, ESP_SSLClient,
+    …), at version 0.3.0 (LIB-FIX-010).
+  - It hasn't been build-tested in that mode yet.
+  - `scripts/check_versions.py` guards against version drift.
