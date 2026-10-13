@@ -239,6 +239,14 @@ class WsManager {
   // its socket until it reconnects (ping eviction / page reload).
   void setSecurityManager(SecurityManager* sm) { _sm = sm; }
 
+  // Per-key write levels for a channel (LIB-FIX-011): a "p" frame needs
+  // fn(payload) instead of the channel's level. Set by WebFeatureEntry.
+  void setChannelWriteLevel(const String& channel,
+                            std::function<WebAuthLevel(JsonObjectConst)> fn) {
+    auto it = _channels.find(channel);
+    if (it != _channels.end() && it->second) it->second->writeLevel = std::move(fn);
+  }
+
   // `path` is the CHANNEL name (feature id). All channels share one socket.
   template <typename TState>
   void* addEndpoint(const String& path,
@@ -454,6 +462,8 @@ class WsManager {
   struct ChannelBase {
     String name;                              // channel id (== feature id)
     WebAuthLevel level{WebAuthLevel::Authenticated};  // the feature's auth level
+    // Optional per-key write level (LIB-FIX-011); unset = `level`.
+    std::function<WebAuthLevel(JsonObjectConst)> writeLevel;
     size_t jsonCapacity{MWS_DEFAULT_JSON_CAP};
     uint32_t droppedBroadcasts{0};            // skipped because no subscriber was ready
 
@@ -720,7 +730,10 @@ class WsManager {
             auto cit = _clients.find(it->cid);
             if (cit != _clients.end()) cit->second.subs.erase(ch);
           } else if (base && root["p"].is<JsonObject>() &&
-                     (!known || !canWrite || !levelAtLeast(level, base->level))) {
+                     (!known || !canWrite ||
+                      !levelAtLeast(level, base->writeLevel
+                                               ? base->writeLevel(root["p"].as<JsonObjectConst>())
+                                               : base->level))) {
             log_w("[ws] write denied: cid=%u ch=%s", (unsigned)it->cid, ch.c_str());
           } else {
             // State write from the client.

@@ -122,6 +122,12 @@ class WebTab {
   WebTab& authenticated()         { _t.auth = WebAuthLevel::Authenticated; return *this; }
   WebTab& adminOnly()             { _t.auth = WebAuthLevel::Admin; return *this; }
 
+  // Server-enforced write level for this tab's keys (default: the tab's
+  // auth). E.g. a tab everyone may SEE but only admins may CHANGE:
+  //   WebTab("settings").authenticated().adminWrite()
+  WebTab& writeAuth(WebAuthLevel a) { _t.hasWriteAuth = true; _t.writeAuth = a; return *this; }
+  WebTab& adminWrite()              { return writeAuth(WebAuthLevel::Admin); }
+
   WebTabSpec build() const   { return _t; }
   operator WebTabSpec() const { return _t; }
 
@@ -190,6 +196,10 @@ class WebFeature {
   WebFeature& publicAccess()       { _spec.auth = WebAuthLevel::Public; return *this; }
   WebFeature& authenticated()      { _spec.auth = WebAuthLevel::Authenticated; return *this; }
   WebFeature& adminOnly()          { _spec.auth = WebAuthLevel::Admin; return *this; }
+
+  // Floor for every write of this feature (server-enforced; default: auth).
+  WebFeature& writeAuth(WebAuthLevel a) { _spec.hasWriteAuth = true; _spec.writeAuth = a; return *this; }
+  WebFeature& adminWrite()              { return writeAuth(WebAuthLevel::Admin); }
 
   // DEPRECATED (C1): WebFeatureEntry now DERIVES typed-feature paths from the
   // id (/api/v1/<id>/form, /api/v1/<id>/state) and ignores restRead/restUpdate.

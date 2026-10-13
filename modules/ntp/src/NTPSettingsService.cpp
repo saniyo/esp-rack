@@ -45,6 +45,10 @@ void NTPSettingsService::registerManifest(WebManager* web) {
   spec.menu.order = 200;
   spec.menu.auth  = WebAuthLevel::Authenticated;
   spec.auth       = WebAuthLevel::Authenticated;
+  // Visible to every user, changeable only by admins - enforced server-side
+  // on POST /state and WS writes (LIB-FIX-011).
+  spec.hasWriteAuth = true;
+  spec.writeAuth    = WebAuthLevel::Admin;
   // restRead/restUpdate are no longer set: the registry derives the typed
   // feature's mount paths from spec.id — /api/v1/ntp/form (GET) and
   // /api/v1/ntp/state (GET+POST). WS path stays explicit (/ws/*).

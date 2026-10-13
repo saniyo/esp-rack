@@ -140,6 +140,7 @@ void APSettingsService::registerManifest(WebManager* web) {
       .title("Access Point")
       .component(WebComponent::DynamicSettings)
       .authenticated()
+      .adminWrite()   // changes need admin - server-enforced (LIB-FIX-011)
       .menu(WebMenu("Access Point")
                 .icon(WebIcon::SettingsInputAntenna)
                 .order(150)

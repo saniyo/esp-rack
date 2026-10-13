@@ -145,14 +145,16 @@ void TemplateService::registerManifest(WebManager* web) {
           .title("UART monitor")
           .version("0.1.0")
           .component(WebComponent::DynamicSettings)
-          .authenticated()   // the ONLY server-enforced gate for form + state
+          .authenticated()   // read gate for form + state (and the write floor)
           .menu(WebMenu("UART monitor").icon("Cable").order(60))
           // Any non-empty value marks the feature live; the WS channel is
           // the feature id, multiplexed over the single socket.
           .ws("/ws/template")
           .tab(WebTab("status", "Status").icon("Monitor").live())
-          // Tab auth is a UI hint only — the state POST is gated by the
-          // feature auth above plus the operator (non-reader) role floor.
+          // adminOnly() hides the tab from non-admins AND (LIB-FIX-011) makes
+          // its keys admin-write on the server: POST /state and WS writes
+          // touching them need an admin. Use .writeAuth()/.adminWrite() to
+          // set the write level independently of visibility.
           .tab(WebTab("settings", "Settings").icon("Tune").postable().adminOnly())
           .build(),
       this,

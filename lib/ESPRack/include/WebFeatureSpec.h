@@ -78,6 +78,11 @@ struct WebTabSpec {
   bool postable = false;  // tab can POST updates to restPath
   bool live = false;      // tab subscribes to feature.wsPath for push updates
   WebAuthLevel auth = WebAuthLevel::Authenticated;
+  // Server-side WRITE gate for the keys rendered in this tab (LIB-FIX-011):
+  // POST /state and WS writes touching such a key need at least this level.
+  // Unset = the tab's `auth`, so an admin-only Settings tab is admin-write.
+  bool hasWriteAuth = false;
+  WebAuthLevel writeAuth = WebAuthLevel::Authenticated;
   // Sort key for tab placement within a feature (smaller = earlier).
   // For top-level features the tab vector is built directly inside
   // registerManifest, so insertion order matches code order — `order`
@@ -172,6 +177,11 @@ struct WebFeatureSpec {
   const char* component = "DynamicSettings";
   WebMenuMeta menu;
   WebAuthLevel auth = WebAuthLevel::Authenticated;
+  // Floor for EVERY write of a typed feature (LIB-FIX-011): POST /state and
+  // WS writes need max(auth, writeAuth, the touched keys' tab levels).
+  // Unset = `auth`.
+  bool hasWriteAuth = false;
+  WebAuthLevel writeAuth = WebAuthLevel::Authenticated;
   const char* routeTemplate = nullptr;
   // DEPRECATED for typed features (C1): WebFeatureEntry now DERIVES its mount
   // paths from `id` — form at /api/v1/<id>/form, state at /api/v1/<id>/state —

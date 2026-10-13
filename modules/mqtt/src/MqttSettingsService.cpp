@@ -206,6 +206,10 @@ void MqttSettingsService::registerManifest(WebManager* web) {
   spec.menu.order = 350;
   spec.menu.auth  = WebAuthLevel::Authenticated;
   spec.auth       = WebAuthLevel::Authenticated;
+  // Visible to every user, changeable only by admins - enforced server-side
+  // on POST /state and WS writes (LIB-FIX-011).
+  spec.hasWriteAuth = true;
+  spec.writeAuth    = WebAuthLevel::Admin;
   // restRead/restUpdate omitted: registry derives /api/v1/mqtt/form + /api/v1/mqtt/state from spec.id.
   spec.wsPath     = MQTT_WS_PATH;
 

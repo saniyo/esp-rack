@@ -408,6 +408,10 @@ void WiFiSettingsService::registerManifest(WebManager* web) {
   spec.menu.order = 140;
   spec.menu.auth  = WebAuthLevel::Authenticated;
   spec.auth       = WebAuthLevel::Authenticated;
+  // Visible to every user, changeable only by admins - enforced server-side
+  // on POST /state and WS writes (LIB-FIX-011).
+  spec.hasWriteAuth = true;
+  spec.writeAuth    = WebAuthLevel::Admin;
   // restRead/restUpdate omitted — registry derives /api/v1/wifi/form and
   // /api/v1/wifi/state from the feature id (C1, api-v1).
 

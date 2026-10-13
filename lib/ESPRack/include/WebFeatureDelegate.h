@@ -10,6 +10,7 @@
 
 #include <IWebFeatureEntry.h>
 #include <SecretFields.h>
+#include <WriteAuth.h>
 #include <WebFeatureSpec.h>
 
 // Typed aggregator for a single StatefulService<T>: REST (GET/POST) + optional
@@ -65,10 +66,16 @@ class WebFeatureEntry : public IWebFeatureEntry {
     //  * auto-sizes the REST buffer when the feature opted in
     //    (WEBFEATURE_BUFFER_AUTO); the state endpoint inherits it (C1);
     //  * collects the feature's secret keys (web::Secret fields) for the
-    //    masking below (LIB-FIX-004).
+    //    masking below (LIB-FIX-004);
+    //  * maps every value key to its tab's write level (LIB-FIX-011).
     const size_t measured = probeForm();
     if (_restBufferSize == WEBFEATURE_BUFFER_AUTO) {
       _restBufferSize = measured;
+    }
+    if (!_writeAuthBuilt) {
+      // Probe failed: no key map — WriteAuthMap fails closed (strictest tab).
+      _writeAuth.build(JsonObjectConst(), _spec.tabs, _spec.auth, featureWriteAuth());
+      _writeAuthBuilt = true;
     }
 
     // Secret-aware faces (LIB-FIX-004). Readers: secrets masked (always for
@@ -122,8 +129,7 @@ class WebFeatureEntry : public IWebFeatureEntry {
         return predicate(a) && AuthenticationPredicates::IS_OPERATOR(a);
       };
       mountGet(server, sm, predicate, _statePath, /*formFace=*/false);
-      _statePost.reset(new HttpPostEndpoint<T>(_maskedEcho, _postUpdater, _service, server,
-                                               _statePath, sm, writePredicate, _restBufferSize));
+      mountStatePost(server, sm, writePredicate);
     }
 
     // Heap-allocate the Binding so its address never changes. Its ctor registers
@@ -139,6 +145,12 @@ class WebFeatureEntry : public IWebFeatureEntry {
       _wsBinding.reset(new WsManager::Binding<T>(_wsManager, _spec.id, _wsBufferSize,
                                                  _service, _wsOut, _wsIn, true,
                                                  _spec.auth));
+      // Per-key write levels (LIB-FIX-011) for WS "p" frames.
+      if (_writeAuth.elevated()) {
+        _wsManager->setChannelWriteLevel(_spec.id, [this](JsonObjectConst p) {
+          return _writeAuth.required(p);
+        });
+      }
     }
 
     _mounted = true;
@@ -326,6 +338,54 @@ class WebFeatureEntry : public IWebFeatureEntry {
   const WebFeatureSpec& spec() const { return _spec; }
 
  private:
+  WebAuthLevel featureWriteAuth() const {
+    return _spec.hasWriteAuth ? _spec.writeAuth : _spec.auth;
+  }
+
+  // POST /state: feature level + operator floor (predicate), then the
+  // per-key write levels (LIB-FIX-011), then the update (masks stripped),
+  // the masked echo, and the update handlers - the HttpPostEndpoint flow.
+  void mountStatePost(AsyncWebServer* server, SecurityManager* sm,
+                      AuthenticationPredicate writePredicate) {
+    ArJsonRequestHandlerFunction fn = [this, sm](AsyncWebServerRequest* r, JsonVariant& json) {
+      if (!json.is<JsonObject>()) {
+        sendProblem(r, 400, "bad_request", "JSON object expected");
+        return;
+      }
+      JsonObject in = json.as<JsonObject>();
+      if (_writeAuth.elevated() && sm) {
+        const WebAuthLevel need = _writeAuth.required(in);
+        Authentication a = sm->authenticateRequest(r);
+        const WebAuthLevel have = !a.authenticated ? WebAuthLevel::Public
+                                : (a.user && a.user->admin) ? WebAuthLevel::Admin
+                                : WebAuthLevel::Authenticated;
+        if (!WriteAuthMap::atLeast(have, need)) {
+          sendProblem(r, 403, "forbidden", "These settings need a higher access level to change");
+          return;
+        }
+      }
+      const StateUpdateResult outcome = _service->updateWithoutPropagation(in, _postUpdater);
+      if (outcome == StateUpdateResult::ERROR) {
+        sendProblem(r, 400, "update_rejected", "The update was rejected");
+        return;
+      }
+      // Echo (masked). On a 503 the client refetches; handlers ride only on a
+      // delivered response, as in HttpPostEndpoint.
+      if (!sendAdaptiveJson(r, [this](JsonObject& o) { _service->read(o, _maskedEcho); },
+                            _restBufferSize ? _restBufferSize : DEFAULT_BUFFER_SIZE)) {
+        return;
+      }
+      if (outcome == StateUpdateResult::CHANGED) {
+        _service->callUpdateHandlers(HTTP_ENDPOINT_ORIGIN_ID);
+      }
+    };
+    _postHandler.reset(new AsyncCallbackJsonWebHandler(
+        _statePath, sm ? sm->wrapCallback(fn, writePredicate) : fn,
+        _restBufferSize ? _restBufferSize : DEFAULT_BUFFER_SIZE));
+    _postHandler->setMethod(HTTP_POST);
+    server->addHandler(_postHandler.get());
+  }
+
   // The reader behind the machine /state face: the distinct flat reader when
   // the feature registered one, else the form reader (interim).
   const JsonStateReader<T>& stateReaderRaw() const {
@@ -372,6 +432,12 @@ class WebFeatureEntry : public IWebFeatureEntry {
     {
       JsonObjectConst rootC = root;
       SecretFields::collectFromForm(rootC, _secretKeys);
+      // An overflowed probe has a truncated tree: leave the key map unbuilt
+      // so registerEndpoints fails it closed.
+      if (!probe.overflowed()) {
+        _writeAuth.build(rootC, _spec.tabs, _spec.auth, featureWriteAuth());
+        _writeAuthBuilt = true;
+      }
     }
     const size_t used = probe.memoryUsage();
     if (used == 0) return kFallback;
@@ -427,7 +493,10 @@ class WebFeatureEntry : public IWebFeatureEntry {
   JsonStateReader<T>  _wsOut;        // WS pushes / snapshots
   JsonStateUpdater<T> _wsIn;         // WS "p" writes
 
-  std::unique_ptr<HttpPostEndpoint<T>> _statePost;    // state POST (operator floor)
+  // Server-side write levels per key (LIB-FIX-011), built by probeForm().
+  WriteAuthMap _writeAuth;
+  bool _writeAuthBuilt{false};
+  std::unique_ptr<AsyncCallbackJsonWebHandler> _postHandler;  // state POST
   std::unique_ptr<WsManager::Binding<T>> _wsBinding;
 
   bool _mounted{false};
