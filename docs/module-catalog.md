@@ -415,6 +415,12 @@ This is an audit snapshot of `feature/ses-light-support`, dated 2026-10-13:
 - **Public API:**
   - `SecuritySettingsService`, which implements `SecurityManager`: `authenticate`, `authenticateRequest`, `generateJWT`, `filterRequest`, `wrapRequest`, `wrapCallback`, `mintMachineToken`, `revokeMachineToken` (`modules/security/include/SecuritySettingsService.h:126-146`).
   - `SecurityModule::service()` (`modules/security/include/SecurityModule.h:76`).
+  - `usesFactoryCredentials()` (SES-LIB-022, on every `SecurityManager`): true while a
+    factory login (`FACTORY_ADMIN_*` / `FACTORY_GUEST_*`) still works. It's a cached
+    atomic, set by the updater when a password changes (compared before hashing) and
+    persisted per user as `"factory"`, so it costs no PBKDF2 and no lock. It reads
+    true until the config is loaded. Old files are checked once by hashing in
+    `begin()` and then saved. `NullSecurityManager` and `FT_SECURITY=0` return false.
 - **Web/REST/WS:**
   - `POST /api/v1/auth/token` (body `{username,pwd}`, at most 256 B) and `GET /api/v1/auth/verify`. Both are mounted directly and also as proxy endpoints (`modules/security/include/AuthenticationService.h:11-14`; `modules/security/src/AuthenticationService.cpp:13-44`).
   - Typed features, all Admin:
