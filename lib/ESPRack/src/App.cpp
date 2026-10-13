@@ -377,7 +377,7 @@ void App::begin() {
   webManager_.begin();
   // The manifest carries device.tz (SES-LIB-015): a later timezone change
   // re-bakes it (new ETag). TzChanged fires on the loop task, real changes only.
-  TimeSync::instance().subscribe([this](TimeEvent e, const TimeStatus&, int32_t) {
+  TimeSync::instance().subscribe([this](TimeEvent e, const TimeStatus&, TimeStep) {
     if (e == TimeEvent::TzChanged) webManager_.refreshManifestCache();
   });
   HeapMonitor::logSnapshot("boot:webmanager-begun");

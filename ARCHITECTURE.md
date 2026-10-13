@@ -267,7 +267,9 @@ and `App::loop()` ticks it first.
   "Set time" on the NTP status tab.
 - **Events.** `subscribe()` listeners get `BecameValid`, `BecameInvalid`,
   `Stepped` (valid before and after), `SourceChanged`, `Stale`, `Disputed`,
-  `TzChanged`, always on the loop task.
+  `TzChanged`, always on the loop task. The step comes as
+  `TimeStep{int64_t ms}` (SES-LIB-027): a date a year off is corrected in one
+  step, and a listener still taking `int32_t` fails to compile.
 
 ### 2.8 Hardware (`hw/`, LIB-FEAT-001)
 

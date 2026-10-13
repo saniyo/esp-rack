@@ -51,17 +51,25 @@ namespace ESPRack {
 
 enum class TimeEvent : uint8_t { BecameValid, BecameInvalid, Stepped, SourceChanged, Stale, Disputed, TzChanged };
 
+// A clock step in ms, as listeners get it (SES-LIB-027). 64-bit: a wrong
+// date a month or a year off is corrected in one step. A struct, so a
+// listener still declared with `int32_t stepMs` fails to compile instead of
+// silently wrapping a step longer than 24.8 days.
+struct TimeStep {
+  int64_t ms = 0;
+};
+
 struct TimeStatus {
   bool valid, stale, disputed;
   TimeSource source;          // the authority, else the source of the last accepted sample
   int64_t lastSyncUtcMs;      // UTC of the last accepted sample (0 = none)
   uint32_t lastSyncAgeS, uncertaintyMs;  // UINT32_MAX = never / unknown
-  int32_t lastStepMs;
+  int64_t lastStepMs;
   uint16_t steps, rejects;
   uint8_t clockEpoch;         // +1 on every BecameValid
   TimeSource lastRejectSrc;
   SubmitResult lastReject;
-  int32_t offsetMs[kTimeSourceCount];
+  int64_t offsetMs[kTimeSourceCount];
   uint32_t seenAgeS[kTimeSourceCount];  // since the last sample of any verdict; UINT32_MAX = never
   uint8_t registeredMask;     // bit = 1 << TimeSource
 };
@@ -106,7 +114,9 @@ class TimeSync {
   void getTimezone(char* posix, size_t posixLen, char* iana, size_t ianaLen) const;
   uint32_t tzRevision() const;
 
-  using Listener = std::function<void(TimeEvent, const TimeStatus&, int32_t stepMs)>;
+  // step: the Stepped amount (also with BecameValid when the clock was
+  // stepped while invalid), else 0.
+  using Listener = std::function<void(TimeEvent, const TimeStatus&, TimeStep step)>;
   // Loop task only (e.g. in onBegin); a listener may unsubscribe itself.
   int8_t subscribe(Listener l);  // -1 when full
   void unsubscribe(int8_t id);
@@ -124,8 +134,8 @@ class TimeSync {
   TimeSync& operator=(const TimeSync&) = delete;
 
   SubmitResult submitInternal(const TimeSample& s);
-  void emit(TimeEvent e, int32_t stepMs);
-  void emitWith(TimeEvent e, const TimeStatus& st, int32_t stepMs);
+  void emit(TimeEvent e, int64_t stepMs);
+  void emitWith(TimeEvent e, const TimeStatus& st, int64_t stepMs);
   void fillStatus(TimeStatus& st, const TimeArbiter::Now& now) const;  // caller holds the lock
   void saveHold(int64_t nowUtcMs);
   void restoreHoldAtBoot(const TimeArbiter::Now& now);
@@ -144,7 +154,7 @@ class TimeSync {
   TimeSource _holdSrc = TimeSource::None;     // what originally synced the held clock
   uint32_t _lastAccMs = 0;
   int64_t _lastSyncUtcMs = 0;
-  int32_t _lastStepMs = 0;
+  int64_t _lastStepMs = 0;
   uint16_t _steps = 0, _rejects = 0;
   uint8_t _clockEpoch = 0;
   TimeSource _lastRejectSrc = TimeSource::None;
@@ -157,7 +167,7 @@ class TimeSync {
   bool _prevValid = false, _prevStale = true, _prevDisputed = false;
   bool _everValid = false;  // valid at least once this boot (clockSane)
   TimeSource _prevSource = TimeSource::None;
-  int32_t _pendingStepInfo = 0;  // step reported with the next BecameValid
+  int64_t _pendingStepInfo = 0;  // step reported with the next BecameValid
   bool _hasBase = false;
   int64_t _expectedBase = 0;  // sysUtcMs - monoMs after our last step
   uint64_t _holdSavedMono = 0;

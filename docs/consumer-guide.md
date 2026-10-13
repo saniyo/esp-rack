@@ -427,7 +427,10 @@ consumer's `src/`, like the demo's, or as a module library.
   `TimeSync::instance().getTimezone(...)`; `tzRevision()` changes when it does.
 - Before trusting `time(nullptr)` for anything that matters (schedules,
   expiry), check `TimeSync::instance().isValid()` (or `clockSane()`), and
-  `subscribe()` to clock events if the app must react to steps.
+  `subscribe()` to clock events if the app must react to steps. The step is
+  a `TimeStep` (`step.ms`, int64, SES-LIB-027), so a correction of months
+  arrives whole:
+  `subscribe([](TimeEvent e, const TimeStatus& st, TimeStep step) { ... })`.
 - Without network time an admin can set the clock on the NTP status tab
   ("Set time") or with `POST /api/v1/actions/system.setTime?epoch=<UTC s>`.
 

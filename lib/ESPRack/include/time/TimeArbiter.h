@@ -74,7 +74,7 @@ class TimeArbiter {
     SubmitResult result;
     bool stepClock;   // caller must set the clock to setUtcMs
     int64_t setUtcMs;
-    int32_t offsetMs;  // applied - sysUtc (clamped to int32)
+    int64_t offsetMs;  // applied - sysUtc
     bool wasValid;     // clock validity BEFORE this sample (Stepped vs BecameValid)
   };
 
@@ -90,7 +90,7 @@ class TimeArbiter {
   // SNTP (or another external agent) already stepped the clock by
   // observedStepMs; `now` is AFTER the step. Implausible -> rejected and the
   // source is not refreshed.
-  Verdict externalSync(TimeSource, const Now&, int32_t observedStepMs, bool plausible);
+  Verdict externalSync(TimeSource, const Now&, int64_t observedStepMs, bool plausible);
 
   // At boot: the system clock survived (RTC domain / persisted) — trust it as
   // RtcHold with acc + drift since lastSyncUtcMs. `last` is the source that
@@ -103,7 +103,7 @@ class TimeArbiter {
   bool stale(const Now&) const;
   bool disputed() const { return _disputed; }
   TimeSource authority(const Now&) const;
-  int32_t offsetMs(TimeSource) const;
+  int64_t offsetMs(TimeSource) const;
   const TimeArbiterPolicy& policy() const { return _p; }
   // Replaces the policy; accepted samples, holds and pending sets are kept.
   void setPolicy(const TimeArbiterPolicy& p) { _p = p; }
@@ -115,7 +115,7 @@ class TimeArbiter {
     uint64_t baseMono = 0;     // when that sample was taken
     int64_t pendBase = 0;      // big-jump confirmation
     uint64_t pendFirstMono = 0;
-    int32_t offset = 0;
+    int64_t offset = 0;
     uint8_t pendCount = 0;
     bool accepted = false;
     bool hasBase = false;

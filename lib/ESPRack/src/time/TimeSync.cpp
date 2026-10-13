@@ -69,9 +69,6 @@ inline void setSysUtcMs(int64_t ms) {
   settimeofday(&tv, nullptr);
 }
 
-inline int32_t clamp32(int64_t v) {
-  return v > INT32_MAX ? INT32_MAX : v < INT32_MIN ? INT32_MIN : static_cast<int32_t>(v);
-}
 
 inline bool accepted(SubmitResult r) { return r == SubmitResult::Applied || r == SubmitResult::Confirmed; }
 
@@ -269,7 +266,7 @@ SubmitResult TimeSync::submitInternal(const TimeSample& s) {
     setSysUtcMs(v.setUtcMs + static_cast<int64_t>(monoMs() - now.monoMs));
     _expectedBase = sysUtcMs() - static_cast<int64_t>(monoMs());
     _hasBase = true;
-    log_i("[time] %s stepped the clock by %ld ms", timeSourceName(s.src), (long)v.offsetMs);
+    log_i("[time] %s stepped the clock by %lld ms", timeSourceName(s.src), (long long)v.offsetMs);
     // Stepped only for listeners that have seen the clock valid (_prevValid);
     // otherwise the step travels with the next loop's BecameValid.
     if (_prevValid && isValid()) {
@@ -278,10 +275,10 @@ SubmitResult TimeSync::submitInternal(const TimeSample& s) {
       _pendingStepInfo = v.offsetMs;
     }
   } else if (v.result == SubmitResult::RejectedOutranked) {
-    log_d("[time] %s sample outranked (offset %ld ms)", timeSourceName(s.src), (long)v.offsetMs);
+    log_d("[time] %s sample outranked (offset %lld ms)", timeSourceName(s.src), (long long)v.offsetMs);
   } else if (!accepted(v.result) && v.result != SubmitResult::Pending) {
-    log_w("[time] %s sample rejected: %s (offset %ld ms)", timeSourceName(s.src), submitResultName(v.result),
-          (long)v.offsetMs);
+    log_w("[time] %s sample rejected: %s (offset %lld ms)", timeSourceName(s.src), submitResultName(v.result),
+          (long long)v.offsetMs);
   }
   if (accepted(v.result)) saveHold(sysUtcMs());
   return v.result;
@@ -320,11 +317,11 @@ void TimeSync::loop() {
   // 1. Someone else stepped the clock (settimeofday outside TimeSync).
   const int64_t base = sys - static_cast<int64_t>(mono);
   const bool unexplained = _hasBase && llabs(base - _expectedBase) > kUnexplainedStepMs;
-  const int32_t unexplainedMs = unexplained ? clamp32(base - _expectedBase) : 0;
+  const int64_t unexplainedMs = unexplained ? base - _expectedBase : 0;
   _expectedBase = base;  // before the listeners: a step they make updates it again
   _hasBase = true;
   if (unexplained) {
-    log_w("[time] clock stepped by %ld ms outside TimeSync", (long)unexplainedMs);
+    log_w("[time] clock stepped by %lld ms outside TimeSync", (long long)unexplainedMs);
     if (_prevValid) emit(TimeEvent::Stepped, unexplainedMs);
   }
 
@@ -403,7 +400,7 @@ void TimeSync::loop() {
   if (st.valid && now.monoMs - _holdSavedMono >= kHoldRefreshMs) saveHold(now.sysUtcMs);
 }
 
-void TimeSync::emit(TimeEvent e, int32_t stepMs) {
+void TimeSync::emit(TimeEvent e, int64_t stepMs) {
   const TimeArbiter::Now now{sysUtcMs(), monoMs()};
   TimeStatus st;
   portENTER_CRITICAL(&s_mux);
@@ -412,11 +409,11 @@ void TimeSync::emit(TimeEvent e, int32_t stepMs) {
   emitWith(e, st, stepMs);
 }
 
-void TimeSync::emitWith(TimeEvent e, const TimeStatus& st, int32_t stepMs) {
+void TimeSync::emitWith(TimeEvent e, const TimeStatus& st, int64_t stepMs) {
   for (auto& l : _listeners) {
     if (!l) continue;
     const Listener f = l;  // a listener may unsubscribe (destroy its slot) while running
-    f(e, st, stepMs);
+    f(e, st, TimeStep{stepMs});
   }
 }
 

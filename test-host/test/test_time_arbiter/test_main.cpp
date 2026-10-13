@@ -41,7 +41,7 @@ static void test_initial_state(void) {
   TEST_ASSERT_TRUE(a.stale(now(1000)));
   TEST_ASSERT_FALSE(a.disputed());
   ASSERT_SRC(None, a.authority(now(1000)));
-  TEST_ASSERT_EQUAL_INT32(0, a.offsetMs(TimeSource::Gps));
+  TEST_ASSERT_EQUAL_INT64(0, a.offsetMs(TimeSource::Gps));
 }
 
 static void test_implausible(void) {
@@ -55,7 +55,7 @@ static void test_implausible(void) {
   v = a.submit(smp(TimeSource::None, T0, 0), Now{0, 0});
   ASSERT_RES(RejectedImplausible, v);
   TEST_ASSERT_FALSE(a.valid(Now{0, 0}));
-  TEST_ASSERT_EQUAL_INT32(0, a.offsetMs(TimeSource::Gps));  // implausible: offset not recorded
+  TEST_ASSERT_EQUAL_INT64(0, a.offsetMs(TimeSource::Gps));  // implausible: offset not recorded
   ASSERT_SRC(None, a.authority(Now{0, 0}));
 
   TimeArbiter b;  // both bounds inclusive/exclusive as documented
@@ -72,12 +72,12 @@ static void test_first_sample_mono_compensated(void) {
   TEST_ASSERT_TRUE(v.stepClock);
   TEST_ASSERT_EQUAL_INT64(T0 + 1250, v.setUtcMs);
   TEST_ASSERT_FALSE(v.wasValid);
-  TEST_ASSERT_EQUAL_INT32(2147483647, v.offsetMs);  // clamped
+  TEST_ASSERT_EQUAL_INT64(T0 + 1250, v.offsetMs);  // from 1970: exact (SES-LIB-027), no clamp
   TEST_ASSERT_TRUE(a.valid(now(1250)));
   TEST_ASSERT_EQUAL_UINT32(80, a.uncertaintyMs(now(1250)));
   ASSERT_SRC(Gps, a.authority(now(1250)));
   TEST_ASSERT_FALSE(a.stale(now(1250)));
-  TEST_ASSERT_EQUAL_INT32(2147483647, a.offsetMs(TimeSource::Gps));
+  TEST_ASSERT_EQUAL_INT64(T0 + 1250, a.offsetMs(TimeSource::Gps));
 }
 
 static void test_step_thresholds(void) {
@@ -92,7 +92,7 @@ static void test_step_thresholds(void) {
   ASSERT_RES(Applied, v);
   TEST_ASSERT_TRUE(v.stepClock);
   TEST_ASSERT_EQUAL_INT64(T0 + 4000, v.setUtcMs);
-  TEST_ASSERT_EQUAL_INT32(1000, v.offsetMs);
+  TEST_ASSERT_EQUAL_INT64(1000, v.offsetMs);
   ASSERT_RES(Applied, at(g, TimeSource::Gps, 4000, -1000));
 
   TimeArbiter r;  // ExtRtc: 1500 ms
@@ -124,10 +124,10 @@ static void test_rank_outranked_offset_recorded(void) {
   ASSERT_RES(RejectedOutranked, v);
   TEST_ASSERT_FALSE(v.stepClock);
   TEST_ASSERT_TRUE(v.wasValid);
-  TEST_ASSERT_EQUAL_INT32(3000, v.offsetMs);
-  TEST_ASSERT_EQUAL_INT32(3000, a.offsetMs(TimeSource::Gps));
+  TEST_ASSERT_EQUAL_INT64(3000, v.offsetMs);
+  TEST_ASSERT_EQUAL_INT64(3000, a.offsetMs(TimeSource::Gps));
   ASSERT_RES(RejectedOutranked, at(a, TimeSource::ExtRtc, 1000, -2000));
-  TEST_ASSERT_EQUAL_INT32(-2000, a.offsetMs(TimeSource::ExtRtc));
+  TEST_ASSERT_EQUAL_INT64(-2000, a.offsetMs(TimeSource::ExtRtc));
   ASSERT_RES(RejectedOutranked, at(a, TimeSource::Manual, 1000, 5000));
   ASSERT_RES(RejectedOutranked, at(a, TimeSource::Manual, 1000, 5000, OP));  // NTP authority
   ASSERT_RES(Applied, at(a, TimeSource::Ntp, 2000, 10));
@@ -220,8 +220,8 @@ static void test_big_jump_confirm(void) {
   ASSERT_RES(Pending, v);
   TEST_ASSERT_FALSE(v.stepClock);
   TEST_ASSERT_TRUE(v.wasValid);
-  TEST_ASSERT_EQUAL_INT32((int32_t)J, v.offsetMs);
-  TEST_ASSERT_EQUAL_INT32((int32_t)J, a.offsetMs(TimeSource::Gps));
+  TEST_ASSERT_EQUAL_INT64(J, v.offsetMs);
+  TEST_ASSERT_EQUAL_INT64(J, a.offsetMs(TimeSource::Gps));
   ASSERT_RES(Pending, at(a, TimeSource::Gps, 20000, J));
   ASSERT_RES(Pending, at(a, TimeSource::Gps, 30000, J));  // 3 samples, spread 20 s
   v = at(a, TimeSource::Gps, 40000, J);                    // spread 30 s
@@ -329,7 +329,7 @@ static void test_dispute(void) {
   const Verdict v = a.externalSync(TimeSource::Ntp, Now{T0 + 3000 + 400000, 3000}, 400000, true);
   ASSERT_RES(Applied, v);
   TEST_ASSERT_FALSE(v.stepClock);
-  TEST_ASSERT_EQUAL_INT32(400000, v.offsetMs);
+  TEST_ASSERT_EQUAL_INT64(400000, v.offsetMs);
   TEST_ASSERT_TRUE(v.wasValid);
   TEST_ASSERT_TRUE(a.disputed());
   ASSERT_SRC(Ntp, a.authority(now(3000)));
@@ -361,6 +361,44 @@ static void test_dispute_requires_gps_rtc_agreement(void) {
   TEST_ASSERT_FALSE(b.disputed());
 }
 
+// SES-LIB-027: steps beyond int32 ms (24.8 days) come through exactly.
+static constexpr int64_t kDay = 86400000LL;
+
+static void test_step_int64(void) {
+  TimeArbiter a;
+  prime(a, TimeSource::Ntp, 1000);
+  // the clock was set 40 days back by hand; NTP brings it forward in one step
+  Verdict v = a.submit(smp(TimeSource::Ntp, T0 + 2000, 2000), Now{T0 + 2000 - 40 * kDay, 2000});
+  ASSERT_RES(Applied, v);
+  TEST_ASSERT_TRUE(v.stepClock);
+  TEST_ASSERT_TRUE(v.wasValid);
+  TEST_ASSERT_EQUAL_INT64(40 * kDay, v.offsetMs);
+  TEST_ASSERT_EQUAL_INT64(T0 + 2000, v.setUtcMs);
+  TEST_ASSERT_EQUAL_INT64(40 * kDay, a.offsetMs(TimeSource::Ntp));
+  // ... and 400 days ahead: back in one step
+  v = a.submit(smp(TimeSource::Ntp, T0 + 3000, 3000), Now{T0 + 3000 + 400 * kDay, 3000});
+  ASSERT_RES(Applied, v);
+  TEST_ASSERT_EQUAL_INT64(-400 * kDay, v.offsetMs);
+  TEST_ASSERT_EQUAL_INT64(-400 * kDay, a.offsetMs(TimeSource::Ntp));
+}
+
+static void test_external_step_int64(void) {
+  TimeArbiter a;
+  Verdict v = a.externalSync(TimeSource::Ntp, Now{T0, 5000}, 40 * kDay, true);
+  ASSERT_RES(Applied, v);
+  TEST_ASSERT_EQUAL_INT64(40 * kDay, v.offsetMs);
+  TEST_ASSERT_EQUAL_INT64(40 * kDay, a.offsetMs(TimeSource::Ntp));
+  v = a.externalSync(TimeSource::Ntp, Now{T0 + 1000, 6000}, -400 * kDay, true);
+  ASSERT_RES(Applied, v);
+  TEST_ASSERT_TRUE(v.wasValid);
+  TEST_ASSERT_EQUAL_INT64(-400 * kDay, v.offsetMs);
+  TEST_ASSERT_EQUAL_INT64(-400 * kDay, a.offsetMs(TimeSource::Ntp));
+  // a sub-threshold step is still just Confirmed (the threshold compare is 64-bit too)
+  TimeArbiter g;
+  v = g.externalSync(TimeSource::Gps, Now{T0, 5000}, 500, true);
+  ASSERT_RES(Confirmed, v);
+}
+
 static void test_external_sync(void) {
   TimeArbiter a;
   Verdict v = a.externalSync(TimeSource::Ntp, Now{T0, 5000}, 1234, false);
@@ -376,12 +414,12 @@ static void test_external_sync(void) {
   TEST_ASSERT_FALSE(v.stepClock);
   TEST_ASSERT_FALSE(v.wasValid);
   TEST_ASSERT_EQUAL_INT64(T0, v.setUtcMs);
-  TEST_ASSERT_EQUAL_INT32(1234, v.offsetMs);
+  TEST_ASSERT_EQUAL_INT64(1234, v.offsetMs);
   TEST_ASSERT_TRUE(a.valid(Now{T0, 5000}));
   TEST_ASSERT_EQUAL_UINT32(TimeArbiter::kExternalNtpAccuracyMs, a.uncertaintyMs(Now{T0, 5000}));
   ASSERT_SRC(Ntp, a.authority(Now{T0, 5000}));
   TEST_ASSERT_FALSE(a.stale(Now{T0, 5000}));
-  TEST_ASSERT_EQUAL_INT32(1234, a.offsetMs(TimeSource::Ntp));
+  TEST_ASSERT_EQUAL_INT64(1234, a.offsetMs(TimeSource::Ntp));
   v = a.externalSync(TimeSource::Ntp, Now{T0 + 1000, 6000}, -20, true);
   ASSERT_RES(Applied, v);
   TEST_ASSERT_TRUE(v.wasValid);
@@ -439,6 +477,8 @@ int main(void) {
   RUN_TEST(test_dispute);
   RUN_TEST(test_dispute_requires_gps_rtc_agreement);
   RUN_TEST(test_external_sync);
+  RUN_TEST(test_step_int64);
+  RUN_TEST(test_external_step_int64);
   RUN_TEST(test_restore_hold);
   return UNITY_END();
 }

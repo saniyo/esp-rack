@@ -5,11 +5,6 @@ namespace ESPRack {
 namespace {
 inline uint8_t rank(TimeSource s) { return static_cast<uint8_t>(s); }
 inline int64_t absi(int64_t v) { return v < 0 ? -v : v; }
-inline int32_t clamp32(int64_t v) {
-  if (v > 2147483647LL) return 2147483647;
-  if (v < -2147483647LL - 1) return -2147483647 - 1;
-  return static_cast<int32_t>(v);
-}
 inline uint64_t monoAge(uint64_t now, uint64_t then) { return now >= then ? now - then : 0; }
 }  // namespace
 
@@ -47,7 +42,7 @@ TimeSource TimeArbiter::authority(const Now& now) const {
   return TimeSource::None;
 }
 
-int32_t TimeArbiter::offsetMs(TimeSource src) const {
+int64_t TimeArbiter::offsetMs(TimeSource src) const {
   const uint8_t r = rank(src);
   return (r > 0 && r < kTimeSourceCount) ? _s[r - 1].offset : 0;
 }
@@ -71,7 +66,7 @@ void TimeArbiter::recordBase(TimeSource src, int64_t base, uint64_t mono, int64_
   s.hasBase = true;
   s.base = base;
   s.baseMono = mono;
-  s.offset = clamp32(delta);
+  s.offset = delta;
 }
 
 bool TimeArbiter::freshBase(TimeSource src, const Now& now) const {
@@ -99,7 +94,7 @@ TimeArbiter::Verdict TimeArbiter::submit(const TimeSample& smp, const Now& now) 
       smp.utcMs + (static_cast<int64_t>(now.monoMs) - static_cast<int64_t>(smp.sampleMonoMs));
   const int64_t delta = applied - now.sysUtcMs;
   const int64_t base = smp.utcMs - static_cast<int64_t>(smp.sampleMonoMs);
-  v.offsetMs = clamp32(delta);
+  v.offsetMs = delta;
   recordBase(smp.src, base, smp.sampleMonoMs, delta);
   evalDispute(now);
 
@@ -148,7 +143,7 @@ TimeArbiter::Verdict TimeArbiter::submit(const TimeSample& smp, const Now& now) 
 }
 
 TimeArbiter::Verdict TimeArbiter::externalSync(TimeSource src, const Now& now,
-                                               int32_t observedStepMs, bool isPlausible) {
+                                               int64_t observedStepMs, bool isPlausible) {
   // validity BEFORE the step: the reference is unchanged by the external step
   Verdict v{SubmitResult::RejectedImplausible, false, 0, observedStepMs, valid(now)};
   const uint8_t r = rank(src);
@@ -156,8 +151,7 @@ TimeArbiter::Verdict TimeArbiter::externalSync(TimeSource src, const Now& now,
   recordBase(src, now.sysUtcMs - static_cast<int64_t>(now.monoMs), now.monoMs, observedStepMs);
   evalDispute(now);
   _s[r - 1].pendCount = 0;
-  v.result = (observedStepMs > -static_cast<int32_t>(_p.stepMinMs[r]) &&
-              observedStepMs < static_cast<int32_t>(_p.stepMinMs[r]))
+  v.result = absi(observedStepMs) < static_cast<int64_t>(_p.stepMinMs[r])
                  ? SubmitResult::Confirmed
                  : SubmitResult::Applied;
   v.setUtcMs = now.sysUtcMs;  // already applied by the external agent

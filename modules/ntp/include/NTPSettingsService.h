@@ -122,7 +122,7 @@ class NTPSettings {
                ESPRack::timeSourceName(st.source), (unsigned long)((st.uncertaintyMs + 500) / 1000),
                st.disputed ? ", sources disagree" : "");
     }
-    snprintf(v.diag, sizeof(v.diag), "last step %ld ms, %u rejected", (long)st.lastStepMs, (unsigned)st.rejects);
+    snprintf(v.diag, sizeof(v.diag), "last step %lld ms, %u rejected", (long long)st.lastStepMs, (unsigned)st.rejects);
     return v;
   }
 
