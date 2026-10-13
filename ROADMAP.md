@@ -44,6 +44,9 @@ Work beyond the plan that has landed:
   - SES-LIB-015 (UI pack A): `web::Progress`, Trend `xFormat/category/stack/
     refLine` in the device timezone (manifest `device.tz`), and
     `DateTime.timeOfDay()`. Plan: `docs/plans/ses-lib-015-ui-pack-a.md`.
+  - SES-LIB-016 (UI pack B): dated table columns (`date/time/datetime/duration`),
+    `Message.levelKey`, `Action.withClientTime`, `updateValue` for 32/64-bit
+    integers, 13 icons. Plan: `docs/plans/ses-lib-016-ui-pack-b.md`.
   - SES-LIB-018: a WS state frame that overflows the frame doc is dropped and
     counted (`overflow_frames`), never sent truncated.
   - LIB-FEAT-001 (core 0.5.0): external HW module instances

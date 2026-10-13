@@ -295,16 +295,18 @@ The UI's Save path (since LIB-FIX-001):
 
 Machine clients use the same POST.
 
-**Field types matter** (`lib/ESPRack/include/FormBuilder.h:467-562`):
+**Field types matter** (`lib/ESPRack/include/FormBuilder.h`):
 
 - `bool` accepts only a real JSON bool.
 - `uint8_t`, `uint16_t`, `int`, `float` and `double` coerce from numbers
   **and numeric strings**, with clamping or rounding.
-- **Any other type** (`uint32_t`, `int32_t`, `long`, `String`, ...) uses a
-  strict template that requires `is<T>()`. A numeric string sent for a
-  `uint32_t` is **silently ignored**.
-
-So use the coercing types for UI-editable numbers. Clamp after parsing,
+- `long`, `unsigned long`, `long long` and `unsigned long long` follow the same
+  rules (SES-LIB-016, `web/IntCoerce.h`): integers clamped to the type, doubles
+  rounded and clamped, decimal strings parsed and clamped, negatives clamped to 0
+  for unsigned. A non-numeric string is ignored, with a `log_d` naming the key. On
+  ESP32 (esp-14.2.0) these are `int32_t`, `uint32_t`, `int64_t` and `uint64_t`.
+- **Any other type** (`String`, enums, ...) uses a strict template that
+  requires `is<T>()`. Clamp after parsing,
 because REST and WS callers bypass the UI's min/max (template `update()`,
 or `LightState::updFs` at `esp-rack-light-demo/src/LightStateService.cpp:94-96`).
 
@@ -481,11 +483,11 @@ access flag: `rw` by default, `.readOnly()` for `r`.
 | `web::DateTime(key, int32_t seconds)` | epoch seconds | `.dateOnly() .timeOnly() .dateTime()`. `.timeOfDay()`: the value is **seconds since local midnight** (0..86399) shown as HH:MM with no timezone conversion; clamp it in the updater |
 | `web::Trend(key)` | read-only chart | `.mode("lineChart"/"barChart"/"pieChart")`, `.xAxis("timestamp")`, `.line(key, color, type)`, `.legend() .tooltip() .maxPoints(n)`. Also: `.xFormat("epoch"/"time"/"date"/"datetime"/"dom"/"month")`, where x is epoch seconds (≥ 1e11 = ms) labelled in the **device** timezone; without it x shows raw. `.category()`: x is the `xAxis` key and every push replaces the rows. `.stack(a, b[, c])` stacks bars. `.refLine(key, color, label)` draws a line at a sibling value. |
 | `web::Progress(key, double)` | read-only bar | `.min() .max()`, `.maxKey(k)` (live max from a sibling), `.markerKey(k)` (marker at a sibling value, e.g. a plan), `.unit() .format("0.0")`, `.thresholds("0:error,60:warning,95:success")` (% of max → colour) |
-| `web::Table(key)` | rows (initially `[]`) | `.col(key, label, type[, fmt])`, `.mode("append"/"upsert"/"replace")`, `.maxRows(n)`, `.layout("grid"/"cards")`, `.primary() .secondary() .avatar() .badge()`, `.rowFill() .rowFillFallback() .rowNav()`; seed rows with `form.rowsOf(key)` |
+| `web::Table(key)` | rows (initially `[]`) | `.col(key, label, type[, fmt])`: type `text`/`number`/`boolean`, or in the device timezone `date` (fmt `month` → "Oct 2026"), `time` (fmt `tod`: seconds of day), `datetime`, `duration` (fmt `s`/`ms`/`min` → "2h 05m"); `.mode("append"/"upsert"/"replace")`, `.maxRows(n)`, `.layout("grid"/"cards")`, `.primary() .secondary() .avatar() .badge()`, `.rowFill() .rowFillFallback() .rowNav()`; seed rows with `form.rowsOf(key)` |
 | `web::Files(key, restBase)` | path | `.initial(path) .uploadBase(path)` |
 | `web::Upload(key, url)` | — | `.accept(mime)` |
-| `web::Action(key[, label])` | button | `.ref("action.id")` (manifest action), or `.url() .method() .confirm() .withFields("param=field,...")` |
-| `web::Message(key, text)` | static alert, always read-only | `.level("info"/"warning"/"error"/"success")` |
+| `web::Action(key[, label])` | button | `.ref("action.id")` (manifest action), or `.url() .method() .confirm() .withFields("param=field,...")`. `.withClientTime("epoch", "ms")` appends the browser's clock on click: `.ref("system.setTime").withClientTime("epoch","ms")` sets the clock from this browser |
+| `web::Message(key, text)` | static alert, always read-only | `.level("info"/"warning"/"error"/"success")`. `.levelKey(k)` takes the severity from a sibling's live value when it is one of those four |
 
 Rules worth knowing:
 

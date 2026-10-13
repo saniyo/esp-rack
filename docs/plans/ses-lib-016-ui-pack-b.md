@@ -136,3 +136,15 @@ bool updateValue(JsonObject&, const char*, unsigned long long&);
 - **Q4:** `withClientTime("epoch", "ms")`, named after `system.setTime`.
 - **Q5:** a non-numeric string is ignored (no change, no error), with a `log_d` naming
   the key. The new behaviour for `int32_t` (strings and doubles clamped) is accepted.
+
+## 9. Implementation notes
+
+- **Icons:** 13, not 14: `Error` was already registered (imported as `ErrorIcon`). `History`
+  is imported as `HistoryIcon` so it doesn't shadow the DOM type.
+- **Duration** rounds to whole seconds; a negative value gets "−".
+- **Measured** (C3 light-demo with the UI built):
+  - UI +2.08 kB gz (CRA, against the SES-LIB-015 build; budget 8 KB);
+  - C3 2,604,482 B (+5,412 with the demo's new rows and the UI);
+  - C6 2,605,653; S3 2,700,834; C3 bundle 2,598,694;
+  - 0 C++ warnings.
+  - host: test_int_coerce passes; jest 19/19.
