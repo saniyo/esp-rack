@@ -466,8 +466,6 @@ These matter if you copy from the demo.
 - Released mode (`lib_deps` = the esp-rack git URL):
   - The root bundle now includes every module and declares the tested
     third-party set (ESP32Async AsyncTCP/ESPAsyncWebServer, ESP_SSLClient,
-    …), at version 0.4.0, and the pure helper library `lib/ESPRackPure`
-    (LIB-FIX-010, SES-LIB-006). With `lib_extra_dirs = ../esp-rack/lib` the
-    core finds `ESPRackPure` there through its `library.json` dependency.
+    …), at version 0.3.0 (LIB-FIX-010).
   - It hasn't been build-tested in that mode yet.
   - `scripts/check_versions.py` guards against version drift.

@@ -1,7 +1,0 @@
-{
-  "name": "ESPRackPure",
-  "version": "0.1.0",
-  "description": "ESPRack pure, hardware-free building blocks (civil time, POSIX TZ, calendar, sun position, time windows, time arbitration, counters, limits). Runs on target and host.",
-  "frameworks": "*",
-  "platforms": "*"
-}
