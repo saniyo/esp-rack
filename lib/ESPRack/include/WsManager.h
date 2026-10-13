@@ -229,8 +229,10 @@ class WsManager {
   }
 
   // Per-channel authorization (LIB-FIX-003). The upgrade filter only proves
-  // "authenticated"; each connection's identity is resolved once at
-  // WS_EVT_CONNECT through this manager into an access level + write right:
+  // "authenticated"; each connection's identity is resolved once, in the
+  // WebSocket handshake handler (the only point where the upgrade request is
+  // still alive — AsyncWebSocketClient deletes it before WS_EVT_CONNECT), and
+  // handed to WS_EVT_CONNECT by TCP connection. Into an access level + write right:
   //   sub on channel X  -> client level >= X's feature auth level
   //   "p" write on X    -> the above AND operator role (not a "reader" token)
   // Without a manager (no SecurityModule / FT_SECURITY=0) every client is
@@ -525,6 +527,78 @@ class WsManager {
   ArRequestFilterFunction _authFilter{nullptr};
   SecurityManager* _sm{nullptr};  // per-connection identity (LIB-FIX-003)
 
+  // Identities resolved at the handshake, waiting for their WS_EVT_CONNECT.
+  // Keyed by the TCP connection (AsyncClient*), which the WebSocket client
+  // keeps. A few slots suffice: the connect follows its handshake within one
+  // request cycle; stale entries (failed upgrades) age out. Guarded by _clientsMx.
+  struct PendingIdentity {
+    const void* tcp = nullptr;
+    WebAuthLevel level = WebAuthLevel::Public;
+    bool canWrite = false;
+    uint32_t atMs = 0;
+  };
+  static constexpr size_t kPendingIdentities = 6;
+  static constexpr uint32_t kPendingIdentityTtlMs = 10000;
+  PendingIdentity _pendingIds[kPendingIdentities];
+
+  // Handshake handler (async_tcp task): the request is valid here.
+  bool stashIdentity(AsyncWebServerRequest* r) {
+    if (!_sm || !r) return true;
+    Authentication au = _sm->authenticateRequest(r);  // may be slow: outside the lock
+    PendingIdentity p;
+    p.tcp = r->client();
+    p.level = !au.authenticated ? WebAuthLevel::Public
+            : (au.user && au.user->admin) ? WebAuthLevel::Admin
+            : WebAuthLevel::Authenticated;
+    p.canWrite = AuthenticationPredicates::IS_OPERATOR(au);
+    p.atMs = millis();
+    {
+      ClientsLock g(_clientsMx);
+      // One entry per connection: drop this connection's older entry and
+      // anything expired, then take a free slot (else the oldest).
+      for (auto& e : _pendingIds) {
+        if (e.tcp && (e.tcp == p.tcp || p.atMs - e.atMs > kPendingIdentityTtlMs)) e = PendingIdentity{};
+      }
+      size_t slot = 0;
+      for (size_t i = 0; i < kPendingIdentities; ++i) {
+        if (!_pendingIds[i].tcp) { slot = i; break; }
+        if (_pendingIds[i].atMs < _pendingIds[slot].atMs) slot = i;
+      }
+      _pendingIds[slot] = p;
+    }
+    // A handshake that never becomes a WebSocket (400, abort before the 101 is
+    // ACKed) ends with the request's disconnect: drop its entry, so a later
+    // connection whose AsyncClient reuses this address can't inherit it. A
+    // successful upgrade rebinds the connection's callbacks, so this never
+    // fires for live sockets (and deleting the request doesn't fire it).
+    const void* tcp = p.tcp;
+    r->onDisconnect([this, tcp]() { dropIdentity(tcp); });
+    return true;  // admission is the upgrade filter's job
+  }
+
+  void dropIdentity(const void* tcp) {
+    ClientsLock g(_clientsMx);
+    for (auto& e : _pendingIds) {
+      if (e.tcp == tcp) e = PendingIdentity{};
+    }
+  }
+
+  // Caller holds _clientsMx. Unknown connection -> Public, no write (fail closed).
+  void takeIdentity(const void* tcp, WebAuthLevel& level, bool& canWrite) {
+    level = WebAuthLevel::Public;
+    canWrite = false;
+    const uint32_t now = millis();
+    for (auto& p : _pendingIds) {
+      if (!p.tcp || p.tcp != tcp) continue;
+      if (now - p.atMs <= kPendingIdentityTtlMs) {
+        level = p.level;
+        canWrite = p.canWrite;
+      }
+      p = PendingIdentity{};
+      break;  // at most one entry per connection (stashIdentity dedupes)
+    }
+  }
+
   static bool levelAtLeast(WebAuthLevel have, WebAuthLevel need) {
     return static_cast<uint8_t>(have) >= static_cast<uint8_t>(need);
   }
@@ -587,6 +661,7 @@ class WsManager {
                         uint8_t* d, size_t l) {
       if (c) this->handleWsEvent(c, t, a, d, l);
     });
+    _ws->handleHandshake([this](AsyncWebServerRequest* r) { return this->stashIdentity(r); });
     if (_authFilter) _ws->setFilter(_authFilter);
     _server->addHandler(_ws);
   }
@@ -759,24 +834,13 @@ class WsManager {
     const uint32_t id = c->id();
     bool justConnected = false;
 
-    // Resolve the connection's identity from the upgrade request (passed as
-    // `a` on WS_EVT_CONNECT) BEFORE taking the roster lock — token checks
-    // can be slow. No manager = open device (admin + operator).
+    // The connection's identity was resolved at the handshake (stashIdentity).
+    // `a` on WS_EVT_CONNECT is the upgrade request, already DELETED by
+    // AsyncWebSocketClient's constructor — never dereference it.
+    // No manager = open device (admin + operator).
+    (void)a;
     WebAuthLevel connLevel = WebAuthLevel::Admin;
     bool connCanWrite = true;
-    if (t == WS_EVT_CONNECT && _sm) {
-      AsyncWebServerRequest* req = reinterpret_cast<AsyncWebServerRequest*>(a);
-      if (req) {
-        Authentication au = _sm->authenticateRequest(req);
-        connLevel = !au.authenticated ? WebAuthLevel::Public
-                  : (au.user && au.user->admin) ? WebAuthLevel::Admin
-                  : WebAuthLevel::Authenticated;
-        connCanWrite = AuthenticationPredicates::IS_OPERATOR(au);
-      } else {
-        connLevel = WebAuthLevel::Public;
-        connCanWrite = false;
-      }
-    }
 
     // Map mutations under the lock. ws sends (sendId) and queue pumping happen
     // AFTER releasing it.
@@ -791,6 +855,7 @@ class WsManager {
           info.connectedAtMs = millis();
           info.lastRxMs = millis();
           info.lastTxMs = 0;
+          if (_sm) takeIdentity(c->client(), connLevel, connCanWrite);
           info.level = connLevel;
           info.canWrite = connCanWrite;
           _clients[id] = info;   // empty subs — state flows only after an explicit sub
