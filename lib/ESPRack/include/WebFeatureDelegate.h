@@ -10,6 +10,7 @@
 
 #include <IWebFeatureEntry.h>
 #include <SecretFields.h>
+#include <UpdateError.h>
 #include <WriteAuth.h>
 #include <WebFeatureSpec.h>
 
@@ -303,12 +304,12 @@ class WebFeatureEntry : public IWebFeatureEntry {
     // the service's transactional API, then surface the resulting state.
     if (is_post && match_state) {
       JsonObject in_obj = body.as<JsonObject>();
+      ESPRack::clearUpdateError();
       StateUpdateResult outcome =
           _service->update(in_obj, _postUpdater ? _postUpdater : _restUpdater, "rest.proxy");
       if (outcome == StateUpdateResult::ERROR) {
         out_status = 400;
-        JsonObject err = out_body.to<JsonObject>();
-        err["error"] = "update_rejected";
+        ESPRack::writeUpdateRejected(out_body);
         return true;
       }
       out_status = 200;
@@ -364,9 +365,10 @@ class WebFeatureEntry : public IWebFeatureEntry {
           return;
         }
       }
+      ESPRack::clearUpdateError();
       const StateUpdateResult outcome = _service->updateWithoutPropagation(in, _postUpdater);
       if (outcome == StateUpdateResult::ERROR) {
-        sendProblem(r, 400, "update_rejected", "The update was rejected");
+        ESPRack::sendUpdateRejected(r);
         return;
       }
       // Echo (masked). On a 503 the client refetches; handlers ride only on a

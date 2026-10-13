@@ -10,6 +10,7 @@
 #include <ProblemJson.h>
 #include <SecurityManager.h>
 #include <StatefulService.h>
+#include <UpdateError.h>
 
 // WebManager forward-declared only — circular include otherwise
 // (WebManager.h -> WebFeatureDelegate.h -> HttpEndpoint.h -> here).
@@ -140,9 +141,10 @@ class HttpPostEndpoint {
       return;
     }
     JsonObject jsonObject = json.as<JsonObject>();
+    ESPRack::clearUpdateError();
     StateUpdateResult outcome = _statefulService->updateWithoutPropagation(jsonObject, _stateUpdater);
     if (outcome == StateUpdateResult::ERROR) {
-      request->send(400);
+      ESPRack::sendUpdateRejected(request);
       return;
     }
     // Echo the post-update state back. sendJsonStateResponse owns all
@@ -252,10 +254,12 @@ class HttpEndpoint : public HttpGetEndpoint<T>, public HttpPostEndpoint<T> {
             return true;
           }
           JsonObject in = body.as<JsonObject>();
+          ESPRack::clearUpdateError();
           StateUpdateResult outcome =
               svc->updateWithoutPropagation(in, stateUpdater);
           if (outcome == StateUpdateResult::ERROR) {
             out_status = 400;
+            ESPRack::writeUpdateRejected(out);
             return true;
           }
           JsonObject ret = out.to<JsonObject>();
