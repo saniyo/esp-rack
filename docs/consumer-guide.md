@@ -427,7 +427,9 @@ consumer's `src/`, like the demo's, or as a module library.
   the reserved and caution pins. Its "Restore factory pins" action (admin)
   puts every instance back on the pins given here and restarts. A pin
   change in an instance's UI that hits a reserved or taken pin is refused
-  with the reason.
+  with the reason. For a tight build, `-D ESPRACK_HW_TAB=0` drops the tab
+  (about 4.3 KB on C3). The action stays reachable as
+  `POST /api/v1/actions/system.restoreFactoryHw`.
 
 ---
 

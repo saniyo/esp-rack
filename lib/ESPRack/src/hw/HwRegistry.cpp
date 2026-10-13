@@ -15,7 +15,7 @@ namespace ESPRack {
 
 namespace {
 
-const char* stateLabel(HwState s) {
+[[maybe_unused]] const char* stateLabel(HwState s) {  // logs only, at a low log level
   switch (s) {
     case HwState::Ok: return "Ok";
     case HwState::NotConfigured: return "Not configured";
@@ -25,6 +25,7 @@ const char* stateLabel(HwState s) {
   return "?";
 }
 
+#if ESPRACK_HW_TAB
 // "GPIO17 tx, GPIO18 rx, UART1 port" into buf.
 void describeText(const HwDescriptor& d, char* buf, size_t len) {
   size_t n = 0;
@@ -57,6 +58,7 @@ unsigned usedOf(const HwClaims& claims, HwKind kind) {
   for (; fixed; fixed &= fixed - 1) ++n;
   return n;
 }
+#endif  // ESPRACK_HW_TAB
 
 }  // namespace
 
@@ -253,6 +255,7 @@ bool HwRegistry::reserved(int gpio, const char** reason) const {
 void HwRegistry::registerManifest(WebManager* web) {
   if (!web) return;
 
+#if ESPRACK_HW_TAB
   WebPageSpec page;
   page.id = "systemHardware";
   page.title = "Hardware";
@@ -282,6 +285,7 @@ void HwRegistry::registerManifest(WebManager* web) {
   tab.auth = WebAuthLevel::Authenticated;
   tab.order = 14;  // after Identity (10) and Resources (12)
   web->addTabToFeature("system", tab);
+#endif
 
   if (_inst.empty()) return;
   WebActionSpec act;
@@ -313,6 +317,7 @@ void HwRegistry::loop() {
   restartDevice("system.restoreFactoryHw");
 }
 
+#if ESPRACK_HW_TAB
 void HwRegistry::buildForm(JsonObject& root) const {
   web::Form f(root, "hardware", "External hardware");
 
@@ -383,5 +388,6 @@ void HwRegistry::buildForm(JsonObject& root) const {
 
   if (!_inst.empty()) f.add(web::Action("a_restore").ref("system.restoreFactoryHw"));
 }
+#endif  // ESPRACK_HW_TAB
 
 }  // namespace ESPRack

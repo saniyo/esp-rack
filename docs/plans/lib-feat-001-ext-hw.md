@@ -301,3 +301,7 @@ What differs from, or adds to, the proposal above:
   Builder/App wiring (≈3 KB), and the reason texts and pin tables
   (≈2 KB). Only the running chip's pin table is compiled. The probe with
   two `template-ext-hw` instances is 2,611,020 B on C3.
+- **Budget decision** (SES session, 2026-10-13): the cost above is
+  accepted. `-D ESPRACK_HW_TAB=0` is the opt-out for tight C3 builds: it
+  drops the Hardware tab and its texts, and keeps the registry, the claims
+  and the `system.restoreFactoryHw` action. The default is 1, as Q5 decided.

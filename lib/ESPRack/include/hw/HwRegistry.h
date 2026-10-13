@@ -22,6 +22,13 @@
 #include "hw/ExtHwModule.h"
 #include "hw/HwClaims.h"
 
+// System -> Hardware tab. 1 (default): always shown (plan Q5). 0: the tab
+// and its texts are compiled out (about 4.3 KB on C3); the registry, the
+// claims and the admin action system.restoreFactoryHw stay.
+#ifndef ESPRACK_HW_TAB
+#define ESPRACK_HW_TAB 1
+#endif
+
 class WebManager;
 
 namespace ESPRack {

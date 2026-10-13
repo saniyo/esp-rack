@@ -294,6 +294,8 @@ knows no driver.
   ids), and the reserved/caution pins. The admin action
   `system.restoreFactoryHw` ("Restore factory pins") calls
   `restoreFactoryHw()` on every instance on the loop task, then restarts.
+  `-D ESPRACK_HW_TAB=0` compiles the tab out (about 4.3 KB on C3); the
+  registry and the action stay.
 - **Threading.** `validate()`/`update()`/`state()` may run on any task. The
   registry mutex is a leaf lock: module code (`describeHw()`) is never called
   while it's held.
