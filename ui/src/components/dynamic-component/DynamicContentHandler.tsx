@@ -23,6 +23,7 @@ import Dropdown from './elements/Dropdown';
 import Textarea from './elements/TextArea';
 import RadioField from './elements/RadioField';
 import TrendChart from './elements/TrendChart';
+import ProgressField from './elements/ProgressField';
 import FilesField from './elements/FilesField';
 import UploadField from './elements/UploadField';
 import TableField from './elements/TableField';
@@ -46,6 +47,10 @@ interface DynamicContentHandlerProps {
   onFieldFocus?: (label: string) => void;
   onSubmit?: (event: React.FormEvent) => void;
   hideTitle?: boolean;
+  // Latest live state of the tab's channel (every readState key, shallow).
+  // Widgets that reference a sibling VALUE (progress maxKey/markerKey,
+  // trend refl) look it up here first, then among the form's fields.
+  liveValues?: Record<string, any>;
 }
 
 // Returns what "empty" looks like for a given field type, used when a card's
@@ -74,6 +79,7 @@ const DynamicContentHandler: FC<DynamicContentHandlerProps> = ({
   onFieldBlur,
   onSubmit,
   hideTitle = false,
+  liveValues,
 }) => {
   const [formState, setFormState] = useState<Record<string, any>>({});
 
@@ -174,6 +180,11 @@ const DynamicContentHandler: FC<DynamicContentHandlerProps> = ({
     return String(depVal) === spec.val;
   };
 
+  const getSibling = (key: string): any => {
+    const live = liveValues?.[key];
+    return live !== undefined ? live : formState[key];
+  };
+
   const renderField = (field: Field, index: number): JSX.Element => {
     const fieldKey = `${field.label}-${index}`;
     const commonProps = {
@@ -205,7 +216,11 @@ const DynamicContentHandler: FC<DynamicContentHandlerProps> = ({
       case 'radio':
         return <RadioField key={fieldKey} {...commonProps} />;
       case 'trend':
-        return <TrendChart key={fieldKey} {...commonProps} />;
+        return <TrendChart key={fieldKey} {...commonProps} getSibling={getSibling} />;
+      case 'progress':
+        return (
+          <ProgressField key={fieldKey} field={field} value={formState[field.label]} getSibling={getSibling} />
+        );
       case 'files': {
         const { optionMap: om } = parseFieldOptions(field.label, field.o);
         const base = ((om as any).base?.value as string) || '/api/v1/fs';

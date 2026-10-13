@@ -16,7 +16,9 @@ export const fieldConfigurations = {
   dropdown: { options: ['r', 'rw', 'options', 'pl', 'icon', 'color', 'colorMap', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const },
   textarea: { options: ['r', 'rw', 'pl', 'icon', 'color', 'colorMap', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const },
   radio: { options: ['r', 'rw', 'options', 'pl', 'icon', 'color', 'colorMap', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const },
-  trend: { options: ['to', 'xAxis', 'lines', 'legend', 'tooltip', 'maxPoints', 'mode', 'icon', 'color', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const },
+  // xFmt/cat/stack/refl (SES-LIB-015): device-TZ x labels, category data,
+  // stacked bars, reference lines at sibling values.
+  trend: { options: ['to', 'xAxis', 'lines', 'legend', 'tooltip', 'maxPoints', 'mode', 'xFmt', 'cat', 'stack', 'refl', 'icon', 'color', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const },
   files: { options: ['r', 'rw', 'base', 'initial', 'uploadBase', 'icon', 'color', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const },
   upload: { options: ['r', 'rw', 'url', 'accept', 'icon', 'color', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const },
   // table supports two render modes via layout:
@@ -29,7 +31,10 @@ export const fieldConfigurations = {
   action: { options: ['r', 'rw', 'url', 'method', 'confirm', 'color', 'icon', 'ref', 'withFields', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const },
   message: { options: ['r', 'rw', 'level', 'icon', 'color', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const },
   timezones: { options: ['r', 'rw', 'icon', 'color', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const },
-  ip: { options: ['r', 'rw', 'pl', 'icon', 'color', 'colorMap', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const }
+  ip: { options: ['r', 'rw', 'pl', 'icon', 'color', 'colorMap', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const },
+  // Read-only bar (SES-LIB-015): value against mn..mx, or a live max from
+  // maxKey; a marker at markerKey; thr = % -> colour steps.
+  progress: { options: ['r', 'rw', 'mn', 'mx', 'f', 'unit', 'maxKey', 'markerKey', 'thr', 'icon', 'color', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const }
 };
 
 export type FieldType = keyof typeof fieldConfigurations;
@@ -53,6 +58,19 @@ export interface WithFieldsPair {
   field: string;
 }
 
+// progress `thr=60:warning,95:success` -> ascending steps.
+export interface ThresholdStep {
+  pct: number;
+  color: string;
+}
+
+// trend `refl=key:color:label|…`
+export interface RefLineSpec {
+  key: string;
+  color: string;
+  label: string;
+}
+
 export interface BadgeSpec {
   field: string;
   unit: string;
@@ -73,6 +91,9 @@ export interface ParsedFieldOption {
     | WithFieldsPair[]
     | BadgeSpec
     | ColorMap
+    | ThresholdStep[]
+    | RefLineSpec[]
+    | string[][]
     | undefined;
 }
 
@@ -283,6 +304,47 @@ const optionParsers: Record<string, (option: string) => ParsedFieldOption> = {
       .filter((x): x is WithFieldsPair => x !== null);
     return { key: 'withFields', value: pairs };
   },
+
+  // ── SES-LIB-015 ──
+  // progress: sibling state keys for a live max / a marker.
+  maxKey: (opt) => ({ key: 'maxKey', value: getAfter(opt, 'maxKey').trim() }),
+  markerKey: (opt) => ({ key: 'markerKey', value: getAfter(opt, 'markerKey').trim() }),
+  // progress: "pct:color,…" -> steps sorted by pct.
+  thr: (opt) => {
+    const steps = getAfter(opt, 'thr')
+      .split(',')
+      .map((pair) => {
+        const colon = pair.indexOf(':');
+        if (colon < 0) return null;
+        const pct = parseFloat(pair.slice(0, colon));
+        const color = pair.slice(colon + 1).trim();
+        return Number.isFinite(pct) && color ? { pct, color } : null;
+      })
+      .filter((x): x is ThresholdStep => x !== null)
+      .sort((a, b) => a.pct - b.pct);
+    return { key: 'thr', value: steps };
+  },
+  // trend: x label format in the device timezone.
+  xFmt: (opt) => ({ key: 'xFmt', value: getAfter(opt, 'xFmt').trim() }),
+  // trend: "a+b|c+d" -> [["a","b"],["c","d"]].
+  stack: (opt) => ({
+    key: 'stack',
+    value: getAfter(opt, 'stack')
+      .split('|')
+      .map((g) => g.split('+').map((k) => k.trim()).filter(Boolean))
+      .filter((g) => g.length > 0),
+  }),
+  // trend: "key:color:label|…" (label may be empty).
+  refl: (opt) => ({
+    key: 'refl',
+    value: getAfter(opt, 'refl')
+      .split('|')
+      .map((spec) => {
+        const [k, color, ...rest] = spec.split(':');
+        return { key: (k || '').trim(), color: (color || '').trim(), label: rest.join(':').trim() };
+      })
+      .filter((r) => r.key),
+  }),
 
   // table `layout=grid|cards` picks between data-grid and avatar-card list.
   layout: (opt) => ({ key: 'layout', value: getAfter(opt, 'layout').trim() }),

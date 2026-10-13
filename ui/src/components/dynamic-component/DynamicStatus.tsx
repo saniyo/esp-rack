@@ -35,6 +35,10 @@ const DynamicStatus: FC<DynamicStatusProps> = ({
 
   const editingFields = useRef(new Set<string>());
 
+  // Shallow merge of every live frame: lets widgets read sibling readState
+  // keys that aren't fields themselves (progress maxKey/markerKey, trend refl).
+  const [liveValues, setLiveValues] = useState<Record<string, any>>({});
+
   const getVal = (src: any, key: string) =>
     src?.[key] ?? src?.status?.fields?.[key];
 
@@ -107,7 +111,10 @@ const DynamicStatus: FC<DynamicStatusProps> = ({
 
         if (type === 'trend') {
           const inc = getVal(ws, base);
-          if (!Array.isArray(inc) || !inc.length) return f;
+          if (!Array.isArray(inc)) return f;
+          // Category trend (cat): every push replaces the rows.
+          if (/(?:^|;)cat(?:;|$)/.test(o)) return { ...f, value: inc };
+          if (!inc.length) return f;
 
           const oldArr = Array.isArray(f.value) ? f.value : [];
           const maxPts = +(o.match(/maxPoints=(\d+)/)?.[1] || 0);
@@ -179,7 +186,14 @@ const DynamicStatus: FC<DynamicStatusProps> = ({
     });
   }, []);
 
-  useEffect(() => { if (wsData) applyWs(wsData); }, [wsData, applyWs]);
+  useEffect(() => {
+    if (!wsData) return;
+    applyWs(wsData);
+    const src = wsData?.status?.fields && typeof wsData.status.fields === 'object' ? wsData.status.fields : wsData;
+    if (src && typeof src === 'object' && !Array.isArray(src)) {
+      setLiveValues((prev) => ({ ...prev, ...src }));
+    }
+  }, [wsData, applyWs]);
 
   // input handlers — тільки boolean для двійкових
   const onChange = (lbl: string, val: any) => {
@@ -227,6 +241,7 @@ const DynamicStatus: FC<DynamicStatusProps> = ({
         onInputChange={onChange}
         onFieldBlur={onBlur}
         hideTitle
+        liveValues={liveValues}
       />
     </SectionContent>
   );

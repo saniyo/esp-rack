@@ -12,6 +12,7 @@ import {
   CartesianGrid,
   Tooltip,
   Legend,
+  ReferenceLine,
   ResponsiveContainer,
   TooltipProps as RechartsTooltipProps,
 } from 'recharts';
@@ -24,7 +25,9 @@ import {
 } from '@mui/material';
 import { FieldAvatar } from '../utils/iconRegistry';
 
-import { parseFieldOptions, ParsedFieldOptions } from '../utils/fieldParser';
+import { parseFieldOptions, ParsedFieldOptions, RefLineSpec } from '../utils/fieldParser';
+import { formatFull, formatX, isXFormat, toEpochMs, XFormat } from '../../../utils/deviceTime';
+import { useDeviceZone } from '../../../utils/useDeviceZone';
 
 /** ****************************
  *  КОНСТАНТИ ТА ТИПИ
@@ -67,6 +70,8 @@ interface PieChartData {
 interface TrendChartProps {
   field: Field;
   value: DataPoint[];
+  // Sibling state values (refl=key:…): live readState keys or form fields.
+  getSibling?: (key: string) => any;
 }
 
 /** ****************************
@@ -245,6 +250,7 @@ interface CustomTooltipProps {
   payload?: any[];
   label?: any;
   hoveredDataKey: string | null;
+  formatLabel?: (label: any) => string;
 }
 
 // Recharts v3 removed the `coordinate` prop from the tooltip content payload
@@ -256,6 +262,7 @@ const CustomTooltipComponent: React.FC<CustomTooltipProps> = ({
   payload,
   label,
   hoveredDataKey,
+  formatLabel,
 }) => {
   if (active && payload && payload.length) {
     // Якщо користувач "наводить" на конкретну серію (Bar), можемо відфільтрувати
@@ -282,7 +289,7 @@ const CustomTooltipComponent: React.FC<CustomTooltipProps> = ({
             display: 'block',
           }}
         >
-          {label}
+          {formatLabel ? formatLabel(label) : label}
         </span>
         {filteredPayload.map((entry: any, index: number) => (
           <span
@@ -315,7 +322,7 @@ const CustomTooltipComponent: React.FC<CustomTooltipProps> = ({
 /** ********************************************************************
  *   ГОЛОВНИЙ КОМПОНЕНТ TrendChart: підключаємо логіку "MAX_POINTS"
  ********************************************************************* */
-const TrendChart: React.FC<TrendChartProps> = ({ field, value = [] }) => {
+const TrendChart: React.FC<TrendChartProps> = ({ field, value = [], getSibling }) => {
   // const theme = useTheme();
 
   // 1) Розбір опцій
@@ -325,6 +332,15 @@ const TrendChart: React.FC<TrendChartProps> = ({ field, value = [] }) => {
     [field.label, field.o]
   );
   const readableLabel = parsedOptions.readableLabel;
+
+  // SES-LIB-015 options. Without xFmt the x axis shows the raw numbers, as
+  // before (millis() stamps must not turn into 1970 dates).
+  const om = parsedOptions.optionMap as any;
+  const xFmt: XFormat | undefined = isXFormat(om.xFmt?.value) ? om.xFmt.value : undefined;
+  const isCategory = !!om.cat;
+  const stacks: string[][] = useMemo(() => (Array.isArray(om.stack?.value) ? om.stack.value : []), [om.stack]);
+  const refLines: RefLineSpec[] = useMemo(() => (Array.isArray(om.refl?.value) ? om.refl.value : []), [om.refl]);
+  const zone = useDeviceZone();
 
   // Шукаємо "mode=..." (lineChart / barChart / pieChart)
   const modeMatch = field.o.match(/mode=([^;]+)/);
@@ -356,6 +372,7 @@ const TrendChart: React.FC<TrendChartProps> = ({ field, value = [] }) => {
   >({});
 
   useEffect(() => {
+    if (isCategory) return;  // category data is replaced, never merged by timestamp
     if (!Array.isArray(value) || value.length === 0) return;
 
     setMergedDataMap((prev) => {
@@ -400,10 +417,12 @@ const TrendChart: React.FC<TrendChartProps> = ({ field, value = [] }) => {
 
       return prev;
     });
-  }, [value, MAX_POINTS]);
+  }, [value, MAX_POINTS, isCategory]);
 
   // Формуємо масив для лінійного графіка: [{timestamp,...},...]
-  const chartDataForLine = useMemo(() => {
+  const chartDataForLine = useMemo<Record<string, any>[]>(() => {
+    // Category mode: the pushed rows ARE the data (x = the xAxis key's value).
+    if (isCategory) return Array.isArray(value) ? (value as Record<string, any>[]) : [];
     const timestamps = Object.keys(mergedDataMap)
       .map(Number)
       .sort((a, b) => a - b);
@@ -411,7 +430,23 @@ const TrendChart: React.FC<TrendChartProps> = ({ field, value = [] }) => {
       [xAxisKey]: ts,
       ...mergedDataMap[ts],
     }));
-  }, [mergedDataMap, xAxisKey]);
+  }, [mergedDataMap, xAxisKey, isCategory, value]);
+
+  // Visible x span in seconds — xFmt "epoch" picks time vs date by it.
+  const spanSec = useMemo<number | undefined>(() => {
+    const xs = chartDataForLine.map((r) => r[xAxisKey]).filter((x) => typeof x === 'number') as number[];
+    if (xs.length < 2) return undefined;
+    return (toEpochMs(Math.max(...xs)) - toEpochMs(Math.min(...xs))) / 1000;
+  }, [chartDataForLine, xAxisKey]);
+
+  const tickFormatter = useMemo(
+    () => (xFmt ? (x: any) => formatX(x, xFmt, zone, spanSec) : undefined),
+    [xFmt, zone, spanSec]
+  );
+  const tooltipLabel = useMemo(
+    () => (xFmt ? (x: any) => formatFull(x, xFmt, zone) : undefined),
+    [xFmt, zone]
+  );
 
   // ***************************************************
   // (B) Snapshot-of-latest for pieChart only.
@@ -491,12 +526,21 @@ const TrendChart: React.FC<TrendChartProps> = ({ field, value = [] }) => {
   // Збираємо усі ключі фактично з mergedDataMap + latestValuesRef
   const mergedLineConfigs = useMemo<LineConfig[]>(() => {
     const allKeysSet = new Set<string>();
-    // (1) додамо ключі з mergedDataMap
-    Object.values(mergedDataMap).forEach((row) => {
-      Object.keys(row).forEach((k) => allKeysSet.add(k));
-    });
-    // (2) додамо ключі з latestValuesRef
-    Object.keys(latestValuesRef.current).forEach((k) => allKeysSet.add(k));
+    if (isCategory) {
+      // series = every numeric key of the rows except the category itself
+      chartDataForLine.forEach((row) => {
+        Object.keys(row).forEach((k) => {
+          if (k !== xAxisKey && k !== 'timestamp' && typeof row[k] === 'number') allKeysSet.add(k);
+        });
+      });
+    } else {
+      // (1) додамо ключі з mergedDataMap
+      Object.values(mergedDataMap).forEach((row) => {
+        Object.keys(row).forEach((k) => allKeysSet.add(k));
+      });
+      // (2) додамо ключі з latestValuesRef
+      Object.keys(latestValuesRef.current).forEach((k) => allKeysSet.add(k));
+    }
 
     const allKeys = Array.from(allKeysSet).sort();
 
@@ -545,7 +589,7 @@ const TrendChart: React.FC<TrendChartProps> = ({ field, value = [] }) => {
         type: 'monotone' as CustomCurveType,
       };
     });
-  }, [baseLineConfigs, mergedDataMap]);
+  }, [baseLineConfigs, mergedDataMap, isCategory, chartDataForLine, xAxisKey]);
 
   // ***************************************************
   // (E) Стан прихованих ліній (show/hide), керуємо через легенду
@@ -606,17 +650,46 @@ const TrendChart: React.FC<TrendChartProps> = ({ field, value = [] }) => {
   }, [mergedLineConfigs, hiddenLines]);
 
   const renderBars = useMemo(() => {
+    // stack=a+b|c+d: bars of one group share a stackId.
+    const stackOf: Record<string, string> = {};
+    stacks.forEach((g, i) => g.forEach((k) => { stackOf[k] = `s${i}`; }));
     return mergedLineConfigs.map((cfg) => (
       <Bar
         key={cfg.dataKey}
         dataKey={cfg.dataKey}
         name={cfg.readableLabel}
         fill={cfg.color}
+        stackId={stackOf[cfg.dataKey]}
         hide={hiddenLines[cfg.dataKey]}
         isAnimationActive={false}
       />
     ));
-  }, [mergedLineConfigs, hiddenLines]);
+  }, [mergedLineConfigs, hiddenLines, stacks]);
+
+  // refl=key:color:label — a horizontal line at the sibling's live value;
+  // hidden while that value is missing or not a number.
+  const sibVals = refLines.map((r) => getSibling?.(r.key));
+  const sibKey = JSON.stringify(sibVals);
+  const renderRefLines = useMemo(() => {
+    return refLines
+      .map((r, i) => {
+        const raw = sibVals[i];
+        const y = typeof raw === 'number' ? raw : typeof raw === 'string' ? parseFloat(raw) : NaN;
+        if (!Number.isFinite(y)) return null;
+        return (
+          <ReferenceLine
+            key={`refl-${r.key}`}
+            y={y}
+            stroke={r.color || '#888'}
+            strokeDasharray="4 4"
+            ifOverflow="extendDomain"
+            label={r.label ? { value: r.label, position: 'insideTopRight', fontSize: 12 } : undefined}
+          />
+        );
+      })
+      .filter(Boolean);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refLines, sibKey]);
 
   const renderPie = useMemo(() => {
     // Для прикладу фільтруємо все, що "приховане" або зі значенням < 0 (можна змінити логіку)
@@ -698,14 +771,15 @@ const TrendChart: React.FC<TrendChartProps> = ({ field, value = [] }) => {
             margin={{ top: 5, right: 30, left: 20, bottom: 5 }}
           >
             <CartesianGrid strokeDasharray="3 3" />
-            <XAxis dataKey={xAxisKey} />
+            <XAxis dataKey={xAxisKey} tickFormatter={tickFormatter} />
             <YAxis />
             <Tooltip
               content={(props: RechartsTooltipProps<any, any>) => (
                 <CustomTooltipComponent
                   {...props}
                   hoveredDataKey={hoveredDataKey}
-                    />
+                  formatLabel={tooltipLabel}
+                />
               )}
             />
             <Legend
@@ -724,6 +798,7 @@ const TrendChart: React.FC<TrendChartProps> = ({ field, value = [] }) => {
               }
             />
             {renderLines}
+            {renderRefLines}
           </LineChart>
         );
 
@@ -739,14 +814,15 @@ const TrendChart: React.FC<TrendChartProps> = ({ field, value = [] }) => {
             barCategoryGap="20%"
           >
             <CartesianGrid strokeDasharray="3 3" />
-            <XAxis dataKey={xAxisKey} />
+            <XAxis dataKey={xAxisKey} tickFormatter={tickFormatter} />
             <YAxis />
             <Tooltip
               content={(props: RechartsTooltipProps<any, any>) => (
                 <CustomTooltipComponent
                   {...props}
                   hoveredDataKey={hoveredDataKey}
-                    />
+                  formatLabel={tooltipLabel}
+                />
               )}
             />
             <Legend
@@ -770,6 +846,7 @@ const TrendChart: React.FC<TrendChartProps> = ({ field, value = [] }) => {
                 onMouseLeave: handleBarMouseLeave,
               })
             )}
+            {renderRefLines}
           </BarChart>
         );
 
@@ -797,6 +874,9 @@ const TrendChart: React.FC<TrendChartProps> = ({ field, value = [] }) => {
     xAxisKey,
     renderPie,
     hiddenLines,
+    tickFormatter,
+    tooltipLabel,
+    renderRefLines,
   ]);
 
   // ***************************************************

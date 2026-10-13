@@ -78,7 +78,9 @@ export interface UiManifest {
   schemaVersion: number;
   // device.name / version  — consumer-app identity from Builder("...","...")
   // device.frameworkVersion — esp-rack library rev (Version.h::ESPRACK_VERSION_STR)
-  device?: { name?: string; version?: string; frameworkVersion?: string };
+  // device.tz — the device's timezone (SES-LIB-015): IANA label and POSIX rule.
+  //             Device-local times are formatted in it (utils/deviceTime.ts).
+  device?: { name?: string; version?: string; frameworkVersion?: string; tz?: { iana?: string; posix?: string } };
   buildFeatures?: Record<string, boolean>;
   // True when the request carrying this manifest had a valid JWT.
   // false on anonymous (stub) responses — modules[] and features[]

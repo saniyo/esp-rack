@@ -11,6 +11,7 @@ import ScheduleIcon from '@mui/icons-material/Schedule';
 import { Field } from '../types';
 import { useFieldParser } from '../utils/useFieldParser';
 import { FieldAvatar } from '../utils/iconRegistry';
+import { hhmmToSecOfDay, secOfDayToHHMM } from '../../../utils/deviceTime';
 
 interface DateTimeFieldProps {
   field: Field;
@@ -74,11 +75,14 @@ const DateTimeField: FC<DateTimeFieldProps> = ({ field, value, onChange, onBlur 
   const { readableLabel, optionMap } = useFieldParser(field.label, field.o || '');
   const isReadOnly = !!optionMap.r || !!field.readOnly;
 
+  const rawMode = (optionMap as any).dtmode?.value as string | undefined;
+  // dtmode=tod (SES-LIB-015): seconds since local midnight, no Date and no
+  // timezone at all — "22:30" on the device is 81000 wherever the browser is.
+  const timeOfDay = rawMode === 'tod';
   const mode = useMemo<'date' | 'time' | 'datetime'>(() => {
-    const raw = (optionMap as any).dtmode?.value as string | undefined;
-    if (raw === 'date' || raw === 'time') return raw;
+    if (rawMode === 'date' || rawMode === 'time') return rawMode;
     return 'datetime';
-  }, [optionMap]);
+  }, [rawMode]);
 
   const numericSeconds = useMemo<number | undefined>(() => {
     if (value === undefined || value === null || value === '') return undefined;
@@ -86,10 +90,10 @@ const DateTimeField: FC<DateTimeFieldProps> = ({ field, value, onChange, onBlur 
     return Number.isFinite(n) ? n : undefined;
   }, [value]);
 
-  const inputValue = secondsToInputValue(numericSeconds, mode);
+  const inputValue = timeOfDay ? secOfDayToHHMM(numericSeconds) : secondsToInputValue(numericSeconds, mode);
 
   const emit = (inputStr: string) => {
-    const sec = inputValueToSeconds(inputStr, mode);
+    const sec = timeOfDay ? hhmmToSecOfDay(inputStr) : inputValueToSeconds(inputStr, mode);
     if (sec === undefined) return;
     onChange?.(field.label, sec);
     onBlur?.(field.label, sec);
@@ -119,12 +123,12 @@ const DateTimeField: FC<DateTimeFieldProps> = ({ field, value, onChange, onBlur 
       <MuiTextField
         fullWidth
         label={readableLabel}
-        type={inputTypeFor(mode)}
+        type={timeOfDay ? 'time' : inputTypeFor(mode)}
         value={inputValue}
         onChange={(e) => emit(e.target.value)}
         onBlur={(e) => emit(e.target.value)}
         InputLabelProps={{ shrink: true }}
-        inputProps={mode === 'time' ? { step: 1 } : { step: 1 }}
+        inputProps={{ step: timeOfDay ? 60 : 1 }}
       />
     </ListItem>
   );
