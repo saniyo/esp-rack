@@ -122,6 +122,12 @@ class SecurityManager {
   /**
    * Wrap the provided json request callback to provide validation against an AuthenticationPredicate.
    */
+  // True while a factory login (FACTORY_ADMIN_* / FACTORY_GUEST_* username and
+  // password) still works (SES-LIB-022). A cached flag — no hashing, no lock,
+  // safe from any task; consumers that drive actuators gate automation on it.
+  // false here and in NullSecurityManager (no credentials at all).
+  virtual bool usesFactoryCredentials() const { return false; }
+
   virtual ArJsonRequestHandlerFunction wrapCallback(ArJsonRequestHandlerFunction onRequest,
                                                     AuthenticationPredicate predicate) = 0;
 };

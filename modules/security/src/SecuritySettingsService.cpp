@@ -8,10 +8,35 @@
 #include <time.h>
 #include <time/TimeSync.h>
 
+#include <atomic>
+
 #if FT_ENABLED(FT_SECURITY)
 
 // Token iat/exp need a trustworthy wall clock: ESPRack::TimeSync::clockSane()
 // (a time source made the clock valid). Before that exp math is meaningless.
+
+// SES-LIB-022: any user still on its factory password. Written by the updater
+// (synchronously, with the password change), read lock-free from any task.
+// true until the config is loaded: fail-safe for an early reader.
+static std::atomic<bool> s_factoryCreds{true};
+// Set when a legacy file (no per-user "factory" flag) had to be checked by
+// hashing; begin() then saves so the next boot doesn't hash again.
+static bool s_factoryVerified = false;
+
+static bool isFactoryPlain(const String& username, const String& pw) {
+  return (username == FACTORY_ADMIN_USERNAME && pw == FACTORY_ADMIN_PASSWORD) ||
+         (username == FACTORY_GUEST_USERNAME && pw == FACTORY_GUEST_PASSWORD);
+}
+
+// Legacy files only: PBKDF2 of the factory password with the stored salt.
+static bool isFactoryHash(const String& username, const String& hash, const String& salt) {
+  const char* pw = username == FACTORY_ADMIN_USERNAME   ? FACTORY_ADMIN_PASSWORD
+                   : username == FACTORY_GUEST_USERNAME ? FACTORY_GUEST_PASSWORD
+                                                        : nullptr;
+  if (!pw || hash.isEmpty()) return false;
+  s_factoryVerified = true;
+  return SecurityHash::hashPassword(pw, salt) == hash;
+}
 
 // Human-session token lifetime (api-standardization C0). Machine tokens
 // (C3) are minted with their own ~10-year exp in mintMachineToken; this
@@ -69,12 +94,14 @@ StateUpdateResult SecuritySettings::update(JsonObject& root, SecuritySettings& s
     struct PriorHash {
       String hash;
       String salt;
+      bool factory;
     };
     std::map<String, PriorHash> prior;
     for (User& u : settings.users) {
-      prior[u.username] = {u.password, u.salt};
+      prior[u.username] = {u.password, u.salt, settings.factoryFor(u.username)};
     }
 
+    settings.factoryAdmin = settings.factoryGuest = false;  // re-decided per row below
     settings.users.clear();
     for (JsonVariant user : src["users"].as<JsonArray>()) {
       String username  = user["username"].as<String>();
@@ -84,6 +111,7 @@ StateUpdateResult SecuritySettings::update(JsonObject& root, SecuritySettings& s
 
       String finalHash;
       String finalSalt;
+      bool isFactory = false;
 
       auto it = prior.find(username);
 
@@ -91,6 +119,7 @@ StateUpdateResult SecuritySettings::update(JsonObject& root, SecuritySettings& s
         // Edit with blank password → preserve existing credentials.
         finalHash = it->second.hash;
         finalSalt = it->second.salt;
+        isFactory = it->second.factory;
       } else if (SecurityHash::looksHashed(pwField) &&
                  saltField.length() == SecurityHash::SALT_HEX_LEN &&
                  (it == prior.end() ||
@@ -103,15 +132,24 @@ StateUpdateResult SecuritySettings::update(JsonObject& root, SecuritySettings& s
         //     splice in a known-pre-image hash by hand.
         finalHash = pwField;
         finalSalt = saltField;
+        if (it != prior.end()) {
+          isFactory = it->second.factory;           // unchanged round-trip
+        } else if (user["factory"].is<bool>()) {
+          isFactory = user["factory"].as<bool>();   // our own file
+        } else {
+          isFactory = isFactoryHash(username, finalHash, finalSalt);  // legacy file: once
+        }
       } else {
         // Treat as plaintext (covers legacy plaintext file load AND a
         // new password typed via the React UserForm modal).
         if (!pwField.isEmpty()) {
+          isFactory = isFactoryPlain(username, pwField);  // before hashing
           finalSalt = SecurityHash::makeSalt();
           finalHash = SecurityHash::hashPassword(pwField, finalSalt);
         }
       }
 
+      settings.setFactory(username, isFactory);
       settings.users.push_back(User(username, finalHash, finalSalt, admin));
     }
     changed = true;
@@ -127,8 +165,13 @@ StateUpdateResult SecuritySettings::update(JsonObject& root, SecuritySettings& s
         User(FACTORY_GUEST_USERNAME,
              SecurityHash::hashPassword(FACTORY_GUEST_PASSWORD, guestSalt),
              guestSalt, false));
+    settings.factoryAdmin = settings.factoryGuest = true;
     changed = true;
   }
+
+  // The cached flag follows the users synchronously: the reply to a password
+  // change already reads the new value.
+  s_factoryCreds.store(settings.factoryAdmin || settings.factoryGuest);
 
   // Machine-token registry round-trip (C3). Present only on the config
   // cold-load path — the React pages never POST api_tokens (mint/revoke
@@ -387,7 +430,15 @@ void SecuritySettingsService::begin() {
     log_d("[security] migrating plaintext credentials to PBKDF2 hash");
     _cfg.saveIfChanged("hash-migration");
   }
+  // A legacy file had no per-user "factory" flag and was checked by hashing:
+  // save it now so the next boot reads the flag instead (SES-LIB-022).
+  if (s_factoryVerified) {
+    s_factoryVerified = false;
+    _cfg.saveIfChanged("factory-flag");
+  }
 }
+
+bool SecuritySettingsService::usesFactoryCredentials() const { return s_factoryCreds.load(); }
 
 Authentication SecuritySettingsService::authenticateRequest(AsyncWebServerRequest* request) {
   const AsyncWebHeader* authorizationHeader = request->getHeader(AUTHORIZATION_HEADER);

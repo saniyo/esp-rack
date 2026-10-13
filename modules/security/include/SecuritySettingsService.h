@@ -63,6 +63,20 @@ class SecuritySettings {
   static constexpr size_t kMaxApiTokens = 8;
   std::list<ApiToken> apiTokens;
 
+  // Does the factory password of the factory admin / guest still work
+  // (SES-LIB-022)? Only those two usernames can be "factory". Decided when a
+  // password is set (before hashing) and persisted per row as "factory", so
+  // a boot never re-hashes. See SecuritySettingsService::usesFactoryCredentials.
+  bool factoryAdmin = false;
+  bool factoryGuest = false;
+  bool factoryFor(const String& u) const {
+    return u == FACTORY_ADMIN_USERNAME ? factoryAdmin : u == FACTORY_GUEST_USERNAME ? factoryGuest : false;
+  }
+  void setFactory(const String& u, bool f) {
+    if (u == FACTORY_ADMIN_USERNAME) factoryAdmin = f;
+    else if (u == FACTORY_GUEST_USERNAME) factoryGuest = f;
+  }
+
   // ---- Reader used by ConfigDelegate (file) AND legacy /rest/securitySettings.
   // The /security React page round-trips this entire shape — `password`
   // round-trips as the PBKDF2 hex hash, `salt` round-trips as the per-user
@@ -78,6 +92,7 @@ class SecuritySettings {
       userRoot["pwd"]      = user.password;
       userRoot["salt"]     = user.salt;
       userRoot["admin"]    = user.admin;
+      userRoot["factory"]  = settings.factoryFor(user.username);
     }
     JsonArray toks = root.createNestedArray("api_tokens");
     for (const ApiToken& t : settings.apiTokens) {
@@ -124,6 +139,7 @@ class SecuritySettingsService : public StatefulService<SecuritySettings>, public
 
   // Functions to implement SecurityManager
   Authentication authenticate(const String& username, const String& password);
+  bool usesFactoryCredentials() const override;
   Authentication authenticateRequest(AsyncWebServerRequest* request);
   String generateJWT(User* user);
   ArRequestFilterFunction filterRequest(AuthenticationPredicate predicate);
