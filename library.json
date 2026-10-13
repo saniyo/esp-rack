@@ -1,7 +1,7 @@
 {
   "name": "ESPRack",
-  "version": "0.1.8",
-  "description": "Modular firmware framework for ESP32 (Arduino 3.x / IDF 5+) — plug-and-play modules via Builder, manifest-driven React UI, encryption-at-rest. Single-library bundle for git-pull consumption: lib_deps = https://github.com/saniyo/esp-rack.git#v0.1.0",
+  "version": "0.3.0",
+  "description": "Modular firmware framework for ESP32 (Arduino 3.x / IDF 5+) — plug-and-play modules via Builder, manifest-driven React UI, encryption-at-rest. Single-library bundle for git-URL consumption (lib_deps = https://github.com/saniyo/esp-rack.git#<tag>); local development uses lib_extra_dirs on lib/ + modules/ instead.",
   "keywords": [
     "esp32",
     "arduino",
@@ -38,13 +38,18 @@
     },
     {
       "name": "AsyncTCP",
-      "owner": "mathieucarbou",
-      "version": "^3.3.2"
+      "owner": "ESP32Async",
+      "version": "3.4.5"
     },
     {
       "name": "ESPAsyncWebServer",
-      "owner": "mathieucarbou",
-      "version": "^3.6.0"
+      "owner": "ESP32Async",
+      "version": "3.7.10"
+    },
+    {
+      "name": "ESP_SSLClient",
+      "owner": "mobizt",
+      "version": "3.1.3"
     },
     {
       "name": "AsyncMqttClient",
@@ -53,6 +58,10 @@
     {
       "name": "UniversalTelegramBot",
       "version": "https://github.com/saniyo/Universal-Arduino-Telegram-Bot.git"
+    },
+    {
+      "name": "WireGuard-ESPRack",
+      "version": "https://github.com/saniyo/WireGuard-ESPRack.git"
     }
   ],
   "build": {
@@ -61,10 +70,13 @@
       "+<lib/ESPRack/src/>",
       "+<modules/ap/src/>",
       "+<modules/auto-update/src/>",
+      "+<modules/cert-manager/src/>",
       "+<modules/config-manager-ui/src/>",
+      "+<modules/discovery/src/>",
       "+<modules/factory-reset/src/>",
       "+<modules/features/src/>",
       "+<modules/filesystem/src/>",
+      "+<modules/mothership/src/>",
       "+<modules/mqtt/src/>",
       "+<modules/ntp/src/>",
       "+<modules/ota/src/>",
@@ -77,16 +89,20 @@
       "+<modules/upload-firmware/src/>",
       "+<modules/web-endpoints/src/>",
       "+<modules/wifi/src/>",
+      "+<modules/wireguard/src/>",
       "+<modules/ws-diag/src/>"
     ],
     "flags": [
       "-Ilib/ESPRack/include",
       "-Imodules/ap/include",
       "-Imodules/auto-update/include",
+      "-Imodules/cert-manager/include",
       "-Imodules/config-manager-ui/include",
+      "-Imodules/discovery/include",
       "-Imodules/factory-reset/include",
       "-Imodules/features/include",
       "-Imodules/filesystem/include",
+      "-Imodules/mothership/include",
       "-Imodules/mqtt/include",
       "-Imodules/ntp/include",
       "-Imodules/ota/include",
@@ -99,6 +115,7 @@
       "-Imodules/upload-firmware/include",
       "-Imodules/web-endpoints/include",
       "-Imodules/wifi/include",
+      "-Imodules/wireguard/include",
       "-Imodules/ws-diag/include"
     ]
   },

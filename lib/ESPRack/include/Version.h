@@ -17,10 +17,14 @@
 // A consumer can change its own deviceVersion freely without bumping
 // ESPRACK_VERSION; conversely, an esp-rack library release bumps this
 // even if every consumer keeps the same Builder("..., vX.Y.Z").
+//
+// SINGLE SOURCE OF TRUTH: the "version" of lib/ESPRack/library.json and of
+// the root library.json bundle must equal this — scripts/check_versions.py
+// fails otherwise.
 
 #define ESPRACK_VERSION_MAJOR 0
-#define ESPRACK_VERSION_MINOR 2
-#define ESPRACK_VERSION_PATCH 5
+#define ESPRACK_VERSION_MINOR 3
+#define ESPRACK_VERSION_PATCH 0
 
 #define ESPRACK_VERSION_STR_HELPER(MA, MI, PA) #MA "." #MI "." #PA
 #define ESPRACK_VERSION_STR_EXPAND(MA, MI, PA) ESPRACK_VERSION_STR_HELPER(MA, MI, PA)
