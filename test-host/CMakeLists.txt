@@ -1,5 +1,5 @@
 # Host unit tests for the parts of the core that don't need Arduino/IDF
-# (today: time/TimeArbiter), with any C++17 compiler (MSVC, GCC, Clang) and a
+# (today: time/TimeArbiter, hw/HwClaims), with any C++17 compiler (MSVC, GCC, Clang) and a
 # self-contained Unity-compatible shim (shim/unity.h).
 #
 #   cmake -S test-host -B test-host/build            (MSVC: -G "Visual Studio 17 2022" -A x64)
@@ -19,7 +19,8 @@ set(ESPRACK_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/..)
 
 # Arduino-free core sources only.
 add_library(esprack_host STATIC
-  ${ESPRACK_ROOT}/lib/ESPRack/src/time/TimeArbiter.cpp)
+  ${ESPRACK_ROOT}/lib/ESPRack/src/time/TimeArbiter.cpp
+  ${ESPRACK_ROOT}/lib/ESPRack/src/hw/HwClaims.cpp)
 target_include_directories(esprack_host PUBLIC ${ESPRACK_ROOT}/lib/ESPRack/include)
 
 if(MSVC)
