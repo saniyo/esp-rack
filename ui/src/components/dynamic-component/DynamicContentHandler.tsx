@@ -1,8 +1,10 @@
 import { ownerOfAction } from '../../contexts/manifest/normalizeManifest';
 import {
-  fullOf, gridColumnFor, gridTemplateFor, isLayoutMarker, READ_ONLY_MIN_W, READ_ONLY_TILE_SX, segmentFields, spanOf,
+  CELL_SX, fullOf, gridColumnFor, gridTemplateFor, isLayoutMarker, READ_ONLY_TILE_SX, segmentFields, spanOf,
+  visibleHeading,
 } from './utils/formLayout';
-import React, { FC, useEffect, useRef, useState } from 'react';
+import { HeadingContext } from './HeadingContext';
+import React, { FC, useEffect, useRef, useState, useContext } from 'react';
 import {
   Box,
   Card,
@@ -85,6 +87,7 @@ const DynamicContentHandler: FC<DynamicContentHandlerProps> = ({
   liveValues,
 }) => {
   const [formState, setFormState] = useState<Record<string, any>>({});
+  const seenHeadings = useContext(HeadingContext);  // SES-LIB-029c
 
   // Track the field.value we last applied per label. On every fields-prop
   // update we adopt the server's new value ONLY for labels whose
@@ -317,9 +320,8 @@ const DynamicContentHandler: FC<DynamicContentHandlerProps> = ({
         sx={{
           display: 'grid',
           gap: 1,
-          alignItems: 'start',
-          gridTemplateColumns: gridTemplateFor(
-            seg.cols, seg.cells.every((c) => c.f.readOnly) ? READ_ONLY_MIN_W : undefined),
+          alignItems: 'stretch',
+          gridTemplateColumns: gridTemplateFor(seg.cols),
         }}
       >
         {seg.cells.map(({ f: cf, i: ci }) => (
@@ -334,6 +336,7 @@ const DynamicContentHandler: FC<DynamicContentHandlerProps> = ({
               p: 0,
               minWidth: 0,
               gridColumn: gridColumnFor(cf.type, spanOf(cf.o), fullOf(cf.o), seg.cols, cf.readOnly),
+              ...CELL_SX,
               ...(cf.readOnly ? READ_ONLY_TILE_SX : {}),
             }}
           >
@@ -403,10 +406,10 @@ const DynamicContentHandler: FC<DynamicContentHandlerProps> = ({
 
       nodes.push(
         <Card key={`card-${cardId}-${groupStart}`} variant="outlined" sx={{ my: 1, overflow: 'visible' }}>
-          {(cardTitleText || deletable) && (
+          {(visibleHeading(cardTitleText, [...seenHeadings, title]) || deletable) && (
             <CardHeader
               titleTypographyProps={{ variant: 'subtitle1' }}
-              title={cardTitleText || ''}
+              title={visibleHeading(cardTitleText, [...seenHeadings, title])}
               action={
                 deletable ? (
                   <Tooltip title="Clear">
@@ -430,12 +433,12 @@ const DynamicContentHandler: FC<DynamicContentHandlerProps> = ({
 
   return (
     <form onSubmit={onSubmit}>
-      {!hideTitle && (
+      {!hideTitle && visibleHeading(title, seenHeadings) && (
         <Typography variant="h4" gutterBottom>
           {title}
         </Typography>
       )}
-      {description && (
+      {visibleHeading(description, [...seenHeadings, title]) && (
         <Typography variant="body1" gutterBottom>
           {description}
         </Typography>

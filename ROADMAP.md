@@ -47,6 +47,9 @@ Work beyond the plan that has landed:
   - SES-LIB-016 (UI pack B): dated table columns (`date/time/datetime/duration`),
     `Message.levelKey`, `Action.withClientTime`, `updateValue` for 32/64-bit
     integers, 13 icons. Plan: `docs/plans/ses-lib-016-ui-pack-b.md`.
+  - SES-LIB-029c: one column unless a page groups (Cols/Break), equal
+    tiles and one icon size, no repeated headings; `ui/actions` with
+    ETag/304.
   - SES-LIB-032: the time zone moves from the cached manifest to
     `GET /api/v1/ui/device`; the manifest changes only with the firmware.
   - SES-LIB-019: Telegram commands (`TelegramSubscription::onCommand`,

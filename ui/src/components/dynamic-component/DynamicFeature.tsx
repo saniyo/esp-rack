@@ -1,3 +1,4 @@
+import { HeadingContext } from './HeadingContext';
 import { FC, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Navigate, Route, Routes } from 'react-router-dom';
 import { AxiosPromise } from 'axios';
@@ -256,11 +257,16 @@ const DynamicFeature: FC<DynamicFeatureProps> = ({ featureId, fallback }) => {
   if (tabs.length === 0) return <FormLoader message="Feature has no tabs" />;
   const firstTabKey = tabs[0].key;
 
+  // Titles the page already shows; forms and cards below don't repeat them.
+  const shown = (t: { title?: string; key: string }) => [entry.title, entry.menu?.label, t.title, t.key];
+
   if (tabs.length === 1) {
     return (
       <>
         {banner}
-        <DynamicTabPanel tab={tabs[0]} ws={wsBundle} />
+        <HeadingContext.Provider value={shown(tabs[0])}>
+          <DynamicTabPanel tab={tabs[0]} ws={wsBundle} />
+        </HeadingContext.Provider>
       </>
     );
   }
@@ -278,7 +284,11 @@ const DynamicFeature: FC<DynamicFeatureProps> = ({ featureId, fallback }) => {
           <Route
             key={t.key}
             path={t.key}
-            element={<DynamicTabPanel tab={t} ws={wsBundle} />}
+            element={(
+              <HeadingContext.Provider value={shown(t)}>
+                <DynamicTabPanel tab={t} ws={wsBundle} />
+              </HeadingContext.Provider>
+            )}
           />
         ))}
         <Route path="/*" element={<Navigate replace to={firstTabKey} />} />

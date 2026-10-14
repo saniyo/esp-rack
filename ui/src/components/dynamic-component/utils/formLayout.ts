@@ -54,10 +54,11 @@ export function segmentFields<T>(entries: T[], fieldOf: (e: T) => { type?: strin
 
 export type Responsive = string | { xs: string; sm: string; md: string };
 
-// grid-template-columns of a segment: flow, or n per row (2 on small, 1 on
-// phone screens).
-export function gridTemplateFor(cols?: number, minW = 260): Responsive {
-  if (!cols) return `repeat(auto-fill, minmax(${minW}px, 1fr))`;
+// grid-template-columns of a segment: one column unless the page asks for
+// more with Cols(n) (2 on small, 1 on phone screens). Grouping is the page
+// author's call, never automatic (SES-LIB-029c).
+export function gridTemplateFor(cols?: number): Responsive {
+  if (!cols) return '1fr';
   return { xs: '1fr', sm: `repeat(${Math.min(cols, 2)}, 1fr)`, md: `repeat(${cols}, 1fr)` };
 }
 
@@ -86,14 +87,26 @@ export const numberInputValue = (v: unknown): string | number => {
 // dividers. Applied to the grid cell, so every field component is covered.
 export const READ_ONLY_TILE_SX = {
   '& .MuiListItem-root': { px: 1, py: 0.25 },
-  '& .MuiListItemAvatar-root': { minWidth: 30 },
-  '& .MuiAvatar-root': { width: 22, height: 22 },
-  '& .MuiAvatar-root svg': { fontSize: 14 },
   '& .MuiDivider-root': { display: 'none' },
   '& .MuiListItemText-root': { my: 0 },
   '& .MuiListItemText-primary': { fontSize: '0.75rem', color: 'text.secondary', lineHeight: 1.3 },
   '& .MuiListItemText-secondary': { fontSize: '0.875rem', color: 'text.primary', overflowWrap: 'anywhere' },
 };
 
-// Read-only segments (Status tabs) flow in narrower columns.
-export const READ_ONLY_MIN_W = 220;
+// Every grid cell, editable or not: the same small icon, long values wrap
+// inside their cell (SES-LIB-029c).
+export const CELL_SX = {
+  '& .MuiListItemAvatar-root': { minWidth: 30 },
+  '& .MuiAvatar-root': { width: 22, height: 22 },
+  '& .MuiAvatar-root svg': { fontSize: 14 },
+  '& .MuiListItemText-root, & .MuiListItemText-secondary': { overflowWrap: 'anywhere' },
+};
+
+// A heading worth drawing: not empty and not already shown above (the
+// feature, menu or tab title), ignoring case and spaces. '' = don't draw.
+export const visibleHeading = (text: string | undefined, seen: (string | undefined)[]): string => {
+  const norm = (s?: string) => (s ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
+  const t = norm(text);
+  if (!t) return '';
+  return seen.some((x) => norm(x) === t) ? '' : (text ?? '').trim();
+};

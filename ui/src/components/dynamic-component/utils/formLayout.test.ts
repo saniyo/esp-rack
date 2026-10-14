@@ -2,8 +2,8 @@
 import { describe, expect, it } from '@jest/globals';
 
 import {
-  BRK_TYPE, COLS_TYPE, fullOf, gridColumnFor, gridTemplateFor, markerFromRaw, numberInputValue, READ_ONLY_MIN_W,
-  READ_ONLY_TILE_SX, segmentFields, spanOf,
+  BRK_TYPE, CELL_SX, COLS_TYPE, fullOf, gridColumnFor, gridTemplateFor, markerFromRaw, numberInputValue,
+  READ_ONLY_TILE_SX, segmentFields, spanOf, visibleHeading,
 } from './formLayout';
 
 const f = (label: string, type = 'number') => ({ label, type });
@@ -16,10 +16,18 @@ describe('read-only tiles (Status tabs)', () => {
     expect(gridColumnFor('trend', undefined, false, undefined, true)).toBe('1 / -1');
     expect(gridColumnFor('text', undefined, true, undefined, true)).toBe('1 / -1');  // fullRow wins
   });
-  it('flows read-only segments in narrower columns, without dividers', () => {
-    expect(gridTemplateFor(undefined, READ_ONLY_MIN_W)).toBe('repeat(auto-fill, minmax(220px, 1fr))');
-    expect(gridTemplateFor(2, READ_ONLY_MIN_W)).toEqual({ xs: '1fr', sm: 'repeat(2, 1fr)', md: 'repeat(2, 1fr)' });
+  it('one column unless the page groups; no dividers in tiles; one icon size', () => {
+    expect(gridTemplateFor()).toBe('1fr');
+    expect(gridTemplateFor(2)).toEqual({ xs: '1fr', sm: 'repeat(2, 1fr)', md: 'repeat(2, 1fr)' });
     expect(READ_ONLY_TILE_SX['& .MuiDivider-root']).toEqual({ display: 'none' });
+    expect(CELL_SX['& .MuiAvatar-root']).toEqual({ width: 22, height: 22 });
+  });
+  it('draws a heading once', () => {
+    expect(visibleHeading('Status', ['Meter', 'Status'])).toBe('');
+    expect(visibleHeading('  energy   METER ', ['Energy meter'])).toBe('');
+    expect(visibleHeading('Energy meter and lamp', ['Meter', 'Status'])).toBe('Energy meter and lamp');
+    expect(visibleHeading('', ['x'])).toBe('');
+    expect(visibleHeading(undefined, [])).toBe('');
   });
 });
 
@@ -53,7 +61,7 @@ describe('form layout', () => {
     expect(gridColumnFor('number', 3, false, 2)).toEqual({ xs: '1 / -1', sm: 'span 2', md: 'span 2' });
   });
   it('shrinks columns on narrow screens', () => {
-    expect(gridTemplateFor()).toBe('repeat(auto-fill, minmax(260px, 1fr))');
+    expect(gridTemplateFor()).toBe('1fr');
     expect(gridTemplateFor(3)).toEqual({ xs: '1fr', sm: 'repeat(2, 1fr)', md: 'repeat(3, 1fr)' });
     expect(gridTemplateFor(1)).toEqual({ xs: '1fr', sm: 'repeat(1, 1fr)', md: 'repeat(1, 1fr)' });
   });
