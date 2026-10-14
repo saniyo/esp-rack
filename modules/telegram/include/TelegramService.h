@@ -126,6 +126,7 @@ class TelegramService : public StatefulService<TelegramSettings>,
   static void taskTrampoline(void*);
   void runWorker();
   void startTask();
+  void fillSubscriptionRows(JsonArray rows) const;  // the Subscriptions table, form and state
 
   // SES-LIB-019 commands.
   struct TgCommand {

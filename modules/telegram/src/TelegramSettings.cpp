@@ -195,6 +195,19 @@ void TelegramSettings::staRead(TelegramSettings& s, JsonObject& root) {
   root["qsize"]      = s.qSize;
   root["manualText"] = s.manualText;
 
+  // Settings echo (SES-LIB-033): the static schema takes each field's value
+  // from here. The bot token never: it stays masked in the schema.
+  root["chat"]             = s.chatId;
+  root["topic"]            = s.topicId;
+  root["device_label"]     = s.deviceLabel;
+  root["ena"]              = s.enabled;
+  root["interval_ms"]      = s.sendIntervalMs;
+  root["parse_mode"]       = s.parseMode;
+  root["silent_default"]   = s.silentDefault;
+  root["allowed_chat_ids"] = s.allowedChatIds;
+  root["admin_user_ids"]   = s.adminUserIds;
+  root["cmd_poll_s"]       = s.cmdPollS;
+
   if (s.lastMessage.length() > 0) {
     String lastLine = String(s.lastSendOk ? "[ok] " : "[fail] ");
     if (s.lastSendAt_s > 0) lastLine += String(s.lastSendAt_s) + "s · ";

@@ -105,6 +105,7 @@ void TelegramService::registerManifest(WebManager* web) {
   settingsTab.auth     = WebAuthLevel::Admin;
   settingsTab.order    = 20;
   spec.tabs.push_back(settingsTab);
+  spec.staticSchema = true;  // the form never depends on the state (SES-LIB-033)
 
   // Wrap the static form reader in a lambda that appends the
   // Subscriptions sub-form. Static buildForm doesn't know about
@@ -129,23 +130,7 @@ void TelegramService::registerManifest(WebManager* web) {
                  .mode("replace").maxRows(32)
                  .icon("Cable").label("Active subscriptions"));
     JsonArray rows = subs.rowsOf("subscriptions");
-    uint32_t now_s = (uint32_t)(millis() / 1000);
-    for (const auto& r : _subs) {
-      if (r.id == 0) continue;
-      JsonObject row = rows.createNestedObject();
-      row["name"]     = r.name;
-      row["sent"]     = r.stats.sent;
-      row["errors"]   = r.stats.errors;
-      row["dropped"]  = r.stats.dropped;
-      row["rate"]     = r.cfg.maxMessagesPerMinute;
-      row["lastAt"]   = r.stats.lastSentAt_s == 0
-                            ? 0
-                            : (now_s > r.stats.lastSentAt_s
-                                ? now_s - r.stats.lastSentAt_s
-                                : 0);
-      row["topic"]    = r.cfg.defaultTopicId.length() ? r.cfg.defaultTopicId : String("(default)");
-      row["enabled"]  = r.enabled ? "yes" : "no";
-    }
+    fillSubscriptionRows(rows);
   };
 
   // 8k REST buffer — measured form payload with empty log + no subs
@@ -167,10 +152,17 @@ void TelegramService::registerManifest(WebManager* web) {
   // appearing at runtime would be silently dropped from both the REST
   // form and the WS pushes. 8192 covers the saturated-log worst case
   // (~5-6 KB) with margin.
+  // /state and WS: the settings echo, the log and the subscription rows, so
+  // the static schema (SES-LIB-033) gets every value from here.
+  auto stateReader = [this](TelegramSettings& s, JsonObject& root) {
+    TelegramSettings::staRead(s, root);
+    fillSubscriptionRows(root.createNestedArray("subscriptions"));
+  };
+
   _feature = web->registerFeature<TelegramSettings>(
       std::move(spec), this,
       fullReader,                 TelegramSettings::upd,
-      TelegramSettings::staRead,  TelegramSettings::staUpd,
+      stateReader,                TelegramSettings::staUpd,
       8192, 8192);
 }
 
@@ -850,4 +842,24 @@ void TelegramService::pollCommands(const String& token) {
     }
   }
   if (_updOffset && _cmdsPublished != _cmdsRev) publishCommands(token);
+}
+
+void TelegramService::fillSubscriptionRows(JsonArray rows) const {
+  uint32_t now_s = (uint32_t)(millis() / 1000);
+  for (const auto& r : _subs) {
+    if (r.id == 0) continue;
+    JsonObject row = rows.createNestedObject();
+    row["name"]     = r.name;
+    row["sent"]     = r.stats.sent;
+    row["errors"]   = r.stats.errors;
+    row["dropped"]  = r.stats.dropped;
+    row["rate"]     = r.cfg.maxMessagesPerMinute;
+    row["lastAt"]   = r.stats.lastSentAt_s == 0
+                          ? 0
+                          : (now_s > r.stats.lastSentAt_s
+                              ? now_s - r.stats.lastSentAt_s
+                              : 0);
+    row["topic"]    = r.cfg.defaultTopicId.length() ? r.cfg.defaultTopicId : String("(default)");
+    row["enabled"]  = r.enabled ? "yes" : "no";
+  }
 }
