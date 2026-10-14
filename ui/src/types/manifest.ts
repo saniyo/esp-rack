@@ -10,6 +10,10 @@ export interface MenuMeta {
   // parent: id of the feature/group this item nests UNDER; undefined =
   // top-level. The backend is the single source of truth for placement.
   parent?: string;
+  // hw: this page belongs to external HW instance <hw> (SES-LIB-028). Its
+  // placement comes from UiManifest.extHw (components/layout/extHwMenu.ts),
+  // never from parent.
+  hw?: string;
   // expandTabs: also surface this feature's own tabs as leaf children in
   // the tree (jump straight to /<id>/<tabKey>), beside any child features.
   expandTabs?: boolean;
@@ -93,4 +97,17 @@ export interface UiManifest {
   // Omitted from the anonymous stub.
   modules?: ModuleEntry[];
   features: FeatureEntry[];
+  // External HW instances (SES-LIB-028), from the backend HwRegistry: the
+  // UI's only source for where their pages go. Live state is in
+  // System -> External Hardware.
+  extHw?: ExtHwEntry[];
+}
+
+export interface ExtHwEntry {
+  id: string;
+  type: string;
+  title?: string;
+  owner?: string;        // the module (and menu entry) that uses it
+  interfaces?: string[];
+  pages?: string[];      // feature ids with menu.hw == id
 }

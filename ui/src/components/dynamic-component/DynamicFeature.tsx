@@ -8,7 +8,9 @@ import { RouterTabs, useRouterTab, useLayoutTitle } from '../../components';
 import DynamicStatus from './DynamicStatus';
 import DynamicSettings from './DynamicSettings';
 import FormLoader from '../loading/FormLoader';
+import Alert from '@mui/material/Alert';
 import { useManifest } from '../../contexts/manifest';
+import { extHwModules, usedByLabel } from '../layout/extHwMenu';
 import { FeatureEntry, TabSpec } from '../../types';
 import { useRest } from '../../utils';
 import { useWsChannel } from '../../utils/useWsChannel';
@@ -212,8 +214,14 @@ interface DynamicFeatureProps {
 }
 
 const DynamicFeature: FC<DynamicFeatureProps> = ({ featureId, fallback }) => {
-  const { findFeature } = useManifest();
+  const { findFeature, manifest } = useManifest();
   const entry = findFeature(featureId) ?? fallback;
+  // A page of an owned external HW instance says who uses it (SES-LIB-028).
+  const usedBy = useMemo(
+    () => (entry ? usedByLabel(extHwModules(manifest), entry, manifest.features) : undefined),
+    [entry, manifest],
+  );
+  const banner = usedBy ? <Alert severity="info" sx={{ mb: 2 }}>Used by {usedBy}</Alert> : null;
 
   useLayoutTitle(entry?.title ?? featureId);
   const { routerTab } = useRouterTab();
@@ -246,11 +254,17 @@ const DynamicFeature: FC<DynamicFeatureProps> = ({ featureId, fallback }) => {
   const firstTabKey = tabs[0].key;
 
   if (tabs.length === 1) {
-    return <DynamicTabPanel tab={tabs[0]} ws={wsBundle} />;
+    return (
+      <>
+        {banner}
+        <DynamicTabPanel tab={tabs[0]} ws={wsBundle} />
+      </>
+    );
   }
 
   return (
     <>
+      {banner}
       <RouterTabs value={routerTab}>
         {tabs.map((t) => (
           <Tab key={t.key} value={t.key} label={t.title ?? t.key} />

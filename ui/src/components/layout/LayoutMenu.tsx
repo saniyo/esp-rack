@@ -26,6 +26,7 @@ import LanIcon from '@mui/icons-material/Lan';
 import { AuthenticatedContext } from '../../contexts/authentication';
 import { FeaturesContext } from '../../contexts/features';
 import { useManifest } from '../../contexts/manifest';
+import { extHwModules, hwGroupParent } from './extHwMenu';
 import { resolveIcon } from '../dynamic-component/utils/iconRegistry';
 import { FeatureEntry } from '../../types';
 import { routeMatches } from '../../utils';
@@ -188,7 +189,8 @@ const LayoutMenu: FC = () => {
       const children: MenuNode[] = [];
       // expandTabs: a multi-tab feature's own tabs become jump-to-tab
       // leaves under it (a single-tab feature's page IS the tab — no point).
-      if (f.menu?.expandTabs && to && (f.tabs?.length ?? 0) > 1) {
+      // A hardware page keeps its tabs in the page header (menu depth <= 3).
+      if (f.menu?.expandTabs && !f.menu?.hw && to && (f.tabs?.length ?? 0) > 1) {
         f.tabs!.forEach((t) =>
           children.push({
             id: `${f.id}/${t.key}`,
@@ -224,8 +226,29 @@ const LayoutMenu: FC = () => {
     // Link children to parents; an orphan parent (id not registered)
     // gracefully falls back to top-level so nothing is ever lost.
     const rootNodes: MenuNode[] = [];
+    // External HW pages (SES-LIB-028) go into one "External Hardware" group
+    // under their owner, else under System; placement comes only from
+    // manifest.extHw.
+    const hw = extHwModules(manifest);
+    const hwGroups = new Map<string, MenuNode>();
+    const hwGroupOf = (parentId: string): MenuNode[] => {
+      const parentNode = byId.get(parentId);
+      if (!parentNode) return rootNodes;
+      let g = hwGroups.get(parentId);
+      if (!g) {
+        g = { id: `__exthw@${parentId}`, label: hw.label, icon: MemoryIcon, order: 9000, children: [] };
+        hwGroups.set(parentId, g);
+        parentNode.children.push(g);
+      }
+      return g.children;
+    };
     visible.forEach((f) => {
       const node = byId.get(f.id)!;
+      const hwParent = hwGroupParent(hw, f, (id) => byId.has(id));
+      if (hwParent) {
+        hwGroupOf(hwParent).push(node);
+        return;
+      }
       const parent = f.menu?.parent ? byId.get(f.menu.parent) : undefined;
       (parent ? parent.children : rootNodes).push(node);
     });
