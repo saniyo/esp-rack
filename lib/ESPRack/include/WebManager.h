@@ -488,6 +488,7 @@ class WebManager {
   // revalidate with a cheap 304 instead of re-streaming the ~15 KB body
   // on every page load. 0 = not yet computed → ETag path skipped.
   uint32_t _manifestSig{0};
+  bool _manifestLive{false};  // writes were paused at the last re-bake: build on the fly
 
   // Singleton manifest builder — BSS-resident, NOT allocated per
   // request. Mutex guards concurrent UI-manifest fetches; a

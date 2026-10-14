@@ -157,6 +157,22 @@ bool ConfigManager::saveIfChanged(const char* id, const String& origin) {
   return e->saveIfChanged(*this, origin);
 }
 
+size_t ConfigManager::deferredCount() const {
+  size_t n = 0;
+  for (const auto& e : _entries) {
+    if (e && e->deferred()) ++n;
+  }
+  return n;
+}
+
+void ConfigManager::flushDeferred() {
+  if (!_anyDeferred || !ESPRack::PowerGuard::writesAllowed()) return;
+  _anyDeferred = false;
+  for (auto& e : _entries) {
+    if (e && e->deferred()) (void)e->saveIfChanged(*this, "deferred");
+  }
+}
+
 bool ConfigManager::restoreFromBackup(const char* id) {
   auto* e = findEntry(id);
   if (!e) return false;
@@ -787,6 +803,10 @@ bool ConfigManager::atomicWrite(const char* primary,
                                 JsonObjectConst data,
                                 size_t bufferSize,
                                 uint32_t* outCrc) {
+  if (!ESPRack::PowerGuard::writesAllowed()) {  // SES-LIB-008: any other writer
+    log_w("[CFG] write %s skipped: writes paused (PowerGuard)", primary ? primary : "?");
+    return false;
+  }
   if (!_fs || !primary) {
     log_d("[CFG] write: null args");
     return false;

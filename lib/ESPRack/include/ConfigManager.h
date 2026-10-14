@@ -5,6 +5,7 @@
 #include <Arduino.h>
 #include <FS.h>
 #include <ArduinoJson.h>
+#include "power/PowerGuard.h"
 
 #include <vector>
 #include <memory>
@@ -44,6 +45,7 @@ class ConfigManager {
     uint32_t loads{0};
     uint32_t saves{0};
     uint32_t skipped{0};
+    uint32_t deferred{0};          // saves PowerGuard paused (SES-LIB-008)
     uint32_t restores{0};
     uint32_t resets{0};
     uint32_t lastCrc{0};
@@ -118,6 +120,8 @@ class ConfigManager {
     virtual bool resetToDefaults(ConfigManager& mgr) = 0;
     virtual EntryStats& stats() = 0;
     virtual const EntryStats& stats() const = 0;
+    // A save PowerGuard paused; ConfigManager::flushDeferred() retries it.
+    virtual bool deferred() const { return false; }
 
     // observer API — fires AFTER successful atomicWrite on CHANGED only
     virtual ListenerId addObserver(GenericListener l) = 0;
@@ -231,6 +235,13 @@ class ConfigManager {
 
   bool ensureLoaded(const char* id);
   bool saveIfChanged(const char* id, const String& origin = "");
+
+  // SES-LIB-008: saves PowerGuard paused. flushDeferred() (App::loop) saves
+  // them once writes are allowed again; a latch keeps them until restart.
+  void markDeferred() { _anyDeferred = true; }
+  bool hasDeferred() const { return _anyDeferred; }
+  size_t deferredCount() const;
+  void flushDeferred();
   bool restoreFromBackup(const char* id);
   bool resetToDefaults(const char* id);
 
@@ -367,6 +378,8 @@ class ConfigManager {
     const String& primary() const override { return _primary; }
     EntryStats& stats() override { return _stats; }
     const EntryStats& stats() const override { return _stats; }
+    bool deferred() const override { return _deferred; }
+    bool _deferred = false;  // SES-LIB-008
 
     bool ensureLoaded(ConfigManager& mgr) override {
       if (_loaded) return true;
@@ -497,8 +510,19 @@ class ConfigManager {
 
       if (_hasLastSavedCrc && crcPlain == _lastSavedCrc) {
         _stats.skipped++;
+        _deferred = false;
         mgr.unlock();
         return true;  // skip flash write
+      }
+
+      // SES-LIB-008: no flash writes while PowerGuard pauses them; the save
+      // waits for ConfigManager::flushDeferred().
+      if (!ESPRack::PowerGuard::writesAllowed()) {
+        if (!_deferred) _stats.deferred++;
+        _deferred = true;
+        mgr.markDeferred();
+        mgr.unlock();
+        return false;
       }
 
       // Encrypt secret fields IN PLACE just before atomicWrite — the
@@ -527,6 +551,7 @@ class ConfigManager {
         // (`written`) goes into stats.lastCrc for diagnostic display.
         _lastSavedCrc = crcPlain;
         _hasLastSavedCrc = true;
+        _deferred = false;
 
         uint32_t now = mgr.nowTs();
         _stats.saves++;
@@ -680,6 +705,7 @@ class ConfigManager {
   String _tmpRoot{"/config/_tmp"};
 
   std::vector<std::unique_ptr<IConfigEntry>> _entries;
+  bool _anyDeferred = false;
 
   // Probe-mode setter — called from discoverSecretKeysFromForm to flip
   // the thread_local g_probing flag while the service's buildForm runs.

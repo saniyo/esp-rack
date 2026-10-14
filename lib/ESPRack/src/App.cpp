@@ -532,6 +532,9 @@ void App::loop() {
   // Time first: SNTP / operator samples, clock events (SES-LIB-002).
   TimeSync::instance().loop();
 
+  // Config saves PowerGuard paused, once writes are allowed again (SES-LIB-008).
+  configManager_.flushDeferred();
+
   // A restart requested from another task is performed HERE, on the loop
   // task, so onShutdown() never runs concurrently with the same module's
   // onLoop() (LIB-FIX-006).

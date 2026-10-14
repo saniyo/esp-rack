@@ -1,5 +1,6 @@
 #include <WebManager.h>
 #include <ESPFS.h>
+#include "power/PowerGuard.h"
 #include <ProblemJson.h>
 #include <esp_rom_crc.h>
 #include <time/TimeSync.h>
@@ -442,8 +443,17 @@ void WebManager::writeManifestCacheToFs() {
   if (cache_ok) {
     log_i("[web.manifest] cache sig 0x%08x matches — reusing existing flash files",
           (unsigned)sig);
+    _manifestLive = false;
     return;
   }
+  // PowerGuard (SES-LIB-008): no flash writes now. Serve the manifest built
+  // on the fly until the next re-bake, never the stale files.
+  if (!ESPRack::PowerGuard::writesAllowed()) {
+    _manifestLive = true;
+    log_w("[web.manifest] writes paused: serving the manifest live");
+    return;
+  }
+  _manifestLive = false;
 
   log_i("[web.manifest] cache sig changed (or missing) — rebuilding to flash, sig=0x%08x",
         (unsigned)sig);
@@ -538,7 +548,7 @@ void WebManager::serveManifest(AsyncWebServerRequest* request) {
   // no per-request ManifestBuilder, no std::make_shared. Whatever the
   // current heap pressure, this path is allocation-free apart from
   // the AsyncBasicResponse object itself (~150 B).
-  if (ESPFS.exists(path)) {
+  if (!_manifestLive && ESPFS.exists(path)) {
     AsyncWebServerResponse* res = request->beginResponse(ESPFS, path,
                                                          "application/json");
     // Tell the browser not to keep this socket open after the response.
