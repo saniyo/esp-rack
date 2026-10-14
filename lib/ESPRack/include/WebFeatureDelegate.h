@@ -18,6 +18,13 @@
 // WS + manifest metadata. The service stores a raw pointer to the entry (via
 // WebManager::registerFeature) and uses broadcastWs() to push state over WS.
 // WebManager owns the lifetime through std::unique_ptr<IWebFeatureEntry>.
+
+// SES-LIB-033 (WebManager.cpp, once for all features): a form without its
+// values, and the GET <form>?schema=1 response built from it with ETag/304.
+void stripFormValues(JsonObject root);
+void sendFormSchema(AsyncWebServerRequest* r, const char* id, size_t bufSize,
+                    const std::function<void(JsonObject&)>& fill);
+
 template <typename T>
 class WebFeatureEntry : public IWebFeatureEntry {
  public:
@@ -211,6 +218,7 @@ class WebFeatureEntry : public IWebFeatureEntry {
     // Live features advertise a CHANNEL id (multiplexed over the single /ws),
     // not a per-feature socket path. The frontend subscribes by `ch`.
     if (_spec.wsPath) obj["ch"] = _spec.id;
+    if (_spec.staticSchema) obj["ss"] = 1;  // SES-LIB-033
 
     JsonArray tabs = obj.createNestedArray("tabs");
     for (const auto& t : _spec.tabs) {
@@ -396,12 +404,23 @@ class WebFeatureEntry : public IWebFeatureEntry {
     return _hasDistinctStateReader ? _wsReader : _restReader;
   }
 
+  // SES-LIB-033: the form without its values, static per firmware, so it
+  // revalidates like the manifest (ETag = signature + id, 304).
+  void sendSchema(AsyncWebServerRequest* r) {
+    sendFormSchema(r, _spec.id, _restBufferSize ? _restBufferSize : DEFAULT_BUFFER_SIZE,
+                   [this](JsonObject& root) { _service->read(root, _restReader); });
+  }
+
   // GET for the form or state face. Secrets are masked unless the caller is
   // an admin; the identity check (one JWT verify) is skipped entirely for
   // features without secret fields.
   void mountGet(AsyncWebServer* server, SecurityManager* sm,
                 AuthenticationPredicate predicate, const String& path, bool formFace) {
     ArRequestHandlerFunction handler = [this, sm, formFace](AsyncWebServerRequest* r) {
+      if (formFace && _spec.staticSchema && r->hasParam("schema")) {
+        sendSchema(r);
+        return;
+      }
       bool mask = false;
       if (!_secretKeys.empty() && sm) {
         Authentication a = sm->authenticateRequest(r);

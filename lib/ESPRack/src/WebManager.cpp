@@ -451,6 +451,60 @@ bool WebManager::lazyAction(size_t idx) const {
   return false;
 }
 
+namespace {
+uint32_t s_manifestSig = 0;
+}  // namespace
+
+uint32_t manifestSignature() { return s_manifestSig; }
+
+// SES-LIB-033: every field's value becomes null, except action and message
+// labels, which belong to the schema; layout markers stay as they are.
+void stripFormValues(JsonObject root) {
+  for (JsonPair form : root) {
+    if (!form.value().is<JsonObject>()) continue;
+    JsonArray fields = form.value()["fields"].as<JsonArray>();
+    if (fields.isNull()) continue;
+    for (JsonObject f : fields) {
+      const char* o = f["o"] | (const char*)nullptr;
+      if (!o || strncmp(o, "action;", 7) == 0 || strncmp(o, "message;", 8) == 0) continue;
+      for (JsonPair kv : f) {
+        if (strcmp(kv.key().c_str(), "o") != 0) {
+          kv.value().set(nullptr);
+          break;
+        }
+      }
+    }
+  }
+}
+
+void sendFormSchema(AsyncWebServerRequest* r, const char* id, size_t bufSize,
+                    const std::function<void(JsonObject&)>& fill) {
+  char etag[48] = "";
+  if (s_manifestSig) snprintf(etag, sizeof(etag), "\"%08x-%s-s\"", (unsigned)s_manifestSig, id ? id : "");
+  if (etag[0] && r->hasHeader("If-None-Match") && r->header("If-None-Match") == etag) {
+    AsyncWebServerResponse* nm = r->beginResponse(304, "text/plain", "");
+    nm->addHeader("ETag", etag);
+    nm->addHeader("Cache-Control", "private, no-cache");
+    r->send(nm);
+    return;
+  }
+  DynamicJsonDocument doc(bufSize);
+  if (doc.capacity() == 0) {
+    r->send(503);
+    return;
+  }
+  JsonObject root = doc.to<JsonObject>();
+  fill(root);
+  stripFormValues(root);
+  AsyncResponseStream* res = r->beginResponseStream("application/json");
+  if (etag[0]) {
+    res->addHeader("ETag", etag);
+    res->addHeader("Cache-Control", "private, no-cache");
+  }
+  serializeJson(doc, *res);
+  r->send(res);
+}
+
 void WebManager::noteManifestBytes(bool authed, size_t bytes) {
   _manifestBytes[authed ? 1 : 0] = static_cast<uint32_t>(bytes);
   log_i("[web.manifest] %s tier: %u B", authed ? "authed" : "anon", (unsigned)bytes);
@@ -584,6 +638,7 @@ void WebManager::writeManifestCacheToFs() {
   // revalidation). Set unconditionally — both the cache-hit early-return
   // and the rebuild path below need it live for the process lifetime.
   _manifestSig = sig;
+  s_manifestSig = sig;  // manifestSignature() (SES-LIB-033)
 
   // Read sidecar signature file. If it matches AND both manifest
   // files exist, we're already current — skip the rewrite.

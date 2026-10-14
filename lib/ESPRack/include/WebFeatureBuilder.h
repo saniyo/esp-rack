@@ -224,6 +224,9 @@ class WebFeature {
   WebFeature& readOnly(const char* read) { _spec.restRead = read; return *this; }
 
   WebFeature& ws(const char* path) { _spec.wsPath = path; return *this; }
+  // The form's fields never depend on the state (SES-LIB-033): the UI caches
+  // the schema and takes the values from /state. See module-guide.
+  WebFeature& staticSchema(bool v = true) { _spec.staticSchema = v; return *this; }
 
   // Accepts a WebTab (implicitly) or a raw WebTabSpec. Order = code order.
   WebFeature& tab(const WebTabSpec& t) { _spec.tabs.push_back(t); return *this; }

@@ -197,6 +197,10 @@ struct WebFeatureSpec {
   const char* restRead = nullptr;
   const char* restUpdate = nullptr;
   const char* wsPath = nullptr;
+  // SES-LIB-033: the form's fields don't depend on the state, so the UI can
+  // cache GET <form>?schema=1 (ETag) and fill the values from /state. The
+  // state reader must carry every form field under the same key.
+  bool staticSchema = false;
   std::vector<WebTabSpec> tabs;
   std::vector<WebActionSpec> actions;
 };
@@ -214,3 +218,7 @@ struct WebPageSpec {
 };
 
 #endif
+
+// SES-LIB-033: the manifest signature (firmware + registrations), 0 before
+// the first bake; ETag base for static per-firmware responses.
+uint32_t manifestSignature();

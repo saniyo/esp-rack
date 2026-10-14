@@ -903,6 +903,15 @@ Start from `modules/template-ext-hw/`. Its pieces:
     - The page says "Used by <owner>". Hide manual controls the owner drives
       (`hwOwned()`), and add your own note where it helps.
     - `hwTitle()` and `interfaceIds()` fill `extHw[]`.
+13. **Static form schema** (SES-LIB-033), opt-in: `WebFeature(...).staticSchema()`.
+    The UI then caches `GET <form>?schema=1` (values nulled, ETag/304) and
+    takes the values from `/state`. Only for a form whose fields never depend
+    on the state:
+    - every field's key is in the state reader under the same name (table
+      rows too);
+    - no `if (state...)` around `f.add(...)`: use `showIf`;
+    - no options built from runtime data (scan lists): leave such forms
+      without `staticSchema()` for now.
 
 `install<M>()` on an `ExtHwModule` and `installExtHw<M>()` on a plain module
 both fail to compile with a message saying which one to use. An invalid id

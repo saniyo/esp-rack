@@ -68,6 +68,9 @@ export interface FeatureEntry {
   // path, kept optional for back-compat; current backends emit `ch`.
   ch?: string;
   ws?: string;
+  // ss: the form's fields don't depend on the state (SES-LIB-033): the UI
+  // caches <form>?schema=1 and fills it from /state.
+  ss?: number;
   tabs?: TabSpec[];
   actions?: ActionSpec[];
   endpoints?: EndpointMeta[];
