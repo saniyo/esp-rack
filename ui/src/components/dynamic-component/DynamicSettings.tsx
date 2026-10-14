@@ -1,6 +1,8 @@
 // DynamicSettings.tsx
+import { HeadingContext } from './HeadingContext';
+import { visibleHeading } from './utils/formLayout';
 import { markerFromRaw } from './utils/formLayout';
-import React, { FC, useState, useEffect, useRef } from 'react';
+import React, { FC, useState, useEffect, useRef, useContext } from 'react';
 import { useLocation } from 'react-router-dom';
 import {
   Button,
@@ -35,6 +37,7 @@ interface DynamicSettingsProps {
 }
 
 const DynamicSettings: FC<DynamicSettingsProps> = ({ formName, data, saveData, saving, readOnly = false }) => {
+  const seenHeadings = useContext(HeadingContext);  // SES-LIB-029c: no repeated titles
   const [formState, setFormState] = useState<Form>({
     title: formName,
     description: data.description || '',
@@ -319,7 +322,7 @@ const DynamicSettings: FC<DynamicSettingsProps> = ({ formName, data, saveData, s
 
   return (
     <SectionContent
-      title={formState.title || 'Settings'}
+      title={visibleHeading(formState.title || 'Settings', seenHeadings)}
       titleGutter
       actions={<TabActionsBar />}
     >

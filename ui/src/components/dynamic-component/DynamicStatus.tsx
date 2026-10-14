@@ -1,6 +1,8 @@
 // DynamicStatus.tsx
+import { HeadingContext } from './HeadingContext';
+import { visibleHeading } from './utils/formLayout';
 import { markerFromRaw } from './utils/formLayout';
-import React, { FC, useEffect, useState, useCallback, useRef } from 'react';
+import React, { FC, useEffect, useState, useCallback, useRef, useContext } from 'react';
 import DynamicContentHandler from './DynamicContentHandler';
 import TabActionsBar from './TabActionsBar';
 import { SectionContent } from '../../components';
@@ -29,6 +31,7 @@ const DynamicStatus: FC<DynamicStatusProps> = ({
   formName, data, wsData, connected,
   originId, updateWsData, messageTick
 }) => {
+  const seenHeadings = useContext(HeadingContext);  // SES-LIB-029c: no repeated titles
 
   const [formState, setFormState] = useState<Form>({
     title: formName, description: '', fields: []
@@ -234,7 +237,7 @@ const DynamicStatus: FC<DynamicStatusProps> = ({
   // snapshot even though it was already in hand.
   return (
     <SectionContent
-      title={formState.title || 'Status'}
+      title={visibleHeading(formState.title || 'Status', seenHeadings)}
       titleGutter
       actions={<TabActionsBar liveConnected={connected} messageTick={messageTick} />}
     >
