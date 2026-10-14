@@ -308,7 +308,13 @@ const DynamicContentHandler: FC<DynamicContentHandlerProps> = ({
         sx={{ display: 'grid', gap: 1, alignItems: 'start', gridTemplateColumns: gridTemplateFor(seg.cols) }}
       >
         {seg.cells.map(({ f: cf, i: ci }) => (
-          <Box key={`cell-${ci}`} sx={{ minWidth: 0, gridColumn: gridColumnFor(cf.type, spanOf(cf.o), fullOf(cf.o), seg.cols) }}>
+          // A list of its own: the fields render <li> items (and <li> dividers),
+          // which show bullets outside a list.
+          <Box
+            component="ul"
+            key={`cell-${ci}`}
+            sx={{ listStyle: 'none', m: 0, p: 0, minWidth: 0, gridColumn: gridColumnFor(cf.type, spanOf(cf.o), fullOf(cf.o), seg.cols) }}
+          >
             {renderField(cf, ci)}
           </Box>
         ))}
