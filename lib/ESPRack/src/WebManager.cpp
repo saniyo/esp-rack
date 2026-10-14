@@ -359,17 +359,40 @@ void WebManager::begin() {
       return;
     }
     const String of = request->hasParam("of") ? request->getParam("of")->value() : String();
-    sendAdaptiveJson(request, [this, of](JsonObject& root) {
-      JsonArray list = root.createNestedArray("actions");
-      const size_t n = of.length();
-      for (size_t i = 0; i < _entries.size(); ++i) {
-        if (!n || !lazyAction(i)) continue;
-        const char* id = _entries[i]->id();
-        if (strncmp(id, of.c_str(), n) != 0 || id[n] != '.') continue;
-        JsonObject o = list.createNestedObject();
-        _entries[i]->toJson(o);
+    // Static per firmware like the manifest, so it revalidates the same way
+    // (SES-LIB-029c): ETag = manifest signature + feature id.
+    String etag;
+    if (_manifestSig) {
+      etag = "\"";
+      etag += String(_manifestSig, HEX);
+      etag += '-';
+      etag += of;
+      etag += '"';
+      if (request->hasHeader("If-None-Match") && request->header("If-None-Match") == etag) {
+        AsyncWebServerResponse* nm = request->beginResponse(304, "text/plain", "");
+        nm->addHeader("ETag", etag);
+        nm->addHeader("Cache-Control", "private, no-cache");
+        request->send(nm);
+        return;
       }
-    }, 1536);
+    }
+    DynamicJsonDocument doc(3072);
+    JsonArray list = doc.createNestedArray("actions");
+    const size_t n = of.length();
+    for (size_t i = 0; n && i < _entries.size(); ++i) {
+      if (!lazyAction(i)) continue;
+      const char* id = _entries[i]->id();
+      if (strncmp(id, of.c_str(), n) != 0 || id[n] != '.') continue;
+      JsonObject o = list.createNestedObject();
+      _entries[i]->toJson(o);
+    }
+    AsyncResponseStream* res = request->beginResponseStream("application/json");
+    if (etag.length()) {
+      res->addHeader("ETag", etag);
+      res->addHeader("Cache-Control", "private, no-cache");
+    }
+    serializeJson(doc, *res);
+    request->send(res);
   });
 
   // Pre-bake the manifest to LittleFS so the UI-manifest endpoint is a pure
