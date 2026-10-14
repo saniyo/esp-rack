@@ -1,5 +1,6 @@
 #include <WebManager.h>
 #include <ESPFS.h>
+#include "SecretFields.h"
 #include "AdaptiveJson.h"
 #include "power/PowerGuard.h"
 #include <ProblemJson.h>
@@ -467,9 +468,13 @@ void stripFormValues(JsonObject root) {
     for (JsonObject f : fields) {
       const char* o = f["o"] | (const char*)nullptr;
       if (!o || strncmp(o, "action;", 7) == 0 || strncmp(o, "message;", 8) == 0) continue;
+      // A secret is never data in the schema: it shows as set-but-hidden, and
+      // the mask coming back is dropped by the updater (SecretFields).
+      const bool secret = strncmp(o, "secret;", 7) == 0;
       for (JsonPair kv : f) {
         if (strcmp(kv.key().c_str(), "o") != 0) {
-          kv.value().set(nullptr);
+          if (secret) kv.value().set(SecretFields::kSecretMask);
+          else kv.value().set(nullptr);
           break;
         }
       }
