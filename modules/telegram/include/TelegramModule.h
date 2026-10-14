@@ -10,7 +10,7 @@
 class TelegramModule : public ESPRack::Module {
  public:
   void describe(ESPRack::ModuleDescriptor& d) override {
-    d.id = "telegram"; d.version = "2.0.0"; d.priority = 40;
+    d.id = "telegram"; d.version = "2.1.0"; d.priority = 40;
     d.requires_ = {"wifi"};
   }
   void onInstall(ESPRack::ModuleContext& ctx) override {
@@ -24,6 +24,7 @@ class TelegramModule : public ESPRack::Module {
     svc_->registerManifest(ctx.web);
   }
   void onBegin() override { if (svc_) svc_->begin(); }
+  void onLoop() override { if (svc_) svc_->loop(); }  // command handlers (SES-LIB-019)
 
   // Service accessor — useful for App-level integration tests / direct
   // legacy enqueue.

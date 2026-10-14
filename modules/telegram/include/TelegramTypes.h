@@ -5,10 +5,24 @@
 #include <Arduino.h>
 #include <messaging/MessagingTypes.h>
 
+#include <functional>
+
 // Telegram-specific message routing. Empty fields fall back to
 // whatever the subscription was configured with (subscription's
 // defaultChatId / defaultTopicId), and from there to the bot's
 // global defaults (TelegramSettings.chatId / topicId).
+// SES-LIB-019: one command an allowed chat sent to the bot.
+struct TelegramInbound {
+  String chatId;
+  int32_t topicId = 0;  // message_thread_id, 0 = none
+  String fromId;
+  String command;       // lower case, without "/" and "@bot"
+  String args;
+  bool admin = false;   // fromId is in admin_user_ids
+};
+// Runs on the loop task; the returned text is the reply ("" = none).
+using TelegramCommandHandler = std::function<String(const TelegramInbound&)>;
+
 struct TelegramRecipient {
   String chatId;        // numeric ID or @channel
   String topicId;       // optional message_thread_id (forum thread)

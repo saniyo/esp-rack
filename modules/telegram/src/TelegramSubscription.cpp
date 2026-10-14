@@ -46,3 +46,7 @@ bool TelegramSubscription::active() const {
   if (!provider_->subscriptionEnabled(id_)) return false;
   return provider_->connectionState() != ESPRack::MessagingConnectionState::Disabled;
 }
+
+bool TelegramSubscription::onCommand(const char* cmd, const char* help, TelegramCommandHandler h, bool adminOnly) {
+  return valid() && provider_->doOnCommand(id_, cmd, help, std::move(h), adminOnly);
+}

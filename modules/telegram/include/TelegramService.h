@@ -63,7 +63,11 @@ class TelegramService : public StatefulService<TelegramSettings>,
 
   void registerManifest(WebManager* web);
   void begin();
-  void loop() {}
+  // Runs command handlers on the loop task (SES-LIB-019).
+  void loop();
+
+  bool doOnCommand(uint32_t subId, const char* cmd, const char* help, TelegramCommandHandler h,
+                   bool adminOnly) override;
 
   // ── Legacy direct-enqueue (to be deprecated) ────────────────────
   void enqueueDefault(const char* text);
@@ -121,6 +125,33 @@ class TelegramService : public StatefulService<TelegramSettings>,
 
   static void taskTrampoline(void*);
   void runWorker();
+  void startTask();
+
+  // SES-LIB-019 commands.
+  struct TgCommand {
+    uint32_t subId;
+    String cmd;
+    String help;
+    TelegramCommandHandler h;
+    bool adminOnly;
+  };
+  static constexpr size_t kMaxCommands = 16;
+  std::vector<TgCommand> _cmds;            // guarded by _cmdMx
+  SemaphoreHandle_t _cmdMx{nullptr};
+  uint32_t _cmdsRev{0};                    // +1 per registration
+  uint32_t _cmdsPublished{0};              // the rev setMyCommands last sent
+  QueueHandle_t _inQ{nullptr};             // TelegramInbound*, TelTask -> loop
+  long long _updOffset{0};                 // 0 = backlog not skipped yet
+  uint32_t _lastPollMs{0};
+  struct AdminNag {
+    String fromId;
+    uint32_t at;
+  };
+  AdminNag _nags[8];                       // "admin only" at most once a minute per user
+  uint32_t _cmdIgnored{0}, _cmdDropped{0};
+  void pollCommands(const String& token);
+  void publishCommands(const String& token);
+  bool postJson(const String& token, const char* method, const String& payload);
 
   // Locate a subscription record by id; nullptr if missing/invalid.
   TelegramSubscriptionRecord*       findSub(uint32_t id);

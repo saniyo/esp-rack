@@ -45,6 +45,10 @@ struct TelegramSettings {
   // int-based (matches the rest of the codebase pattern).
   int           parseMode{1};
   bool          silentDefault{false};
+  // SES-LIB-019 commands: who may send them, who is admin, how often to ask.
+  String        allowedChatIds;   // "123, -100456, -100789:12"; "" = the default chat only
+  String        adminUserIds;     // "111, 222"
+  uint16_t      cmdPollS{10};
 
   // ── Runtime status (not persisted) ───────────────────────────────────
   // Connection-state label shown verbatim in the Status form. Set by

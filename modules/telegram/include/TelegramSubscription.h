@@ -54,6 +54,12 @@ class TelegramSubscription {
   // in a later iteration; for now the flag is RAM-only and resets on
   // boot.
   bool enabled() const;
+
+  // SES-LIB-019: answer "/<cmd> [args]" from the allowed chats. The handler
+  // runs on the loop task; its text is the reply ("" = none). adminOnly:
+  // only users in admin_user_ids. false: invalid handle, table full, or the
+  // name is taken.
+  bool onCommand(const char* cmd, const char* help, TelegramCommandHandler h, bool adminOnly = false);
   void setEnabled(bool on);
 
   // Composite "ready to actually deliver" gate. Returns true only when

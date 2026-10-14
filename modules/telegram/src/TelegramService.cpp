@@ -1,5 +1,7 @@
 #include "TelegramService.h"
 #include <ArduinoJson.h>
+#include "TelegramCommand.h"
+#include <WiFi.h>
 #include <WebManager.h>
 #include <WebFeatureSpec.h>
 #include <web/Form.h>
@@ -21,6 +23,8 @@ TelegramService::TelegramService(ConfigManager* cfgMgr)
     _cli(),
     _bot("", _cli),
     _botTokenInBot("") {
+  _cmdMx = xSemaphoreCreateMutex();
+  _inQ = xQueueCreate(4, sizeof(TelegramInbound*));  // SES-LIB-019
   // Queue holds POINTERS to heap-allocated TelegramQueuedMessage. We
   // can't memcpy the struct by value because it carries Arduino String
   // members — the FreeRTOS queue's bitwise copy duplicates the
@@ -196,6 +200,7 @@ void TelegramService::begin() {
   //      send. ensureBotToken catches token edits so the UTB
   //      fallback uses the new value next time.
   addUpdateHandler([this](const String& origin) {
+    if (_state.enabled && !_task) startTask();  // enabled at runtime: no reboot (SES-LIB-019)
     ensureBotToken(_state.botToken);
     updateStatusLabel();
     _cfg.saveIfChanged(origin);
@@ -219,18 +224,7 @@ void TelegramService::begin() {
   // on first save where enabled=true (no reboot needed) — see
   // docs/plans/disable-inactive-tasks.md.
   if (_state.enabled) {
-    constexpr uint32_t kStackWords = 6144 / sizeof(StackType_t);
-    static StackType_t  s_telStack[kStackWords];
-    static StaticTask_t s_telBlock;
-#if defined(CONFIG_FREERTOS_UNICORE) && CONFIG_FREERTOS_UNICORE
-    _task = xTaskCreateStatic(taskTrampoline, "TelTask", kStackWords,
-                              this, 1, s_telStack, &s_telBlock);
-#else
-    _task = xTaskCreateStaticPinnedToCore(
-        taskTrampoline, "TelTask", kStackWords, this, 1,
-        s_telStack, &s_telBlock, 1);
-#endif
-    log_i("[tel] task started (enabled=true)");
+    startTask();
   } else {
     log_i("[tel] task NOT started — Telegram disabled in config");
   }
@@ -624,6 +618,22 @@ const char* TelegramService::parseModeString(int code) {
 }
 
 // ─── worker task ────────────────────────────────────────────────────
+void TelegramService::startTask() {
+  if (_task) return;
+  constexpr uint32_t kStackWords = 6144 / sizeof(StackType_t);
+  static StackType_t  s_telStack[kStackWords];
+  static StaticTask_t s_telBlock;
+#if defined(CONFIG_FREERTOS_UNICORE) && CONFIG_FREERTOS_UNICORE
+  _task = xTaskCreateStatic(taskTrampoline, "TelTask", kStackWords,
+                            this, 1, s_telStack, &s_telBlock);
+#else
+  _task = xTaskCreateStaticPinnedToCore(
+      taskTrampoline, "TelTask", kStackWords, this, 1,
+      s_telStack, &s_telBlock, 1);
+#endif
+  log_i("[tel] task started (enabled=true)");
+}
+
 void TelegramService::taskTrampoline(void* pv) {
   static_cast<TelegramService*>(pv)->runWorker();
 }
@@ -631,6 +641,12 @@ void TelegramService::taskTrampoline(void* pv) {
 void TelegramService::runWorker() {
   TelegramQueuedMessage* m = nullptr;
   for (;;) {
+    // SES-LIB-019: ask for commands every cmd_poll_s while any is registered.
+    if (_state.enabled && !_state.botToken.isEmpty() && WiFi.isConnected() && !_cmds.empty() &&
+        static_cast<uint32_t>(millis() - _lastPollMs) >= static_cast<uint32_t>(_state.cmdPollS) * 1000u) {
+      _lastPollMs = millis();
+      pollCommands(_state.botToken);
+    }
     if (xQueueReceive(_q, &m, pdMS_TO_TICKS(50)) != pdPASS || !m) {
       vTaskDelay(pdMS_TO_TICKS(20));
       continue;
@@ -674,4 +690,158 @@ void TelegramService::runWorker() {
 
     vTaskDelay(pdMS_TO_TICKS(_state.sendIntervalMs));
   }
+}
+
+// ── Commands (SES-LIB-019) ─────────────────────────────────────────────────
+
+bool TelegramService::doOnCommand(uint32_t subId, const char* cmd, const char* help, TelegramCommandHandler h,
+                                  bool adminOnly) {
+  if (!cmd || !*cmd || !h || !findSub(subId)) return false;
+  String name = cmd[0] == '/' ? String(cmd + 1) : String(cmd);
+  name.toLowerCase();
+  xSemaphoreTake(_cmdMx, portMAX_DELAY);
+  bool ok = _cmds.size() < kMaxCommands;
+  for (const auto& c : _cmds) ok = ok && c.cmd != name;
+  if (ok) {
+    _cmds.push_back(TgCommand{subId, name, help ? String(help) : String(), std::move(h), adminOnly});
+    ++_cmdsRev;
+  }
+  xSemaphoreGive(_cmdMx);
+  return ok;
+}
+
+void TelegramService::loop() {
+  TelegramInbound* in = nullptr;
+  while (_inQ && xQueueReceive(_inQ, &in, 0) == pdPASS && in) {
+    TelegramCommandHandler h;
+    bool adminOnly = false;
+    xSemaphoreTake(_cmdMx, portMAX_DELAY);
+    for (const auto& c : _cmds) {
+      if (c.cmd == in->command) {
+        h = c.h;
+        adminOnly = c.adminOnly;
+        break;
+      }
+    }
+    xSemaphoreGive(_cmdMx);
+    if (h && (!adminOnly || in->admin)) {
+      const String reply = h(*in);
+      if (!reply.isEmpty()) {
+        enqueueMessage(in->chatId, in->topicId ? String(in->topicId) : String(), reply, TelegramSendOptions{}, String());
+      }
+    }
+    delete in;
+  }
+}
+
+bool TelegramService::postJson(const String& token, const char* method, const String& payload) {
+  const char* host = "api.telegram.org";
+  _cli.stop();
+  _cli.setHandshakeTimeout(8);
+  _cli.setTimeout(5000);
+  if (!_cli.connect(host, 443, 5000)) return false;
+  _cli.print(String("POST /bot") + token + "/" + method + " HTTP/1.0\r\nHost: " + host +
+             "\r\nContent-Type: application/json\r\nContent-Length: " + String(payload.length()) + "\r\n\r\n" +
+             payload);
+  const bool ok = _cli.readStringUntil('\n').indexOf(" 200 ") >= 0;
+  _cli.stop();
+  return ok;
+}
+
+void TelegramService::publishCommands(const String& token) {
+  String body = "{\"commands\":[";
+  uint32_t rev;
+  xSemaphoreTake(_cmdMx, portMAX_DELAY);
+  rev = _cmdsRev;
+  for (size_t i = 0; i < _cmds.size(); ++i) {
+    StaticJsonDocument<256> one;
+    one["command"] = _cmds[i].cmd;
+    one["description"] = _cmds[i].help.isEmpty() ? _cmds[i].cmd : _cmds[i].help;
+    if (i) body += ',';
+    serializeJson(one, body);
+  }
+  xSemaphoreGive(_cmdMx);
+  body += "]}";
+  if (postJson(token, "setMyCommands", body)) _cmdsPublished = rev;
+}
+
+void TelegramService::pollCommands(const String& token) {
+  const char* host = "api.telegram.org";
+  _cli.stop();
+  _cli.setHandshakeTimeout(8);
+  _cli.setTimeout(5000);
+  if (!_cli.connect(host, 443, 5000)) return;
+  // Not primed yet: only the newest update, to skip the backlog.
+  const String offset = _updOffset ? String(_updOffset) : String("-1");
+  _cli.print(String("GET /bot") + token + "/getUpdates?timeout=0&limit=4&offset=" + offset +
+             "&allowed_updates=%5B%22message%22%5D HTTP/1.0\r\nHost: " + host + "\r\n\r\n");
+  const bool httpOk = _cli.readStringUntil('\n').indexOf(" 200 ") >= 0;
+  while (httpOk && _cli.connected()) {  // headers
+    const String line = _cli.readStringUntil('\n');
+    if (line.length() <= 1) break;
+  }
+  StaticJsonDocument<256> filter;
+  JsonObject fu = filter["result"].createNestedObject();
+  fu["update_id"] = true;
+  JsonObject fm = fu.createNestedObject("message");
+  fm["text"] = true;
+  fm["message_thread_id"] = true;
+  fm["chat"]["id"] = true;
+  fm["from"]["id"] = true;
+  DynamicJsonDocument doc(2048);
+  const bool parsed = httpOk && !deserializeJson(doc, _cli, DeserializationOption::Filter(filter));
+  _cli.stop();
+  if (!parsed) return;
+
+  const bool primed = _updOffset != 0;
+  for (JsonObject u : doc["result"].as<JsonArray>()) {
+    const long long id = u["update_id"] | 0LL;
+    if (id + 1 > _updOffset) _updOffset = id + 1;
+    if (!primed) continue;  // the backlog
+    JsonObject msg = u["message"];
+    const tgcmd::Parsed p = tgcmd::parse(msg["text"] | "");
+    if (!p.ok) continue;
+    char chat[24], from[24];
+    snprintf(chat, sizeof(chat), "%lld", msg["chat"]["id"] | 0LL);
+    snprintf(from, sizeof(from), "%lld", msg["from"]["id"] | 0LL);
+    const int32_t topic = msg["message_thread_id"] | 0;
+
+    bool known = false, adminCmd = false;
+    xSemaphoreTake(_cmdMx, portMAX_DELAY);
+    for (const auto& c : _cmds) {
+      if (c.cmd == p.command.c_str()) {
+        known = true;
+        adminCmd = c.adminOnly;
+        break;
+      }
+    }
+    xSemaphoreGive(_cmdMx);
+    const bool admin = tgcmd::inList(_state.adminUserIds.c_str(), from);
+    const tgcmd::Verdict v = tgcmd::decide(
+        tgcmd::chatAllowed(_state.allowedChatIds.c_str(), chat, topic, _state.chatId.c_str()), known, adminCmd, admin);
+    if (v == tgcmd::Verdict::Ignore) {
+      ++_cmdIgnored;
+      continue;
+    }
+    if (v == tgcmd::Verdict::AdminOnly) {
+      // At most once a minute per user, so nobody can flood the send queue.
+      AdminNag* slot = &_nags[0];
+      for (auto& n : _nags) {
+        if (n.fromId == from) { slot = &n; break; }
+        if (n.at < slot->at) slot = &n;
+      }
+      const uint32_t now = millis();
+      if (slot->fromId == from && now - slot->at < 60000u) continue;
+      slot->fromId = from;
+      slot->at = now;
+      enqueueMessage(chat, topic ? String(topic) : String(), "Admin only.", TelegramSendOptions{}, String());
+      continue;
+    }
+    auto* in = new TelegramInbound{chat, topic, from, p.command.c_str(), p.args.c_str(), admin};
+    if (xQueueSend(_inQ, &in, 0) != pdPASS) {
+      delete in;
+      ++_cmdDropped;
+    }
+  }
+  if (_updOffset && _cmdsPublished != _cmdsRev) publishCommands(token);
 }

@@ -17,6 +17,9 @@ void TelegramSettings::readConfig(TelegramSettings& s, JsonObject& root) {
   root["interval_ms"]      = s.sendIntervalMs;
   root["parse_mode"]       = s.parseMode;
   root["silent_default"]   = s.silentDefault;
+  root["allowed_chat_ids"] = s.allowedChatIds;
+  root["admin_user_ids"]   = s.adminUserIds;
+  root["cmd_poll_s"]       = s.cmdPollS;
 }
 
 // ─── REST update (form POST + FS load) ───────────────────────────────
@@ -43,6 +46,11 @@ StateUpdateResult TelegramSettings::upd(JsonObject& j, TelegramSettings& s) {
   cfgChanged |= FormBuilder::updateValue(src, "interval_ms",    s.sendIntervalMs);
   cfgChanged |= FormBuilder::updateValue(src, "parse_mode",     s.parseMode);
   cfgChanged |= FormBuilder::updateValue(src, "silent_default", s.silentDefault);
+  cfgChanged |= FormBuilder::updateValue(src, "allowed_chat_ids", s.allowedChatIds);
+  cfgChanged |= FormBuilder::updateValue(src, "admin_user_ids", s.adminUserIds);
+  cfgChanged |= FormBuilder::updateValue(src, "cmd_poll_s", s.cmdPollS);
+  if (s.cmdPollS < 5) s.cmdPollS = 5;
+  if (s.cmdPollS > 60) s.cmdPollS = 60;
 
   // Runtime composer text — saved into state so the form re-renders
   // with the same text after the operator triggered Send. NOT persisted.
@@ -156,6 +164,16 @@ void TelegramSettings::buildForm(TelegramSettings& s, JsonObject& root) {
               .option("None", 0).option("Markdown", 1)
               .option("MarkdownV2", 2).option("HTML", 3)
               .label("Default parse mode").icon("FormatPaint"));
+
+  // SES-LIB-019: bot commands.
+
+  set.add(web::Text("allowed_chat_ids", s.allowedChatIds.c_str())
+
+              .label("Command chats (id, -group, group:topic)").placeholder("the default chat only"));
+
+  set.add(web::Text("admin_user_ids", s.adminUserIds.c_str()).label("Admin user ids"));
+
+  set.add(web::Number("cmd_poll_s", s.cmdPollS).min(5).max(60).format("0").unit("s").label("Command poll"));
 
   set.add(web::Switch("silent_default", s.silentDefault)
               .label("Silent by default").icon("NotificationsOff"));
