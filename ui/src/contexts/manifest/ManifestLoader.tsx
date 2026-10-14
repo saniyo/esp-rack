@@ -1,3 +1,4 @@
+import { normalizeManifest } from './normalizeManifest';
 import { FC, useCallback, useEffect, useMemo, useState } from 'react';
 
 import * as ManifestApi from '../../api/manifest';
@@ -70,10 +71,10 @@ const ManifestLoader: FC<RequiredChildrenProps> = (props) => {
         // carries schemaVersion + device + buildFeatures +
         // authenticated:false.
         const next: UiManifest = data
-          ? {
+          ? normalizeManifest({
               ...data,
               features: Array.isArray(data.features) ? data.features : [],
-            }
+            })
           : EMPTY_MANIFEST;
         setManifest(next);
         applyManifest(next);

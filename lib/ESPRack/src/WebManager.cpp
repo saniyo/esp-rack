@@ -5,6 +5,85 @@
 #include <esp_rom_crc.h>
 #include <time/TimeSync.h>
 
+// ── Compact entries (SES-LIB-030) ──────────────────────────────────
+// The streamed (browser / flash-cached) manifest, schemaVersion 4, leaves out
+// what follows from an entry's id or is the default; the UI puts it back
+// (ui/src/contexts/manifest/normalizeManifest.ts). The in-process copy for
+// Mothership (buildManifestObject) stays full, schemaVersion 3.
+namespace {
+void dropIf(JsonObject x, const char* key, const char* v) {
+  const char* cur = x[key] | (const char*)nullptr;
+  if (cur && v && strcmp(cur, v) == 0) x.remove(key);
+}
+void dropFalse(JsonObject x, const char* key) {
+  if (x.containsKey(key) && !x[key].as<bool>()) x.remove(key);
+}
+void dropEmpty(JsonObject x, const char* key) {
+  if (x.containsKey(key) && x[key].is<JsonArray>() && x[key].as<JsonArray>().size() == 0) x.remove(key);
+}
+void compactAction(JsonObject a) {
+  char path[112];
+  fillActionPath(path, sizeof(path), a["id"] | "");
+  dropIf(a, "restPath", path);
+  dropIf(a, "method", "POST");
+  dropIf(a, "auth", "authenticated");
+}
+}  // namespace
+
+void compactManifestEntry(JsonObject o) {
+  const char* kind = o["kind"] | "feature";
+  if (strcmp(kind, "action") == 0) {
+    compactAction(o);
+    return;
+  }
+  const char* id = o["id"] | "";
+  const char* auth = o["auth"] | "authenticated";  // static strings: stay valid after remove()
+  const char* title = o["title"] | "";
+  const bool page = strcmp(kind, "page") == 0;
+  char form[112], state[112], route[96];
+  snprintf(form, sizeof(form), "%s/%s/form", API_V1_PREFIX, id);
+  snprintf(state, sizeof(state), "%s/%s/state", API_V1_PREFIX, id);
+  snprintf(route, sizeof(route), "/%s/*", id);
+
+  dropIf(o, "kind", "feature");
+  dropIf(o, "component", page ? "" : "DynamicSettings");
+  dropIf(o, "route", route);
+  if (o["menu"].is<JsonObject>()) {
+    JsonObject m = o["menu"].as<JsonObject>();
+    dropIf(m, "label", title);
+    if ((m["order"] | 0) == 0) m.remove("order");
+    dropIf(m, "auth", auth);
+    dropFalse(m, "hidden");
+    if (m["expandTabs"] | false) m.remove("expandTabs");  // v4 default: true
+    else m["expandTabs"] = false;
+  }
+  if (o["rest"].is<JsonObject>()) {
+    JsonObject r = o["rest"].as<JsonObject>();
+    const char* rr = r["read"] | "";
+    const char* ru = r["update"] | "";
+    const char* rs = r["state"] | "";
+    if (strcmp(rr, form) == 0 && strcmp(ru, state) == 0 && strcmp(rs, state) == 0 && r.size() == 3) o["rest"] = 1;
+  }
+  if (o["tabs"].is<JsonArray>()) {
+    for (JsonObject t : o["tabs"].as<JsonArray>()) {
+      dropIf(t, "restPath", form);
+      dropFalse(t, "postable");
+      dropFalse(t, "live");
+      dropIf(t, "auth", auth);
+    }
+  }
+  if (o["actions"].is<JsonArray>()) {
+    for (JsonObject a : o["actions"].as<JsonArray>()) compactAction(a);
+  }
+  if (o["endpoints"].is<JsonArray>()) {
+    for (JsonObject e : o["endpoints"].as<JsonArray>()) dropIf(e, "auth", "authenticated");
+  }
+  dropEmpty(o, "tabs");
+  dropEmpty(o, "actions");
+  dropEmpty(o, "endpoints");
+  dropIf(o, "auth", "authenticated");
+}
+
 // ── ManifestBuilder method definitions ─────────────────────────────
 // The class itself is declared in WebManager.h so the singleton
 // instance can live as a WebManager member (BSS, not per-request
@@ -138,7 +217,7 @@ void ManifestBuilder::advancePhase() {
 
 void ManifestBuilder::fillPhaseBuffer() {
   switch (_phase) {
-    case Phase::HEADER:              setLiteral("{\"schemaVersion\":3"); return;
+    case Phase::HEADER:              setLiteral("{\"schemaVersion\":4"); return;
     case Phase::DEVICE_OPEN:         setLiteral(",\"device\":"); return;
     case Phase::BUILDFEATURES_OPEN:  setLiteral(",\"buildFeatures\":"); return;
     case Phase::AUTH_FALSE_END:      setLiteral(",\"authenticated\":false}"); return;
@@ -190,6 +269,7 @@ void ManifestBuilder::fillPhaseBuffer() {
     case Phase::FEATURES_ITEM: {
       JsonObject o = _doc.to<JsonObject>();
       _mgr->_entries[_featIdx]->toJson(o);
+      compactManifestEntry(o);
       renderDocIntoItem();
       return;
     }
@@ -301,6 +381,15 @@ void WebManager::addDeviceTz(JsonObject device) {
   if (posix[0]) tz["posix"] = (char*)posix;  // copied
 }
 
+void WebManager::noteManifestBytes(bool authed, size_t bytes) {
+  _manifestBytes[authed ? 1 : 0] = static_cast<uint32_t>(bytes);
+  log_i("[web.manifest] %s tier: %u B", authed ? "authed" : "anon", (unsigned)bytes);
+  if (bytes > ESPRACK_MANIFEST_BUDGET) {
+    log_w("[web.manifest] %s tier %u B is over the %u B budget", authed ? "authed" : "anon", (unsigned)bytes,
+          (unsigned)ESPRACK_MANIFEST_BUDGET);
+  }
+}
+
 void WebManager::refreshManifestCache() {
   if (_manifestSig == 0) return;  // begin() bakes it
   writeManifestCacheToFs();
@@ -393,7 +482,7 @@ uint32_t WebManager::computeManifestSig(ManifestBuilder& builder) const {
   // even in the (impossible-in-practice) event the new content CRCs to the
   // same value as the old. Bump on any cross-cutting manifest format change.
   // 0x0A_01_00_03 = api-v1 (C1), manifest schemaVersion 3.
-  static constexpr uint32_t kManifestSigSalt = 0x0A010003u;
+  static constexpr uint32_t kManifestSigSalt = 0x0A010004u;  // 4: compact entries (SES-LIB-030)
   uint32_t crc = 0xFFFFFFFF;
   crc = esp_rom_crc32_le(crc, reinterpret_cast<const uint8_t*>(&kManifestSigSalt),
                          sizeof(kManifestSigSalt));
@@ -444,6 +533,13 @@ void WebManager::writeManifestCacheToFs() {
     log_i("[web.manifest] cache sig 0x%08x matches — reusing existing flash files",
           (unsigned)sig);
     _manifestLive = false;
+    for (int authed = 0; authed < 2; ++authed) {
+      fs::File cf = ESPFS.open(authed ? kManifestCacheAuthedPath : kManifestCacheAnonPath, "r");
+      if (cf) {
+        noteManifestBytes(authed != 0, cf.size());
+        cf.close();
+      }
+    }
     return;
   }
   // PowerGuard (SES-LIB-008): no flash writes now. Serve the manifest built
@@ -487,6 +583,7 @@ void WebManager::writeManifestCacheToFs() {
       continue;
     }
     log_i("[web.manifest] wrote %s cache: %u B", authed ? "authed" : "anon", (unsigned)sz);
+    noteManifestBytes(authed != 0, sz);
   }
   // Commit the new signature LAST. If a reboot interrupts the rewrite
   // mid-flight, the old (mismatching) signature stays — next boot

@@ -256,6 +256,19 @@ void SystemStatus::buildForm(JsonObject& root,
       sta.add(web::Text("storage_nvs", nv.c_str()).readOnly()
                   .label("Storage: NVS (used / total)").icon("Storage"));
     }
+    // SES-LIB-030: the cached UI manifest per tier against its budget.
+    if (_app) {
+      const uint32_t ma = _app->webManager()->manifestBytes(true);
+      const uint32_t mn = _app->webManager()->manifestBytes(false);
+      if (ma || mn) {
+        String ms = "authed " + String((unsigned)ma) + " B, anon " + String((unsigned)mn) + " B";
+        if (ma > ESPRACK_MANIFEST_BUDGET || mn > ESPRACK_MANIFEST_BUDGET) {
+          ms += " · over the " + String((unsigned)ESPRACK_MANIFEST_BUDGET) + " B budget";
+        }
+        sta.add(web::Text("manifest_size", ms.c_str()).readOnly()
+                    .label("UI manifest (cached)").icon("Storage"));
+      }
+    }
     const size_t waiting = _app ? _app->configManager()->deferredCount() : 0;
     if (waiting) {
       String d = String((unsigned)waiting) + (waiting == 1 ? " config save waiting" : " config saves waiting");

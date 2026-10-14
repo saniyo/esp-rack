@@ -2,6 +2,12 @@
 #define WebManager_h
 
 #include <cstring>
+
+// SES-LIB-030: soft budget of one cached manifest tier (raw bytes). Over it:
+// a warning at boot and in System -> Status.
+#ifndef ESPRACK_MANIFEST_BUDGET
+#define ESPRACK_MANIFEST_BUDGET 16384
+#endif
 #include <functional>
 #include <memory>
 #include <utility>
@@ -244,6 +250,9 @@ class WebManager {
   // the manifest shows — the device timezone (SES-LIB-015). No-op before
   // begin(). Loop task; rewrites only when the content signature changed.
   void refreshManifestCache();
+
+  // SES-LIB-030: bytes of the cached manifest per tier (0 = not cached).
+  uint32_t manifestBytes(bool authed) const { return _manifestBytes[authed ? 1 : 0]; }
 
   // A root-level manifest array that another core object fills, streamed
   // one item at a time like the features: the hardware registry's "extHw"
@@ -488,6 +497,8 @@ class WebManager {
   // revalidate with a cheap 304 instead of re-streaming the ~15 KB body
   // on every page load. 0 = not yet computed → ETag path skipped.
   uint32_t _manifestSig{0};
+  uint32_t _manifestBytes[2]{0, 0};
+  void noteManifestBytes(bool authed, size_t bytes);
   bool _manifestLive{false};  // writes were paused at the last re-bake: build on the fly
 
   // Singleton manifest builder — BSS-resident, NOT allocated per

@@ -9,7 +9,7 @@
 class SystemStatusModule : public ESPRack::Module {
  public:
   void describe(ESPRack::ModuleDescriptor& d) override {
-    d.id = "systemStatus"; d.version = "1.0.4"; d.priority = 80;
+    d.id = "systemStatus"; d.version = "1.0.5"; d.priority = 80;
   }
   void onInstall(ESPRack::ModuleContext& ctx) override {
     svc_.reset(new SystemStatus(ctx.server, ctx.security, ctx.web));
