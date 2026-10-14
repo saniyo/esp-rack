@@ -18,6 +18,13 @@
 //      form.add(web::Table("rows").col("ts", "Time", "number").mode("append").maxRows(50));
 //      form.add(web::Trend("chart").line("sin", "#f00", "line").legend().maxPoints(100));
 //
+//  Layout (SES-LIB-029): fields flow in a grid by themselves. web::Cols(n)
+//  puts the following fields n per row (fewer on narrow screens) until the
+//  next Cols() or a Break(); .span(k) / .fullRow() on a field override its
+//  type's default width:
+//      form.add(web::Cols(2)).add(web::Number("a", 1)).add(web::Number("b", 2))
+//          .add(web::Break()).add(web::Text("note", "..."));
+//
 //  Every `.` autocompletes (member functions, not free tag-functions), and a
 //  builder only exposes the options its field type actually supports — calling
 //  .min() on a Text won't compile. Universal options (icon/label/showIf/card…)
@@ -47,6 +54,11 @@ class FieldSpec {
   D& icon(const char* n)        { return putStr(Opt::Icon, n); }
   D& color(const char* c)       { return putStr(Opt::Color, c); }
   D& card(const char* groupId)  { return putStr(Opt::Card, groupId); }
+  // Layout (SES-LIB-029): k grid columns, or the whole row. Defaults come
+  // from the type (numbers, switches, selects: one column; text, tables,
+  // trends, messages, actions: the whole row).
+  D& span(int k)                { return k > 1 ? putInt(Opt::Span, k) : self(); }
+  D& fullRow(bool on = true)    { return on ? putFlag1(Opt::FullRow) : self(); }
   D& cardTitle(const char* t)   { return putStr(Opt::CardTitle, t); }
   D& cardDeletable(bool on = true) { return on ? putFlag1(Opt::CardDeletable) : self(); }
   D& hideAvatar(bool on = true)    { return on ? putFlag1(Opt::HideAvatar) : self(); }
@@ -189,7 +201,9 @@ class Number : public FieldSpec<Number> {
   void writeTo(JsonArray& fields) const {
     int decimals = decimalsOf(_fmt);
     JsonObject f = fields.createNestedObject();
-    f[_key] = String(_v, decimals);  // stringified at the schema's precision
+    char num[32];  // at the schema's precision; "%.*f", not String()'s padded " 0"
+    snprintf(num, sizeof(num), "%.*f", decimals, _v);
+    f[_key] = num;
     String o = head(FieldType::Number);
     o += ';'; o += Opt::Min; o += '='; o += _min;
     o += ';'; o += Opt::Max; o += '='; o += _max;
@@ -510,6 +524,32 @@ class Message : public FieldSpec<Message> {
 // ── The form ──────────────────────────────────────────────────────────────
 // Wraps the old createForm: creates root[name] = { description, fields:[] }.
 // add() materializes a field builder into the fields array.
+// ── Layout markers (SES-LIB-029) ─────────────────────────────────────────
+// Placed between fields: form.add(web::Cols(2)) puts the following fields two
+// per row on a wide screen (fewer on narrow ones) until the next Cols() or a
+// Break(), which goes back to the default flow (fields as wide as they need,
+// wrapping by themselves). Wire: {"t":"cols","n":2} / {"t":"brk"}.
+class Cols {
+ public:
+  explicit Cols(int n) : _n(n < 1 ? 1 : n) {}
+  void writeTo(JsonArray& fields) const {
+    JsonObject o = fields.createNestedObject();
+    o["t"] = "cols";
+    o["n"] = _n;
+  }
+
+ private:
+  int _n;
+};
+
+class Break {
+ public:
+  void writeTo(JsonArray& fields) const {
+    JsonObject o = fields.createNestedObject();
+    o["t"] = "brk";
+  }
+};
+
 class Form {
  public:
   Form(JsonObject& root, const char* name, const char* description) {
