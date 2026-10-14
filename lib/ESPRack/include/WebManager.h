@@ -32,6 +32,9 @@
 // SES-LIB-030: GET ?of=<featureId> -> {"actions":[...]}, a feature's own
 // actions, which the cached manifest leaves out.
 #define UI_ACTIONS_OF_PATH "/api/v1/ui/actions"
+// SES-LIB-032: GET -> {"tz":{"iana","posix"}}, the device's runtime facts,
+// kept out of the cached manifest so it changes only with the firmware.
+#define UI_DEVICE_PATH "/api/v1/ui/device"
 // Manifest assembly streams JSON on the fly via ManifestBuilder (a
 // stateful section-by-section generator owned as a WebManager member
 // in BSS). One builder serves one request at a time, gated by a

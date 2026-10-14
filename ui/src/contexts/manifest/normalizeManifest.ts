@@ -67,3 +67,10 @@ export function mergeActions(m: UiManifest, actions: FeatureEntry[]): UiManifest
 
 // "meter.reset" -> "meter": the feature an action belongs to by its id.
 export const ownerOfAction = (id: string): string => (id.indexOf('.') > 0 ? id.slice(0, id.indexOf('.')) : '');
+
+// SES-LIB-032: the device's time zone comes from GET ui/device and joins
+// manifest.device.tz, where the picker, trends and tables read it.
+export function mergeDevice(m: UiManifest, d?: { tz?: { iana?: string; posix?: string } }): UiManifest {
+  if (!d?.tz) return m;
+  return { ...m, device: { ...(m.device ?? {}), tz: d.tz } };
+}

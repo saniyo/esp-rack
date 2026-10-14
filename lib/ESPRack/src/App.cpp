@@ -375,11 +375,8 @@ void App::begin() {
   // 5. WebManager.begin() iterates registered features and mounts
   // /api/v1/ui/manifest. Must come AFTER all modules have registered.
   webManager_.begin();
-  // The manifest carries device.tz (SES-LIB-015): a later timezone change
-  // re-bakes it (new ETag). TzChanged fires on the loop task, real changes only.
-  TimeSync::instance().subscribe([this](TimeEvent e, const TimeStatus&, TimeStep) {
-    if (e == TimeEvent::TzChanged) webManager_.refreshManifestCache();
-  });
+  // The time zone is served by UI_DEVICE_PATH, so the manifest no longer
+  // changes with it (SES-LIB-032): one flash write per firmware.
   HeapMonitor::logSnapshot("boot:webmanager-begun");
 
   // 6. WS keepalive — phantom-client eviction, defaults match the

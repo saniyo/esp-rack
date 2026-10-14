@@ -247,7 +247,6 @@ void ManifestBuilder::fillPhaseBuffer() {
       if (_mgr->_frameworkVersion && *_mgr->_frameworkVersion) {
         d["frameworkVersion"] = _mgr->_frameworkVersion;
       }
-      WebManager::addDeviceTz(d);
       renderDocIntoItem();
       return;
     }
@@ -343,6 +342,15 @@ void WebManager::begin() {
       [this](AsyncWebServerRequest* request) { this->serveManifest(request); };
   _server->on(UI_MANIFEST_PATH, HTTP_GET, handler);
 
+  // SES-LIB-032: the time zone (runtime), not part of the cached manifest.
+  _server->on(UI_DEVICE_PATH, HTTP_GET, [this](AsyncWebServerRequest* request) {
+    if (_sm && !_sm->authenticateRequest(request).authenticated) {
+      request->send(401);
+      return;
+    }
+    sendAdaptiveJson(request, [](JsonObject& root) { addDeviceTz(root); }, 256);
+  });
+
   // SES-LIB-030: a feature's own actions, left out of the cached manifest;
   // the UI asks for them when it opens the feature or meets one in a form.
   _server->on(UI_ACTIONS_OF_PATH, HTTP_GET, [this](AsyncWebServerRequest* request) {
@@ -393,7 +401,8 @@ void WebManager::begin() {
 // snapshot the device's UI schema without an HTTPS round trip on each
 // poll.
 // device.tz = {iana, posix} (SES-LIB-015): the UI formats device-local
-// times with it. Omitted while no timezone is set.
+// times with it. Omitted while no timezone is set. Served by UI_DEVICE_PATH
+// and in Mothership's copy, not in the cached manifest (SES-LIB-032).
 void WebManager::addDeviceTz(JsonObject device) {
   char posix[64], iana[64];
   ESPRack::TimeSync::instance().getTimezone(posix, sizeof(posix), iana, sizeof(iana));

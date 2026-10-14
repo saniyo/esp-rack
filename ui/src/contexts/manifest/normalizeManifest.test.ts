@@ -3,7 +3,8 @@
 import { describe, expect, it } from '@jest/globals';
 
 import { findAction } from '../../utils/manifestEndpoints';
-import { mergeActions, normalizeEntry, normalizeManifest, ownerOfAction } from './normalizeManifest';
+import { resolveZone } from '../../utils/deviceTime';
+import { mergeActions, mergeDevice, normalizeEntry, normalizeManifest, ownerOfAction } from './normalizeManifest';
 
 const API = '/api/v1';
 export function compact(f: any): any {
@@ -96,5 +97,16 @@ describe('lazy feature actions', () => {
     expect(mergeActions(m2, fetched as any)).toBe(m2);  // no duplicates
     expect(ownerOfAction('meter.reset')).toBe('meter');
     expect(ownerOfAction('plain')).toBe('');
+  });
+});
+
+describe('device time zone (SES-LIB-032)', () => {
+  it('comes from ui/device into manifest.device.tz, where the picker and trends read it', () => {
+    const m = normalizeManifest({ schemaVersion: 4, device: { name: 'SES' }, features: [] } as any);
+    expect(m.device?.tz).toBeUndefined();
+    const m2 = mergeDevice(m, { tz: { iana: 'Europe/Kyiv', posix: 'EET-2EEST,M3.5.0/3,M10.5.0/4' } });
+    expect(m2.device?.name).toBe('SES');
+    expect(resolveZone(m2.device?.tz).timeZone).toBe('Europe/Kyiv');
+    expect(mergeDevice(m2, {})).toBe(m2);  // nothing to merge
   });
 });

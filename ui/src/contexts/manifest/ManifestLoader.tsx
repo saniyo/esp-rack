@@ -1,4 +1,4 @@
-import { mergeActions, normalizeManifest } from './normalizeManifest';
+import { mergeActions, mergeDevice, normalizeManifest } from './normalizeManifest';
 import { FC, useCallback, useEffect, useMemo, useState, useRef } from 'react';
 
 import * as ManifestApi from '../../api/manifest';
@@ -78,6 +78,12 @@ const ManifestLoader: FC<RequiredChildrenProps> = (props) => {
           : EMPTY_MANIFEST;
         setManifest(next);
         applyManifest(next);
+        if (next.authenticated) {
+          // The time zone isn't in the cached manifest (SES-LIB-032).
+          ManifestApi.readDeviceInfo()
+            .then((r) => setManifest((m) => mergeDevice(m, r.data)))
+            .catch(() => undefined);
+        }
         setLoaded(true);
         setError(undefined);
         return;
