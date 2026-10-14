@@ -16,6 +16,8 @@
 // whole mothership module into every build that used system-status
 // (LIB-FIX-012). Without mothership the "Heap @ last checkin" row is skipped.
 #include <App.h>
+#include <nvs.h>
+#include <power/PowerGuard.h>
 #include <IMothershipProvider.h>
 #include <system/BootGuard.h>
 #include <system/LoopWdt.h>
@@ -235,6 +237,32 @@ void SystemStatus::buildForm(JsonObject& root,
   String fs = String(fsUsed) + " / " + String(fsTotal) + " bytes (" + String(fsFree) + " free)";
   sta.add(web::Text("file_system_used_total", fs.c_str()).readOnly()
               .label("File system (used / total)").icon("Folder"));
+
+  // Storage (SES-LIB-008): the supply as PowerGuard knows it, NVS use, and
+  // config saves waiting for writes to be allowed.
+  {
+    using ESPRack::PowerGuard;
+    String pw = PowerGuard::name(PowerGuard::supply());
+    if (PowerGuard::millivolts() >= 0) pw += " · " + String(PowerGuard::millivolts()) + " mV";
+    pw += PowerGuard::latched()         ? " · writes paused (latched until restart)"
+          : PowerGuard::writesAllowed() ? " · writes allowed"
+                                        : " · writes paused";
+    sta.add(web::Text("storage_power", pw.c_str()).readOnly()
+                .label("Storage: power").icon("Bolt"));
+    nvs_stats_t ns{};
+    if (nvs_get_stats(nullptr, &ns) == ESP_OK) {
+      String nv = String((unsigned)ns.used_entries) + " / " + String((unsigned)ns.total_entries)
+                + " entries (" + String((unsigned)ns.free_entries) + " free)";
+      sta.add(web::Text("storage_nvs", nv.c_str()).readOnly()
+                  .label("Storage: NVS (used / total)").icon("Storage"));
+    }
+    const size_t waiting = _app ? _app->configManager()->deferredCount() : 0;
+    if (waiting) {
+      String d = String((unsigned)waiting) + (waiting == 1 ? " config save waiting" : " config saves waiting");
+      sta.add(web::Text("storage_deferred", d.c_str()).readOnly()
+                  .label("Storage: deferred").icon("Schedule"));
+    }
+  }
 
   // ─── Per-task stack high-water marks ───────────────────────────
   // FreeRTOS stack high-water mark = MINIMUM free bytes ever seen on
