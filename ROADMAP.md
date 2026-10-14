@@ -47,6 +47,9 @@ Work beyond the plan that has landed:
   - SES-LIB-016 (UI pack B): dated table columns (`date/time/datetime/duration`),
     `Message.levelKey`, `Action.withClientTime`, `updateValue` for 32/64-bit
     integers, 13 icons. Plan: `docs/plans/ses-lib-016-ui-pack-b.md`.
+  - SES-LIB-028: external HW pages under their owner (`Builder::owner()`,
+    `ExtHwModule::hwMenu()`, manifest `extHw[]`, "External Hardware" groups,
+    "Used by"); action error toasts show the problem+json detail.
   - SES-LIB-020: MQTT device availability: retained `online` plus an
     `offline` last will (`availability`, `availability_topic`,
     `IMqttProvider::availabilityTopic()`).

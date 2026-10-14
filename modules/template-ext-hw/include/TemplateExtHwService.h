@@ -63,6 +63,7 @@ class TemplateExtHwService : public StatefulService<TemplateExtHwState> {
                        const TemplateExtHwPins& factory);
 
   void registerManifest(WebManager* web);  // onInstall
+  const char* title() const { return _title; }
   void begin();                            // onBegin
   void loop();                             // onLoop
   void end();                              // onShutdown

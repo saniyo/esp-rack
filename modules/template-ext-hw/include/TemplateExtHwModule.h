@@ -50,11 +50,16 @@ class TemplateExtHwModule : public ESPRack::ExtHwModule, public ITemplateOutput 
 
   void describe(ESPRack::ModuleDescriptor& d) override {
     d.id       = instanceId();  // the instance id IS the module id
-    d.version  = "0.1.1";
+    d.version  = "0.1.2";
     d.priority = 60;
   }
 
   const char* typeName() const override { return "template-ext-hw"; }
+  const char* hwTitle() const override { return svc_ ? svc_->title() : nullptr; }
+  const char* const* interfaceIds() const override {
+    static const char* const kIds[] = {ITemplateOutput::kIfaceId, nullptr};
+    return kIds;
+  }
 
   void onInstall(ESPRack::ModuleContext& ctx) override {
     svc_.reset(new TemplateExtHwService(*this, hw(), ctx.cfgMgr, factory_));

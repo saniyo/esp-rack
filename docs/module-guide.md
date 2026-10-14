@@ -874,6 +874,17 @@ Start from `modules/template-ext-hw/`. Its pieces:
     good. A `HardwareSerial` you create and delete leaves it dangling. Take a
     `HardwareSerial&`, or map the configured port number to
     `Serial0`/`Serial1`/`Serial2` and only call `begin()`/`end()` on it.
+11. **Owner and menu** (SES-LIB-028).
+    - The composition root says which module uses an instance:
+      `.installExtHw<MeterModule>("meter", Serial1).owner("sesLight")`. The
+      owner is a module id, and its menu entry has the same id.
+    - Build the instance's menu entry only with `hwMenu(label)`. The UI places
+      it from the manifest's `extHw[]`: in an "External Hardware" group under
+      the owner, or under System without one. Never `nestUnder()` it; its
+      tabs stay in the page header.
+    - The page says "Used by <owner>". Hide manual controls the owner drives
+      (`hwOwned()`), and add your own note where it helps.
+    - `hwTitle()` and `interfaceIds()` fill `extHw[]`.
 
 `install<M>()` on an `ExtHwModule` and `installExtHw<M>()` on a plain module
 both fail to compile with a message saying which one to use. An invalid id

@@ -140,10 +140,10 @@ void TemplateExtHwService::registerManifest(WebManager* web) {
   _feature = web->registerFeature<TemplateExtHwState>(
       WebFeature(_owner.featureId())
           .title(_title)
-          .version("0.1.1")
+          .version("0.1.2")
           .component(WebComponent::DynamicSettings)
           .authenticated()
-          .menu(WebMenu(_title).icon("ToggleOn").order(61))
+          .menu(_owner.hwMenu(_title).icon("ToggleOn").order(61))  // placed by the registry
           .ws(_wsPath)
           .tab(WebTab("status", "Status").icon("Monitor").live())
           .tab(WebTab("settings", "Pins").icon("Tune").postable().adminOnly())
@@ -153,6 +153,8 @@ void TemplateExtHwService::registerManifest(WebManager* web) {
       TemplateExtHwState::readState, checked,
       WEBFEATURE_BUFFER_AUTO, 512);
 
+  // An owner drives the output itself: no manual toggle then (SES-LIB-028).
+  if (_owner.hwOwned()) return;
   web->registerAction(
       WebAction(_toggleId, "Toggle")
           .icon(WebIcon::Refresh).color("primary")

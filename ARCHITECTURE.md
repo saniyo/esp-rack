@@ -343,6 +343,12 @@ knows no driver.
     `released()`, so another instance can't start driving it before it's let
     go. Only if the instance was Ok, i.e. set the hardware up; past 10 s the
     tab warns, and the claim stays.
+  - `Builder::owner(moduleId)` (SES-LIB-028) names the module that uses an
+    instance. The manifest's `extHw[]` (id, type, title, owner, interfaces,
+    pages) is the UI's only source for where instance pages go: an
+    "External Hardware" group under the owner, else under System. Live
+    state stays in System -> External Hardware (the manifest is cached in
+    flash).
   - `setRuntimeNote(who, note, level)` lets an instance report a runtime
     fault (`Ok · fault` in the tab).
 - **Threading.** `validate()`/`update()`/`state()` may run on any task. The
