@@ -1,3 +1,4 @@
+import { ownerOfAction } from '../../../contexts/manifest/normalizeManifest';
 import React, { FC, useEffect, useMemo, useState } from 'react';
 import {
   Button,
@@ -51,7 +52,7 @@ const isMuiColor = (s?: string): s is MuiColor =>
 const ActionField: FC<ActionFieldProps> = ({ field, value }) => {
   const { readableLabel, optionMap } = useFieldParser(field.label, field.o || '');
   const { enqueueSnackbar } = useSnackbar();
-  const { findFeature } = useManifest();
+  const { findFeature, ensureActions } = useManifest();
   const { refetch, markPending, clearPending, isPending, formState, getLiveValue } = useDynamicForm();
 
   const refetchAfter = !!((optionMap as any).refetchForm?.value);
@@ -86,6 +87,9 @@ const ActionField: FC<ActionFieldProps> = ({ field, value }) => {
   const refId = ((optionMap as any).ref?.value as string) || '';
   const refEntry = refId ? findFeature(refId) : undefined;
   const usingRef = refEntry && refEntry.kind === 'action';
+  useEffect(() => {
+    if (refId && !refEntry) ensureActions(ownerOfAction(refId));  // a feature's own action (SES-LIB-030)
+  }, [refId, refEntry, ensureActions]);
 
   const resolved = useMemo(() => {
     if (usingRef && refEntry) {

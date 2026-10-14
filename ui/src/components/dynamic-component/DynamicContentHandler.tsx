@@ -1,3 +1,4 @@
+import { ownerOfAction } from '../../contexts/manifest/normalizeManifest';
 import { fullOf, gridColumnFor, gridTemplateFor, isLayoutMarker, segmentFields, spanOf } from './utils/formLayout';
 import React, { FC, useEffect, useRef, useState } from 'react';
 import {
@@ -147,7 +148,7 @@ const DynamicContentHandler: FC<DynamicContentHandlerProps> = ({
   // (FileSystemModule, an OTA endpoint, an action whose owning module
   // was opted out, …) wasn't installed on this build — those widgets
   // would otherwise spinner-forever or 404-snackbar-spam.
-  const { manifest } = useManifest();
+  const { manifest, ensureActions, actionsLoaded } = useManifest();
 
   const handleInputChange = (label: string, value: any) => {
     setFormState((prevState) => ({
@@ -260,6 +261,12 @@ const DynamicContentHandler: FC<DynamicContentHandlerProps> = ({
         const ref = (om as any).ref?.value as string | undefined;
         const url = (om as any).url?.value as string | undefined;
         if (ref && !findAction(manifest, ref)) {
+          // A feature's own action may still be on its way (SES-LIB-030).
+          const owner = ownerOfAction(ref);
+          if (owner && manifest.features.some((x) => x.id === owner) && !actionsLoaded(owner)) {
+            ensureActions(owner);
+            return <React.Fragment key={fieldKey} />;
+          }
           return (
             <EndpointMissing
               key={fieldKey}

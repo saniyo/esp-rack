@@ -2,7 +2,8 @@
 // full ones; compact() mirrors the firmware's compactManifestEntry().
 import { describe, expect, it } from '@jest/globals';
 
-import { normalizeEntry, normalizeManifest } from './normalizeManifest';
+import { findAction } from '../../utils/manifestEndpoints';
+import { mergeActions, normalizeEntry, normalizeManifest, ownerOfAction } from './normalizeManifest';
 
 const API = '/api/v1';
 export function compact(f: any): any {
@@ -80,5 +81,20 @@ describe('compact manifest', () => {
     expect(per).toBeLessThan(0.6 * (JSON.stringify(full).length / n));  // well under the full entry
     const m = normalizeManifest({ schemaVersion: 4, features: full.map(compact) } as any);
     expect(m.features).toEqual(full);
+  });
+});
+
+describe('lazy feature actions', () => {
+  it('finds a fetched action like one from the manifest', () => {
+    const m = normalizeManifest({ schemaVersion: 4, features: [compact(feature('meter')), compact(action)] } as any);
+    expect(findAction(m, 'meter.reset')).toBeFalsy();
+    const fetched = [{ id: 'meter.reset', kind: 'action', title: 'Reset', restPath: `${API}/actions/meter.reset`,
+      method: 'POST', auth: 'admin' }];
+    const m2 = mergeActions(m, fetched as any);
+    expect(findAction(m2, 'meter.reset')).toBeTruthy();
+    expect(findAction(m2, 'system.restart')).toBeTruthy();  // global actions stay
+    expect(mergeActions(m2, fetched as any)).toBe(m2);  // no duplicates
+    expect(ownerOfAction('meter.reset')).toBe('meter');
+    expect(ownerOfAction('plain')).toBe('');
   });
 });

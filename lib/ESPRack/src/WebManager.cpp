@@ -1,5 +1,6 @@
 #include <WebManager.h>
 #include <ESPFS.h>
+#include "AdaptiveJson.h"
 #include "power/PowerGuard.h"
 #include <ProblemJson.h>
 #include <esp_rom_crc.h>
@@ -171,7 +172,7 @@ void ManifestBuilder::advancePhase() {
     case Phase::MODULES_CLOSE:      advanceTo(Phase::FEATURES_OPEN); return;
     case Phase::FEATURES_OPEN:
       _featIdx = 0;
-      while (_featIdx < _mgr->_entries.size() && !_mgr->_entries[_featIdx]) {
+      while (_featIdx < _mgr->_entries.size() && (!_mgr->_entries[_featIdx] || _mgr->lazyAction(_featIdx))) {
         _featIdx++;
       }
       if (_featIdx >= _mgr->_entries.size()) {
@@ -182,7 +183,7 @@ void ManifestBuilder::advancePhase() {
       return;
     case Phase::FEATURES_ITEM: {
       size_t next = _featIdx + 1;
-      while (next < _mgr->_entries.size() && !_mgr->_entries[next]) next++;
+      while (next < _mgr->_entries.size() && (!_mgr->_entries[next] || _mgr->lazyAction(next))) next++;
       if (next < _mgr->_entries.size()) {
         _featIdx = next;
         advanceTo(Phase::FEATURES_SEP);
@@ -342,6 +343,27 @@ void WebManager::begin() {
       [this](AsyncWebServerRequest* request) { this->serveManifest(request); };
   _server->on(UI_MANIFEST_PATH, HTTP_GET, handler);
 
+  // SES-LIB-030: a feature's own actions, left out of the cached manifest;
+  // the UI asks for them when it opens the feature or meets one in a form.
+  _server->on(UI_ACTIONS_OF_PATH, HTTP_GET, [this](AsyncWebServerRequest* request) {
+    if (_sm && !_sm->authenticateRequest(request).authenticated) {
+      request->send(401);
+      return;
+    }
+    const String of = request->hasParam("of") ? request->getParam("of")->value() : String();
+    sendAdaptiveJson(request, [this, of](JsonObject& root) {
+      JsonArray list = root.createNestedArray("actions");
+      const size_t n = of.length();
+      for (size_t i = 0; i < _entries.size(); ++i) {
+        if (!n || !lazyAction(i)) continue;
+        const char* id = _entries[i]->id();
+        if (strncmp(id, of.c_str(), n) != 0 || id[n] != '.') continue;
+        JsonObject o = list.createNestedObject();
+        _entries[i]->toJson(o);
+      }
+    }, 1536);
+  });
+
   // Pre-bake the manifest to LittleFS so the UI-manifest endpoint is a pure
   // file stream from this point on. Signature gate inside ensures we
   // only rewrite on firmware changes — no flash wear on every boot.
@@ -379,6 +401,22 @@ void WebManager::addDeviceTz(JsonObject device) {
   JsonObject tz = device.createNestedObject("tz");
   if (iana[0]) tz["iana"] = (char*)iana;     // copied
   if (posix[0]) tz["posix"] = (char*)posix;  // copied
+}
+
+bool WebManager::lazyAction(size_t idx) const {
+  const IWebFeatureEntry* e = idx < _entries.size() ? _entries[idx].get() : nullptr;
+  if (!e || e->kind() != IWebFeatureEntry::Kind::Action) return false;
+  const char* id = e->id();
+  const char* dot = strchr(id, '.');
+  if (!dot || dot == id) return false;
+  const size_t n = static_cast<size_t>(dot - id);
+  if (n == 6 && (strncmp(id, "system", 6) == 0 || strncmp(id, "config", 6) == 0)) return false;  // framework-wide
+  for (const auto& f : _entries) {
+    if (f && f->kind() == IWebFeatureEntry::Kind::Feature && strlen(f->id()) == n && strncmp(f->id(), id, n) == 0) {
+      return true;
+    }
+  }
+  return false;
 }
 
 void WebManager::noteManifestBytes(bool authed, size_t bytes) {

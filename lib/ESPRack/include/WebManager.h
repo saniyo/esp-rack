@@ -29,6 +29,9 @@
 #include <WebInfoEntry.h>
 
 #define UI_MANIFEST_PATH "/api/v1/ui/manifest"
+// SES-LIB-030: GET ?of=<featureId> -> {"actions":[...]}, a feature's own
+// actions, which the cached manifest leaves out.
+#define UI_ACTIONS_OF_PATH "/api/v1/ui/actions"
 // Manifest assembly streams JSON on the fly via ManifestBuilder (a
 // stateful section-by-section generator owned as a WebManager member
 // in BSS). One builder serves one request at a time, gated by a
@@ -253,6 +256,9 @@ class WebManager {
 
   // SES-LIB-030: bytes of the cached manifest per tier (0 = not cached).
   uint32_t manifestBytes(bool authed) const { return _manifestBytes[authed ? 1 : 0]; }
+  // A "<feature>.<verb>" action of a registered feature (not system.* /
+  // config.*): served by UI_ACTIONS_OF_PATH instead of the cached manifest.
+  bool lazyAction(size_t idx) const;
 
   // A root-level manifest array that another core object fills, streamed
   // one item at a time like the features: the hardware registry's "extHw"

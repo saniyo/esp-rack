@@ -214,8 +214,11 @@ interface DynamicFeatureProps {
 }
 
 const DynamicFeature: FC<DynamicFeatureProps> = ({ featureId, fallback }) => {
-  const { findFeature, manifest } = useManifest();
+  const { findFeature, manifest, ensureActions } = useManifest();
   const entry = findFeature(featureId) ?? fallback;
+  useEffect(() => {
+    ensureActions(featureId);  // its own actions (SES-LIB-030)
+  }, [featureId, ensureActions]);
   // A page of an owned external HW instance says who uses it (SES-LIB-028).
   const usedBy = useMemo(
     () => (entry ? usedByLabel(extHwModules(manifest), entry, manifest.features) : undefined),

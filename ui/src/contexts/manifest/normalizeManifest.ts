@@ -56,3 +56,14 @@ export function normalizeManifest(m: UiManifest): UiManifest {
   if (!m || (m.schemaVersion ?? 0) < 4) return m;
   return { ...m, features: (m.features ?? []).map(normalizeEntry) };
 }
+
+// SES-LIB-030: a feature's own actions, fetched when needed, join the manifest
+// list, so every lookup finds them like any other entry.
+export function mergeActions(m: UiManifest, actions: FeatureEntry[]): UiManifest {
+  const have = new Set(m.features.map((f) => f.id));
+  const add = actions.map(normalizeEntry).filter((a) => !have.has(a.id));
+  return add.length ? { ...m, features: [...m.features, ...add] } : m;
+}
+
+// "meter.reset" -> "meter": the feature an action belongs to by its id.
+export const ownerOfAction = (id: string): string => (id.indexOf('.') > 0 ? id.slice(0, id.indexOf('.')) : '');

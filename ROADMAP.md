@@ -49,7 +49,8 @@ Work beyond the plan that has landed:
     integers, 13 icons. Plan: `docs/plans/ses-lib-016-ui-pack-b.md`.
   - SES-LIB-030: compact manifest (schemaVersion 4: no derived paths, no
     defaults; the UI normalises at load), sizes per tier in the log and
-    System -> Status, soft budget `ESPRACK_MANIFEST_BUDGET` (16 KB).
+    System -> Status, soft budget `ESPRACK_MANIFEST_BUDGET` (16 KB); a
+    feature's own actions load with its page (`/api/v1/ui/actions?of=`).
   - SES-LIB-029: form layout from the backend (`web::Cols(n)` /
     `web::Break()` markers, `.span(k)` / `.fullRow()`), compact forms, a
     0 in a `format("0")` number no longer shows empty, a 24-hour date/time

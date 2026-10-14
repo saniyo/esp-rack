@@ -11,6 +11,9 @@ export interface ManifestContextValue {
   // the JWT lands so the stub manifest (anonymous response containing
   // brand only) gets swapped for the full authenticated map.
   reload: () => Promise<void>;
+  // SES-LIB-030: fetch a feature's own actions once; true once they're in.
+  ensureActions: (featureId: string) => void;
+  actionsLoaded: (featureId: string) => boolean;
 }
 
 const EMPTY_MANIFEST: UiManifest = {
@@ -22,7 +25,9 @@ const ManifestContextDefaultValue: ManifestContextValue = {
   manifest: EMPTY_MANIFEST,
   loaded: false,
   findFeature: () => undefined,
-  reload: async () => {}
+  reload: async () => {},
+  ensureActions: () => {},
+  actionsLoaded: () => true
 };
 
 export const ManifestContext = React.createContext<ManifestContextValue>(ManifestContextDefaultValue);

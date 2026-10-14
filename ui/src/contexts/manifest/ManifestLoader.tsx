@@ -1,5 +1,5 @@
-import { normalizeManifest } from './normalizeManifest';
-import { FC, useCallback, useEffect, useMemo, useState } from 'react';
+import { mergeActions, normalizeManifest } from './normalizeManifest';
+import { FC, useCallback, useEffect, useMemo, useState, useRef } from 'react';
 
 import * as ManifestApi from '../../api/manifest';
 import { configureFsEndpoints } from '../../api/fs';
@@ -119,9 +119,27 @@ const ManifestLoader: FC<RequiredChildrenProps> = (props) => {
     [manifest]
   );
 
+  // SES-LIB-030: a feature's own actions arrive on demand and join the list.
+  const requestedActions = useRef(new Set<string>());
+  const [actionsDone, setActionsDone] = useState<Set<string>>(() => new Set());
+  const ensureActions = useCallback((featureId: string) => {
+    if (!featureId || requestedActions.current.has(featureId)) return;
+    requestedActions.current.add(featureId);
+    ManifestApi.readFeatureActions(featureId)
+      .then((r) => {
+        const got = Array.isArray(r.data?.actions) ? r.data.actions : [];
+        if (got.length) setManifest((m) => mergeActions(m, got));
+      })
+      .catch(() => {
+        requestedActions.current.delete(featureId);  // try again next time
+      })
+      .finally(() => setActionsDone((d) => new Set(d).add(featureId)));
+  }, []);
+  const actionsLoaded = useCallback((featureId: string) => actionsDone.has(featureId), [actionsDone]);
+
   const value: ManifestContextValue = useMemo(
-    () => ({ manifest, loaded, error, findFeature, reload: loadManifest }),
-    [manifest, loaded, error, findFeature, loadManifest]
+    () => ({ manifest, loaded, error, findFeature, reload: loadManifest, ensureActions, actionsLoaded }),
+    [manifest, loaded, error, findFeature, loadManifest, ensureActions, actionsLoaded]
   );
 
   return (
