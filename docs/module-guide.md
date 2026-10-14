@@ -685,6 +685,17 @@ if (_tg.active()) _tg.send("line rate high");  // active() = valid && unmuted &&
 `send` returns `InvalidMessagingSendId` when the quota is used up, the queue
 is full or the subscription is muted.
 
+Commands (SES-LIB-019): the bot answers `/<cmd> [args]` from the chats in
+Telegram → Settings → "Command chats" (an id, a `-group` or `group:topic`;
+empty = the default chat). The handler runs on the loop task and returns the
+reply; `adminOnly` commands need the sender in "Admin user ids". Polling
+runs only while a command is registered; enabling the bot needs no reboot.
+
+```cpp
+_tg.onCommand("status", "Current state", [this](const TelegramInbound& in) { return statusText(); });
+_tg.onCommand("resetlockout", "Clear the lockout", [this](const TelegramInbound&) { return reset(); }, true);
+```
+
 **MQTT** (`modules/mqtt/include/IMqttProvider.h`, `MqttSubscription.h`,
 `MqttTypes.h:20-53`):
 

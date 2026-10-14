@@ -47,6 +47,9 @@ Work beyond the plan that has landed:
   - SES-LIB-016 (UI pack B): dated table columns (`date/time/datetime/duration`),
     `Message.levelKey`, `Action.withClientTime`, `updateValue` for 32/64-bit
     integers, 13 icons. Plan: `docs/plans/ses-lib-016-ui-pack-b.md`.
+  - SES-LIB-019: Telegram commands (`TelegramSubscription::onCommand`,
+    allowed chats incl. groups and topics, admin users, the loop task runs
+    the handlers) and enabling the bot without a reboot.
   - SES-LIB-030: compact manifest (schemaVersion 4: no derived paths, no
     defaults; the UI normalises at load), sizes per tier in the log and
     System -> Status, soft budget `ESPRACK_MANIFEST_BUDGET` (16 KB); a
