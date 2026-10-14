@@ -71,7 +71,10 @@ const DynamicStatus: FC<DynamicStatusProps> = ({
     if (!data?.fields) return;
 
     const fields: (Field & { baseLabel: string })[] =
-      data.fields.filter((obj) => !markerFromRaw(obj, 0)).map((obj, idx) => {
+      data.fields.map((obj, idx) => {
+        // Layout markers (web::Cols / web::Break) apply here too (SES-LIB-029).
+        const marker = markerFromRaw(obj, idx);
+        if (marker) return { ...marker, baseLabel: marker.label } as unknown as Field & { baseLabel: string };
         const o = obj.o ?? '';
         const base = Object.keys(obj)[0];
         let val = (obj as any)[base];

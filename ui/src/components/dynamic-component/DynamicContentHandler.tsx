@@ -1,5 +1,7 @@
 import { ownerOfAction } from '../../contexts/manifest/normalizeManifest';
-import { fullOf, gridColumnFor, gridTemplateFor, isLayoutMarker, segmentFields, spanOf } from './utils/formLayout';
+import {
+  fullOf, gridColumnFor, gridTemplateFor, isLayoutMarker, READ_ONLY_MIN_W, READ_ONLY_TILE_SX, segmentFields, spanOf,
+} from './utils/formLayout';
 import React, { FC, useEffect, useRef, useState } from 'react';
 import {
   Box,
@@ -312,7 +314,13 @@ const DynamicContentHandler: FC<DynamicContentHandlerProps> = ({
     segmentFields(entries, (e) => e.f).map((seg, s) => (
       <Box
         key={`${keyBase}-${s}`}
-        sx={{ display: 'grid', gap: 1, alignItems: 'start', gridTemplateColumns: gridTemplateFor(seg.cols) }}
+        sx={{
+          display: 'grid',
+          gap: 1,
+          alignItems: 'start',
+          gridTemplateColumns: gridTemplateFor(
+            seg.cols, seg.cells.every((c) => c.f.readOnly) ? READ_ONLY_MIN_W : undefined),
+        }}
       >
         {seg.cells.map(({ f: cf, i: ci }) => (
           // A list of its own: the fields render <li> items (and <li> dividers),
@@ -320,7 +328,14 @@ const DynamicContentHandler: FC<DynamicContentHandlerProps> = ({
           <Box
             component="ul"
             key={`cell-${ci}`}
-            sx={{ listStyle: 'none', m: 0, p: 0, minWidth: 0, gridColumn: gridColumnFor(cf.type, spanOf(cf.o), fullOf(cf.o), seg.cols) }}
+            sx={{
+              listStyle: 'none',
+              m: 0,
+              p: 0,
+              minWidth: 0,
+              gridColumn: gridColumnFor(cf.type, spanOf(cf.o), fullOf(cf.o), seg.cols, cf.readOnly),
+              ...(cf.readOnly ? READ_ONLY_TILE_SX : {}),
+            }}
           >
             {renderField(cf, ci)}
           </Box>

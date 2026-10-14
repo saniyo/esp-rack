@@ -2,10 +2,26 @@
 import { describe, expect, it } from '@jest/globals';
 
 import {
-  BRK_TYPE, COLS_TYPE, fullOf, gridColumnFor, gridTemplateFor, markerFromRaw, numberInputValue, segmentFields, spanOf,
+  BRK_TYPE, COLS_TYPE, fullOf, gridColumnFor, gridTemplateFor, markerFromRaw, numberInputValue, READ_ONLY_MIN_W,
+  READ_ONLY_TILE_SX, segmentFields, spanOf,
 } from './formLayout';
 
 const f = (label: string, type = 'number') => ({ label, type });
+
+describe('read-only tiles (Status tabs)', () => {
+  it('makes a read-only text a tile, keeps tables and trends full', () => {
+    expect(gridColumnFor('text', undefined, false, undefined, true)).toBe('auto');
+    expect(gridColumnFor('number', undefined, false, undefined, true)).toBe('auto');
+    expect(gridColumnFor('table', undefined, false, undefined, true)).toBe('1 / -1');
+    expect(gridColumnFor('trend', undefined, false, undefined, true)).toBe('1 / -1');
+    expect(gridColumnFor('text', undefined, true, undefined, true)).toBe('1 / -1');  // fullRow wins
+  });
+  it('flows read-only segments in narrower columns, without dividers', () => {
+    expect(gridTemplateFor(undefined, READ_ONLY_MIN_W)).toBe('repeat(auto-fill, minmax(220px, 1fr))');
+    expect(gridTemplateFor(2, READ_ONLY_MIN_W)).toEqual({ xs: '1fr', sm: 'repeat(2, 1fr)', md: 'repeat(2, 1fr)' });
+    expect(READ_ONLY_TILE_SX['& .MuiDivider-root']).toEqual({ display: 'none' });
+  });
+});
 
 describe('form layout', () => {
   it('cuts the field stream at the markers', () => {
