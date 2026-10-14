@@ -117,6 +117,7 @@ class HwRegistry {
     char note[48];        // SES-LIB-025 runtime note ("" = none)
     HwNoteLevel noteLevel;
   };
+  void manifestItem(size_t i, JsonObject o, const WebManager& web) const;  // extHw[i]
   struct Rejected {
     char id[ExtHwModule::kIdMax + 1];
     char type[24];        // copied: the module is destroyed
@@ -128,6 +129,10 @@ class HwRegistry {
   void addRejected(const ExtHwModule& m, const char* version, const char* why);
   void boot();                       // App::begin, before every onBegin
   void registerManifest(WebManager* web);
+
+  // The UI label of the external HW instances: the System tab and the menu
+  // groups (the UI reads it from that tab's title). SES-LIB-028.
+  static constexpr const char* kLabel = "External Hardware";
   void loop();                       // App::loop: a pending "restore factory pins"
 
   ExtHwModule* findInstance(const char* id) const;

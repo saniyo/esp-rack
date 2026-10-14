@@ -44,6 +44,11 @@ struct WebMenuMeta {
   // source of truth for menu placement — "drop X onto Y" == set X's
   // menu.parent = "Y". Arbitrary depth (the parent can have its own parent).
   const char* parent = nullptr;
+  // hw: this page belongs to external HW instance <hw> (SES-LIB-028). The UI
+  // places it from the manifest's extHw[] (under the instance's owner, else
+  // under System), so such a page never sets parent. Set by
+  // ExtHwModule::hwMenu().
+  const char* hw = nullptr;
   // expandTabs: when true, this feature's own tabs are ALSO exposed as
   // leaf children in the tree (navigate straight to /<id>/<tabKey>), in
   // addition to any child features. ON BY DEFAULT — every multi-tab feature

@@ -63,6 +63,12 @@ class Builder {
     return *this;
   }
 
+  // SES-LIB-028: the instance installed just before is used by module
+  // `moduleId`, whose menu entry has the same id:
+  //   .installExtHw<MeterModule>("meter", Serial1).owner("sesLight")
+  // Its pages then sit under that module's menu, in "External Hardware".
+  Builder& owner(const char* moduleId);
+
   // Keep a GPIO away from every external HW instance: a board's SD card,
   // status LED, a pin the consumer drives itself. `reason` is shown in
   // System -> Hardware (static literal).

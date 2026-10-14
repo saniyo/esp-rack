@@ -28,6 +28,7 @@ class WebPageEntry : public IWebFeatureEntry {
 
   const char* id() const override { return _spec.id ? _spec.id : ""; }
   Kind kind() const override { return Kind::Page; }
+  const char* menuHw() const override { return _spec.menu.hw; }
 
   void registerEndpoints(AsyncWebServer* server, SecurityManager* sm) override {
     if (_mounted || !server) return;
@@ -121,6 +122,7 @@ class WebPageEntry : public IWebFeatureEntry {
       menu["auth"] = webAuthLevelToStr(_spec.menu.auth);
       menu["hidden"] = _spec.menu.hidden;
       if (_spec.menu.parent) menu["parent"] = _spec.menu.parent;
+      if (_spec.menu.hw) menu["hw"] = _spec.menu.hw;
       if (_spec.menu.expandTabs) menu["expandTabs"] = true;
       if (_spec.menu.role) menu["role"] = true;
     }

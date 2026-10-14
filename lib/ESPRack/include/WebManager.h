@@ -56,6 +56,7 @@ class ManifestBuilder {
     AUTH_FALSE_END, AUTH_TRUE,
     MODULES_OPEN, MODULES_ITEM, MODULES_SEP, MODULES_CLOSE,
     FEATURES_OPEN, FEATURES_ITEM, FEATURES_SEP, FEATURES_CLOSE,
+    EXTRA_OPEN, EXTRA_ITEM, EXTRA_SEP, EXTRA_CLOSE,
     FOOTER, DONE
   };
 
@@ -70,6 +71,7 @@ class ManifestBuilder {
   Phase  _phase{Phase::DONE};
   size_t _modIdx{0};
   size_t _featIdx{0};
+  size_t _extraIdx{0};
   size_t _cursor{0};
   size_t _itemLen{0};
 
@@ -242,6 +244,18 @@ class WebManager {
   // the manifest shows — the device timezone (SES-LIB-015). No-op before
   // begin(). Loop task; rewrites only when the content signature changed.
   void refreshManifestCache();
+
+  // A root-level manifest array that another core object fills, streamed
+  // one item at a time like the features: the hardware registry's "extHw"
+  // (SES-LIB-028). One source; a later call replaces it.
+  struct ManifestArray {
+    const char* key = nullptr;
+    std::function<size_t()> count;
+    std::function<void(size_t, JsonObject)> item;
+  };
+  void setManifestArray(ManifestArray a) { _extraArray = std::move(a); }
+  // fn(featureId) for every entry whose menu.hw == hwId: an instance's pages.
+  void forEachHwPage(const char* hwId, const std::function<void(const char*)>& fn) const;
   const char* frameworkVersion() const { return _frameworkVersion; }
 
   // ---- public iteration over registered entries ----
@@ -441,6 +455,7 @@ class WebManager {
   const char* _deviceVersion{""};
 
   std::vector<std::unique_ptr<IWebFeatureEntry>> _entries;
+  ManifestArray _extraArray;
 
   struct ProxyEndpoint {
     String               method;

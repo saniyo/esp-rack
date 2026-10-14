@@ -36,6 +36,8 @@
 #include "Module.h"
 #include "hw/HwResource.h"
 
+class WebMenu;  // WebFeatureBuilder.h
+
 namespace ESPRack {
 
 class HwRegistry;
@@ -87,6 +89,22 @@ class ExtHwModule : public Module {
   // long as the registration that points at it.
   const char* actionId(const char* verb, char* buf, size_t len) const;
 
+  // SES-LIB-028. The module that uses this instance (Builder::owner()), or
+  // nullptr. Its pages then sit in an "External Hardware" group under the
+  // owner's menu entry and say "Used by <owner>". hwOwned(): hide manual
+  // controls the owner drives itself.
+  const char* hwOwner() const { return _hwOwner; }
+  bool hwOwned() const { return _hwOwner != nullptr; }
+  // The menu entry of an instance page. The UI places it from the registry
+  // (under the owner, else under System), so never nestUnder() it; its
+  // tabs stay in the page header.
+  WebMenu hwMenu(const char* label) const;
+  // The instance's title in the manifest's extHw[]; nullptr = its id.
+  virtual const char* hwTitle() const { return nullptr; }
+  // The interface ids queryInterface() answers, nullptr-terminated, for
+  // extHw[]; nullptr = none listed.
+  virtual const char* const* interfaceIds() const { return nullptr; }
+
  protected:
   HwRegistry* hw() const { return _hw; }  // set before onInstall
   HwState hwState() const;                // Ok / NotConfigured / Conflict / Disabled
@@ -98,6 +116,8 @@ class ExtHwModule : public Module {
 
  private:
   friend class HwRegistry;
+  friend class Builder;
+  const char* _hwOwner = nullptr;  // a module id (Builder::owner())
   char _id[kIdMax + 1];
   char _cfgId[sizeof("hw-") + kIdMax];
   char _path[sizeof("/config/hw-") + kIdMax + sizeof(".json")];

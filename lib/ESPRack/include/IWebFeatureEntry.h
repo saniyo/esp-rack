@@ -21,6 +21,8 @@ class IWebFeatureEntry {
 
   // Serialise this entry into a JsonObject for /api/v1/ui/manifest.
   virtual void toJson(JsonObject& obj) const = 0;
+  // menu.hw: the external HW instance this page belongs to, or nullptr.
+  virtual const char* menuHw() const { return nullptr; }
 
   // Append a tab to this entry's tab list. Returns true if accepted.
   // Used by WebManager::addTabToFeature so compound features can be

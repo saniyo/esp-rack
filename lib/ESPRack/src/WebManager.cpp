@@ -15,6 +15,7 @@ void ManifestBuilder::reset(const WebManager& mgr, bool authed) {
   _authed  = authed;
   _modIdx  = 0;
   _featIdx = 0;
+  _extraIdx = 0;
   _cursor  = 0;
   _itemLen = 0;
   _doc.clear();
@@ -111,7 +112,24 @@ void ManifestBuilder::advancePhase() {
       return;
     }
     case Phase::FEATURES_SEP:       advanceTo(Phase::FEATURES_ITEM); return;
-    case Phase::FEATURES_CLOSE:     advanceTo(Phase::FOOTER); return;
+    case Phase::FEATURES_CLOSE: {
+      const auto& x = _mgr->_extraArray;
+      advanceTo(x.key && x.count && x.item ? Phase::EXTRA_OPEN : Phase::FOOTER);
+      return;
+    }
+    case Phase::EXTRA_OPEN:
+      _extraIdx = 0;
+      advanceTo(_mgr->_extraArray.count() ? Phase::EXTRA_ITEM : Phase::EXTRA_CLOSE);
+      return;
+    case Phase::EXTRA_ITEM:
+      if (++_extraIdx < _mgr->_extraArray.count()) {
+        advanceTo(Phase::EXTRA_SEP);
+      } else {
+        advanceTo(Phase::EXTRA_CLOSE);
+      }
+      return;
+    case Phase::EXTRA_SEP:          advanceTo(Phase::EXTRA_ITEM); return;
+    case Phase::EXTRA_CLOSE:        advanceTo(Phase::FOOTER); return;
     case Phase::FOOTER:             advanceTo(Phase::DONE); return;
     case Phase::DONE:               return;
   }
@@ -130,6 +148,14 @@ void ManifestBuilder::fillPhaseBuffer() {
     case Phase::FEATURES_OPEN:       setLiteral(",\"features\":["); return;
     case Phase::FEATURES_SEP:        setLiteral(","); return;
     case Phase::FEATURES_CLOSE:      setLiteral("]"); return;
+    case Phase::EXTRA_SEP:           setLiteral(","); return;
+    case Phase::EXTRA_CLOSE:         setLiteral("]"); return;
+    case Phase::EXTRA_OPEN: {
+      char lit[48];
+      snprintf(lit, sizeof(lit), ",\"%s\":[", _mgr->_extraArray.key);
+      setLiteral(lit);
+      return;
+    }
     case Phase::FOOTER:              setLiteral("}"); return;
     case Phase::DONE:                _itemLen = 0; _cursor = 0; return;
 
@@ -166,6 +192,12 @@ void ManifestBuilder::fillPhaseBuffer() {
       renderDocIntoItem();
       return;
     }
+    case Phase::EXTRA_ITEM: {
+      JsonObject o = _doc.to<JsonObject>();
+      _mgr->_extraArray.item(_extraIdx, o);
+      renderDocIntoItem();
+      return;
+    }
   }
 }
 
@@ -179,6 +211,14 @@ WebManager::WebManager(AsyncWebServer* server,
       _wsManager(wsManager),
       _deviceName(deviceName ? deviceName : ""),
       _deviceVersion(deviceVersion ? deviceVersion : "") {}
+
+void WebManager::forEachHwPage(const char* hwId, const std::function<void(const char*)>& fn) const {
+  if (!hwId) return;
+  for (const auto& e : _entries) {
+    const char* hw = e ? e->menuHw() : nullptr;
+    if (hw && strcmp(hw, hwId) == 0) fn(e->id());
+  }
+}
 
 void WebManager::warnIfDuplicate(const IWebFeatureEntry& n) const {
   const char* id = n.id();
@@ -297,6 +337,12 @@ void WebManager::buildManifestObject(JsonObject root) {
     if (!e) continue;
     JsonObject fo = features.createNestedObject();
     e->toJson(fo);
+  }
+
+  if (_extraArray.key && _extraArray.count && _extraArray.item) {
+    JsonArray xa = root.createNestedArray(_extraArray.key);
+    const size_t n = _extraArray.count();
+    for (size_t i = 0; i < n; ++i) _extraArray.item(i, xa.createNestedObject());
   }
 }
 

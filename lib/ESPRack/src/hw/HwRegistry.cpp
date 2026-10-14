@@ -279,13 +279,38 @@ bool HwRegistry::reserved(int gpio, const char** reason) const {
 
 // ---- System -> Hardware -----------------------------------------------------
 
+void HwRegistry::manifestItem(size_t i, JsonObject o, const WebManager& web) const {
+  if (i >= _inst.size()) return;
+  const Inst& x = _inst[i];
+  const char* id = x.m->instanceId();
+  o["id"] = id;
+  o["type"] = x.type ? x.type : "";
+  if (const char* t = x.m->hwTitle()) o["title"] = t;
+  if (const char* ow = x.m->hwOwner()) o["owner"] = ow;
+  JsonArray ifs = o.createNestedArray("interfaces");
+  if (const char* const* l = x.m->interfaceIds()) {
+    for (; *l; ++l) ifs.add(*l);
+  }
+  JsonArray pages = o.createNestedArray("pages");
+  web.forEachHwPage(id, [&pages](const char* fid) { pages.add(fid); });
+}
+
 void HwRegistry::registerManifest(WebManager* web) {
   if (!web) return;
+
+  // extHw[] (SES-LIB-028): the instances' static facts, the UI's only source
+  // for their menu placement. Live state stays in the System tab below: the
+  // manifest is cached in flash.
+  WebManager::ManifestArray xa;
+  xa.key = "extHw";
+  xa.count = [this] { return _inst.size(); };
+  xa.item = [this, web](size_t i, JsonObject o) { manifestItem(i, o, *web); };
+  web->setManifestArray(std::move(xa));
 
 #if ESPRACK_HW_TAB
   WebPageSpec page;
   page.id = "systemHardware";
-  page.title = "Hardware";
+  page.title = kLabel;
   page.component = "";  // contributes a tab to the compound 'system' feature
   page.auth = WebAuthLevel::Authenticated;
   WebEndpointMeta e;
@@ -306,7 +331,7 @@ void HwRegistry::registerManifest(WebManager* web) {
 
   WebTabSpec tab;
   tab.key = "hardware";
-  tab.title = "Hardware";
+  tab.title = kLabel;
   tab.restPath = HW_FORM_PATH;
   tab.postable = false;
   tab.auth = WebAuthLevel::Authenticated;
@@ -346,7 +371,7 @@ void HwRegistry::loop() {
 
 #if ESPRACK_HW_TAB
 void HwRegistry::buildForm(JsonObject& root) const {
-  web::Form f(root, "hardware", "External hardware");
+  web::Form f(root, "hardware", kLabel);
 
   lock();
   const BoardInfo& b = _claims.board();
@@ -374,6 +399,7 @@ void HwRegistry::buildForm(JsonObject& root) const {
   f.add(web::Table("instances")
             .col("id", "Instance", "text")
             .col("type", "Type", "text")
+            .col("owner", "Owner", "text")
             .col("hw", "Hardware", "text")
             .col("state", "State", "text")
             .col("note", "Note", "text")
@@ -384,6 +410,7 @@ void HwRegistry::buildForm(JsonObject& root) const {
     r["id"] = x.m->instanceId();
     snprintf(line, sizeof(line), "%s@%s", x.type ? x.type : "?", x.version);
     r["type"] = line;
+    r["owner"] = x.m->hwOwner() ? x.m->hwOwner() : "";
     describeText(x.desc, line, sizeof(line));
     r["hw"] = line;
     // State + runtime level (SES-LIB-025); note = registry reason, runtime

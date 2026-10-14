@@ -87,6 +87,8 @@ class WebMenu {
   // Tree placement — "drop this onto <parentId>": nest this item UNDER the
   // feature/group whose id == parentId. Omit for a top-level item.
   WebMenu& nestUnder(const char* parentId) { _m.parent = parentId; return *this; }
+  // A page of external HW instance <instanceId>; use ExtHwModule::hwMenu().
+  WebMenu& hw(const char* instanceId)      { _m.hw = instanceId; return *this; }
   // Surface this feature's own tabs as leaf children of the tree node.
   // ON BY DEFAULT (WebMenuMeta::expandTabs == true); call expandTabs(false)
   // to opt OUT and keep this feature's tabs in the top tab-bar only.

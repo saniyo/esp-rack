@@ -2,6 +2,8 @@
 
 #include "hw/HwRegistry.h"
 
+#include <WebFeatureBuilder.h>
+
 namespace ESPRack {
 
 bool isValidInstanceId(const char* id) {
@@ -22,6 +24,10 @@ ExtHwModule::ExtHwModule(const char* instanceId) : _idValid(isValidInstanceId(in
 }
 
 HwState ExtHwModule::hwState() const { return _hw ? _hw->state(*this) : HwState::Ok; }
+
+WebMenu ExtHwModule::hwMenu(const char* label) const {
+  return WebMenu(label).hw(_id).expandTabs(false);
+}
 
 void ExtHwModule::hwReleased() {
   if (_hw) _hw->released(*this);

@@ -63,6 +63,16 @@ inline void rinfo(const char* fmt, ...) {
 }
 }  // namespace
 
+Builder& Builder::owner(const char* moduleId) {
+  ExtHwModule* x = modules_.empty() || !modules_.back() ? nullptr : modules_.back()->asExtHw();
+  if (!x) {
+    rerr("owner('%s') must follow installExtHw<>(); ignored", moduleId ? moduleId : "");
+    return *this;
+  }
+  x->_hwOwner = moduleId && *moduleId ? moduleId : nullptr;
+  return *this;
+}
+
 std::unique_ptr<App> Builder::build() {
   // Step 1 — collect descriptors. An external HW instance with an invalid
   // id is dropped here (LIB-FEAT-001): reported, listed in System ->
@@ -110,6 +120,18 @@ std::unique_ptr<App> Builder::build() {
       } else {
         id_index[key] = i;
       }
+    }
+  }
+
+  // SES-LIB-028: an owner must be an installed module; otherwise the
+  // instance is shown as unowned (under System).
+  for (size_t i = 0; i < modules_.size(); ++i) {
+    ExtHwModule* x = modules_[i] ? modules_[i]->asExtHw() : nullptr;
+    if (!x || !x->_hwOwner || !descs[i].id) continue;
+    if (!id_index.count(String{x->_hwOwner})) {
+      rerr("external HW instance '%s': owner '%s' is not an installed module; shown under System",
+           x->instanceId(), x->_hwOwner);
+      x->_hwOwner = nullptr;
     }
   }
 
