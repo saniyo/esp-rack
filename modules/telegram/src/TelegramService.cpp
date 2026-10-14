@@ -694,6 +694,12 @@ void TelegramService::runWorker() {
 
 // ── Commands (SES-LIB-019) ─────────────────────────────────────────────────
 
+namespace {
+// Command replies go out as plain text: with the bot's default Markdown a
+// lone "_" (RELAY_STUCK) makes Telegram reject the whole reply.
+const TelegramSendOptions kCommandReply{0 /*parse mode: none*/, false};
+}  // namespace
+
 bool TelegramService::doOnCommand(uint32_t subId, const char* cmd, const char* help, TelegramCommandHandler h,
                                   bool adminOnly) {
   if (!cmd || !*cmd || !h || !findSub(subId)) return false;
@@ -727,7 +733,7 @@ void TelegramService::loop() {
     if (h && (!adminOnly || in->admin)) {
       const String reply = h(*in);
       if (!reply.isEmpty()) {
-        enqueueMessage(in->chatId, in->topicId ? String(in->topicId) : String(), reply, TelegramSendOptions{}, String());
+        enqueueMessage(in->chatId, in->topicId ? String(in->topicId) : String(), reply, kCommandReply, String());
       }
     }
     delete in;
@@ -834,7 +840,7 @@ void TelegramService::pollCommands(const String& token) {
       if (slot->fromId == from && now - slot->at < 60000u) continue;
       slot->fromId = from;
       slot->at = now;
-      enqueueMessage(chat, topic ? String(topic) : String(), "Admin only.", TelegramSendOptions{}, String());
+      enqueueMessage(chat, topic ? String(topic) : String(), "Admin only.", kCommandReply, String());
       continue;
     }
     auto* in = new TelegramInbound{chat, topic, from, p.command.c_str(), p.args.c_str(), admin};
