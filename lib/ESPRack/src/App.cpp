@@ -427,15 +427,32 @@ void App::begin() {
                           || uri.endsWith(".ico")
                           || uri.endsWith(".svg")
                           || uri.endsWith(".webp");
+        // index.html, "/" and the SPA fallback revalidate on every load
+        // (no-cache + a content ETag): a cached index.html would point at
+        // bundle files a firmware update removed. Hashed files never change.
         const char* cache_header =
             hashed_asset  ? "public, max-age=31536000, immutable"
           : static_image  ? "public, max-age=86400"
-          :                 "public, max-age=600";
+          :                 "no-cache";
+        String etag;
+        if (!hashed_asset) {
+          char b[16];
+          snprintf(b, sizeof(b), "\"%08x\"", (unsigned)esp_rom_crc32_le(0, content, len));
+          etag = b;
+        }
         const String uriCopy = uri;
-        ArRequestHandlerFunction handler = [contentType, content, len, uriCopy, cache_header](AsyncWebServerRequest* req) {
+        ArRequestHandlerFunction handler = [contentType, content, len, uriCopy, cache_header, etag](AsyncWebServerRequest* req) {
+          if (etag.length() && req->hasHeader("If-None-Match") && req->header("If-None-Match") == etag) {
+            AsyncWebServerResponse* nm = req->beginResponse(304, "text/plain", "");
+            nm->addHeader("ETag", etag);
+            nm->addHeader("Cache-Control", cache_header);
+            req->send(nm);
+            return;
+          }
           AsyncWebServerResponse* res = req->beginResponse(200, contentType, content, len);
           res->addHeader("Content-Encoding", "gzip");
           res->addHeader("Cache-Control", cache_header);
+          if (etag.length()) res->addHeader("ETag", etag);
           req->send(res);
         };
         srv->on(uri.c_str(), HTTP_GET, handler);
@@ -443,6 +460,9 @@ void App::begin() {
           srv->onNotFound([handler](AsyncWebServerRequest* req) {
             if (req->method() == HTTP_OPTIONS) {
               req->send(200);                       // CORS preflight
+            } else if (req->url().startsWith("/js/") || req->url().startsWith("/css/") ||
+                       req->url().startsWith("/fonts/")) {
+              req->send(404);                       // a bundle file this firmware doesn't have
             } else if (req->url().startsWith("/api/")) {
               // Unknown API path => clean 404, never the SPA shell. A module
               // that isn't installed mounts no handler, so its /api/* routes
