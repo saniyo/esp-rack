@@ -82,24 +82,13 @@ export const numberInputValue = (v: unknown): string | number => {
   return typeof v === 'string' ? v.trim() : (v as number);
 };
 
-// A read-only value as a compact tile (Status tabs): a small icon that keeps
-// its status colour, the label as a caption, the value as the main text, no
-// dividers. Applied to the grid cell, so every field component is covered.
-export const READ_ONLY_TILE_SX = {
-  '& .MuiListItem-root': { px: 1, py: 0.25 },
-  '& .MuiDivider-root': { display: 'none' },
-  '& .MuiListItemText-root': { my: 0 },
-  '& .MuiListItemText-primary': { fontSize: '0.75rem', color: 'text.secondary', lineHeight: 1.3 },
-  '& .MuiListItemText-secondary': { fontSize: '0.875rem', color: 'text.primary', overflowWrap: 'anywhere' },
-};
 
-// Every grid cell, editable or not: the same small icon, long values wrap
-// inside their cell (SES-LIB-029c).
+// Every grid cell: elements keep their own sizes (SES-LIB-029d); long values
+// wrap inside their cell instead of pushing neighbours; the grid separates
+// rows, so no dividers.
 export const CELL_SX = {
-  '& .MuiListItemAvatar-root': { minWidth: 30 },
-  '& .MuiAvatar-root': { width: 22, height: 22 },
-  '& .MuiAvatar-root svg': { fontSize: 14 },
   '& .MuiListItemText-root, & .MuiListItemText-secondary': { overflowWrap: 'anywhere' },
+  '& .MuiDivider-root': { display: 'none' },
 };
 
 // A heading worth drawing: not empty and not already shown above (the

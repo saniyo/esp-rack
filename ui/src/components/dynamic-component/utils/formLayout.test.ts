@@ -3,7 +3,7 @@ import { describe, expect, it } from '@jest/globals';
 
 import {
   BRK_TYPE, CELL_SX, COLS_TYPE, fullOf, gridColumnFor, gridTemplateFor, markerFromRaw, numberInputValue,
-  READ_ONLY_TILE_SX, segmentFields, spanOf, visibleHeading,
+  segmentFields, spanOf, visibleHeading,
 } from './formLayout';
 
 const f = (label: string, type = 'number') => ({ label, type });
@@ -16,11 +16,11 @@ describe('read-only tiles (Status tabs)', () => {
     expect(gridColumnFor('trend', undefined, false, undefined, true)).toBe('1 / -1');
     expect(gridColumnFor('text', undefined, true, undefined, true)).toBe('1 / -1');  // fullRow wins
   });
-  it('one column unless the page groups; no dividers in tiles; one icon size', () => {
+  it('one column unless the page groups; elements keep their sizes', () => {
     expect(gridTemplateFor()).toBe('1fr');
     expect(gridTemplateFor(2)).toEqual({ xs: '1fr', sm: 'repeat(2, 1fr)', md: 'repeat(2, 1fr)' });
-    expect(READ_ONLY_TILE_SX['& .MuiDivider-root']).toEqual({ display: 'none' });
-    expect(CELL_SX['& .MuiAvatar-root']).toEqual({ width: 22, height: 22 });
+    expect(CELL_SX['& .MuiDivider-root']).toEqual({ display: 'none' });
+    expect((CELL_SX as any)['& .MuiAvatar-root']).toBeUndefined();  // no shrunken icons (SES-LIB-029d)
   });
   it('draws a heading once', () => {
     expect(visibleHeading('Status', ['Meter', 'Status'])).toBe('');

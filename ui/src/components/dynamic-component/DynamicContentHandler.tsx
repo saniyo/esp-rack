@@ -1,6 +1,6 @@
 import { ownerOfAction } from '../../contexts/manifest/normalizeManifest';
 import {
-  CELL_SX, fullOf, gridColumnFor, gridTemplateFor, isLayoutMarker, READ_ONLY_TILE_SX, segmentFields, spanOf,
+  CELL_SX, fullOf, gridColumnFor, gridTemplateFor, isLayoutMarker, segmentFields, spanOf,
   visibleHeading,
 } from './utils/formLayout';
 import { HeadingContext } from './HeadingContext';
@@ -319,7 +319,7 @@ const DynamicContentHandler: FC<DynamicContentHandlerProps> = ({
         key={`${keyBase}-${s}`}
         sx={{
           display: 'grid',
-          gap: 1,
+          gap: 2,
           alignItems: 'stretch',
           gridTemplateColumns: gridTemplateFor(seg.cols),
         }}
@@ -337,7 +337,6 @@ const DynamicContentHandler: FC<DynamicContentHandlerProps> = ({
               minWidth: 0,
               gridColumn: gridColumnFor(cf.type, spanOf(cf.o), fullOf(cf.o), seg.cols, cf.readOnly),
               ...CELL_SX,
-              ...(cf.readOnly ? READ_ONLY_TILE_SX : {}),
             }}
           >
             {renderField(cf, ci)}
@@ -405,7 +404,7 @@ const DynamicContentHandler: FC<DynamicContentHandlerProps> = ({
       };
 
       nodes.push(
-        <Card key={`card-${cardId}-${groupStart}`} variant="outlined" sx={{ my: 1, overflow: 'visible' }}>
+        <Card key={`card-${cardId}-${groupStart}`} variant="outlined" sx={{ mb: 2, overflow: 'visible' }}>
           {(visibleHeading(cardTitleText, [...seenHeadings, title]) || deletable) && (
             <CardHeader
               titleTypographyProps={{ variant: 'subtitle1' }}

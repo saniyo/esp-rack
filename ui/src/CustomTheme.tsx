@@ -25,15 +25,6 @@ const theme = responsiveFontSizes(
         main: green[500]
       }
     },
-    // SES-LIB-029: compact forms everywhere (one rule, not per form).
-    components: {
-      MuiTextField: { defaultProps: { size: 'small', margin: 'dense' } },
-      MuiFormControl: { defaultProps: { size: 'small', margin: 'dense' } },
-      MuiSelect: { defaultProps: { size: 'small' } },
-      MuiListItem: { styleOverrides: { root: { paddingTop: 2, paddingBottom: 2 } } },
-      MuiCardHeader: { styleOverrides: { root: { padding: '8px 12px' } } },
-      MuiCardContent: { styleOverrides: { root: { padding: 12, '&:last-child': { paddingBottom: 12 } } } },
-    },
   })
 );
 
