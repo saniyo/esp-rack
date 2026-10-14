@@ -1,4 +1,5 @@
 // NumberField.tsx (покращений)
+import { numberInputValue } from '../utils/formLayout';
 import React, { useState, useEffect } from 'react';
 import {
   ListItem,
@@ -32,14 +33,14 @@ const NumberField: React.FC<NumberFieldProps> = ({
   const maxValue = optionMap.mx?.value;
 
   // Локальний стан (якщо треба редагувати «на льоту»)
-  const [internalValue, setInternalValue] = useState(value);
+  const [internalValue, setInternalValue] = useState<any>(numberInputValue(value));
   const [isEditing, setIsEditing] = useState(false);
 
   // Якщо зовнішнє value змінилося (зверху), оновлюємо локальний стан,
   // але лише якщо користувач зараз не редагує
   useEffect(() => {
     if (!isEditing) {
-      setInternalValue(value);
+      setInternalValue(numberInputValue(value));
     }
   }, [value, isEditing]);
 
@@ -54,7 +55,8 @@ const NumberField: React.FC<NumberFieldProps> = ({
 
   // Clamp to [min, max] — only at commit time. Empty / non-numeric is passed
   // through untouched (the form keeps the last good value).
-  const clampToBounds = (raw: string): string => {
+  const clampToBounds = (raw: any): string => {
+    raw = String(raw ?? '');
     if (raw === '') return raw;
     const n = parseFloat(raw);
     if (Number.isNaN(n)) return raw;
@@ -108,7 +110,7 @@ const NumberField: React.FC<NumberFieldProps> = ({
 
   return (
     <ListItem>
-      <Tooltip title={field.placeholder || 'Enter a value'}>
+      <Tooltip title={internalValue === '' ? field.placeholder || 'Enter a value' : field.placeholder || ''}>
         <StyledTextField
           type="number"
           // While editing, surface the PREVIOUS committed value next to the

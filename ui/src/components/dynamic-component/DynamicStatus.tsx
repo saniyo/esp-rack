@@ -1,4 +1,5 @@
 // DynamicStatus.tsx
+import { markerFromRaw } from './utils/formLayout';
 import React, { FC, useEffect, useState, useCallback, useRef } from 'react';
 import DynamicContentHandler from './DynamicContentHandler';
 import TabActionsBar from './TabActionsBar';
@@ -70,7 +71,7 @@ const DynamicStatus: FC<DynamicStatusProps> = ({
     if (!data?.fields) return;
 
     const fields: (Field & { baseLabel: string })[] =
-      data.fields.map((obj, idx) => {
+      data.fields.filter((obj) => !markerFromRaw(obj, 0)).map((obj, idx) => {
         const o = obj.o ?? '';
         const base = Object.keys(obj)[0];
         let val = (obj as any)[base];

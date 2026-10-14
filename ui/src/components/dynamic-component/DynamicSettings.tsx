@@ -1,4 +1,5 @@
 // DynamicSettings.tsx
+import { markerFromRaw } from './utils/formLayout';
 import React, { FC, useState, useEffect, useRef } from 'react';
 import { useLocation } from 'react-router-dom';
 import {
@@ -85,7 +86,9 @@ const DynamicSettings: FC<DynamicSettingsProps> = ({ formName, data, saveData, s
   useEffect(() => {
     if (!data || !Array.isArray(data.fields)) return;
 
-    const fields: Field[] = data.fields.map((raw) => {
+    const fields: Field[] = data.fields.map((raw, idx) => {
+      const marker = markerFromRaw(raw, idx);  // web::Cols / web::Break (SES-LIB-029)
+      if (marker) return marker as unknown as Field;
       const o = (raw as any).o || '';
       const fieldName = Object.keys(raw).find((k) => k !== 'o') || '';
       let fieldValue = (raw as any)[fieldName];

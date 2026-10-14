@@ -1,3 +1,4 @@
+import { fullOf, gridColumnFor, gridTemplateFor, isLayoutMarker, segmentFields, spanOf } from './utils/formLayout';
 import React, { FC, useEffect, useRef, useState } from 'react';
 import {
   Box,
@@ -5,7 +6,6 @@ import {
   CardContent,
   CardHeader,
   IconButton,
-  List,
   Tooltip,
   Typography,
 } from '@mui/material';
@@ -300,14 +300,29 @@ const DynamicContentHandler: FC<DynamicContentHandlerProps> = ({
   // Between card groups, consecutive non-card fields get wrapped in a single
   // <List> — each field renders as a <ListItem> internally, so without a
   // parent <ul> inset Dividers (component="li") would be stray.
+  // SES-LIB-029: fields between layout markers form one CSS grid.
+  const renderGrid = (entries: { f: Field; i: number }[], keyBase: string): React.ReactNode[] =>
+    segmentFields(entries, (e) => e.f).map((seg, s) => (
+      <Box
+        key={`${keyBase}-${s}`}
+        sx={{ display: 'grid', gap: 1, alignItems: 'start', gridTemplateColumns: gridTemplateFor(seg.cols) }}
+      >
+        {seg.cells.map(({ f: cf, i: ci }) => (
+          <Box key={`cell-${ci}`} sx={{ minWidth: 0, gridColumn: gridColumnFor(cf.type, spanOf(cf.o), fullOf(cf.o), seg.cols) }}>
+            {renderField(cf, ci)}
+          </Box>
+        ))}
+      </Box>
+    ));
+
   const renderAll = (): React.ReactNode[] => {
     const nodes: React.ReactNode[] = [];
-    let bareAccumulator: React.ReactNode[] = [];
+    let bareAccumulator: { f: Field; i: number }[] = [];
     let bareStart = 0;
 
     const flushBare = () => {
       if (bareAccumulator.length === 0) return;
-      nodes.push(<List key={`list-${bareStart}`}>{bareAccumulator}</List>);
+      nodes.push(...renderGrid(bareAccumulator, `bare-${bareStart}`));
       bareAccumulator = [];
     };
 
@@ -321,7 +336,7 @@ const DynamicContentHandler: FC<DynamicContentHandlerProps> = ({
 
       if (!cardId) {
         if (bareAccumulator.length === 0) bareStart = i;
-        bareAccumulator.push(renderField(f, i));
+        bareAccumulator.push({ f, i });
         i++;
         continue;
       }
@@ -340,6 +355,11 @@ const DynamicContentHandler: FC<DynamicContentHandlerProps> = ({
       const groupFields: { f: Field; absoluteIndex: number }[] = [];
       while (i < fields.length) {
         const gf = fields[i];
+        if (isLayoutMarker(gf)) {  // markers stay inside the card
+          groupFields.push({ f: gf, absoluteIndex: i });
+          i++;
+          continue;
+        }
         const gpOpts = parseFieldOptions(gf.label, gf.o);
         const gCardId = (gpOpts.optionMap as any).card?.value as string | undefined;
         if (gCardId !== cardId) break;
@@ -354,7 +374,7 @@ const DynamicContentHandler: FC<DynamicContentHandlerProps> = ({
       };
 
       nodes.push(
-        <Card key={`card-${cardId}-${groupStart}`} variant="outlined" sx={{ mb: 2, overflow: 'visible' }}>
+        <Card key={`card-${cardId}-${groupStart}`} variant="outlined" sx={{ my: 1, overflow: 'visible' }}>
           {(cardTitleText || deletable) && (
             <CardHeader
               titleTypographyProps={{ variant: 'subtitle1' }}
@@ -371,9 +391,7 @@ const DynamicContentHandler: FC<DynamicContentHandlerProps> = ({
             />
           )}
           <CardContent sx={{ pt: 0 }}>
-            <List disablePadding>
-              {groupFields.map(({ f: gf, absoluteIndex }) => renderField(gf, absoluteIndex))}
-            </List>
+            {renderGrid(groupFields.map(({ f: gf, absoluteIndex }) => ({ f: gf, i: absoluteIndex })), `card-${cardId}`)}
           </CardContent>
         </Card>
       );
