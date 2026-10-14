@@ -874,7 +874,14 @@ Start from `modules/template-ext-hw/`. Its pieces:
     good. A `HardwareSerial` you create and delete leaves it dangling. Take a
     `HardwareSerial&`, or map the configured port number to
     `Serial0`/`Serial1`/`Serial2` and only call `begin()`/`end()` on it.
-11. **Owner and menu** (SES-LIB-028).
+11. **Persistence and power** (SES-LIB-008).
+    - Counters and checkpoints go to an `NvsRecord<T>` (with a
+      `CheckpointPolicy`), not to a JSON config; state that must survive a
+      soft reset goes to `ESPRACK_RTC_SCRATCH`.
+    - Use `ESPRack::SupplyState` for supply states; a module that senses
+      the supply reports it with `PowerGuard::setSupply()`.
+    - Before any flash write of your own, ask `PowerGuard::writesAllowed()`.
+12. **Owner and menu** (SES-LIB-028).
     - The composition root says which module uses an instance:
       `.installExtHw<MeterModule>("meter", Serial1).owner("sesLight")`. The
       owner is a module id, and its menu entry has the same id.

@@ -357,6 +357,24 @@ knows no driver.
 
 ---
 
+
+### 2.9 Persistence and power (`persist/`, `power/`, SES-LIB-008)
+
+- **PowerGuard** holds the supply state (`SupplyState`, the system's one
+  enum) that the consumer sets from its own sensing, and decides whether
+  flash writes are allowed: not in `PowerFail`, and not after
+  `latchWritesOffUntilRestart()`. With nobody setting it, writes stay
+  allowed.
+- **NvsRecord<T>** keeps a struct in one versioned, CRC-checked NVS blob,
+  with migration from older schemas. Equal payloads aren't rewritten;
+  PowerGuard pauses stores.
+- **RtcScratch<T>** keeps a CRC-checked A/B copy in RTC memory that
+  survives soft resets (`ESPRACK_RTC_SCRATCH`).
+- **CheckpointPolicy** says when a running value is worth a write.
+- **ConfigManager** defers saves while writes are paused and saves them on
+  the loop once writes are allowed again; the manifest cache is then served
+  live instead of being rewritten.
+
 ## 3. State and persistence
 
 ### 3.1 `StatefulService<T>`
