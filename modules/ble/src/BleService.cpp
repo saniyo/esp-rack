@@ -840,6 +840,26 @@ void BleService::taskLoop() {
 
 namespace {
 
+// A primary service by UUID, from the full service list. Discovering "by UUID" uses ATT Find By
+// Type Value, and some peripherals answer it with a wrong end handle (end == start): the service
+// is found but holds no characteristics. Read By Group Type (all services) gets the real range.
+NimBLERemoteService* findService(NimBLEClient* client, const char* uuid) {
+  const NimBLEUUID want{std::string(uuid)};
+  for (NimBLERemoteService* s : client->getServices(true))
+    if (s && s->getUUID() == want) return s;
+  return client->getService(want);
+}
+
+void logServices(const char* owner, NimBLEClient* client) {
+  const auto& services = client->getServices(false);
+  log_w("[ble] %s: peer has %u service(s):", owner, (unsigned)services.size());
+  for (NimBLERemoteService* s : services) {
+    if (!s) continue;
+    log_w("[ble]   %s handles 0x%04x-0x%04x", s->getUUID().toString().c_str(), s->getStartHandle(),
+          s->getEndHandle());
+  }
+}
+
 // A characteristic of `service` by UUID. NimBLE asks the peer to "discover characteristics by
 // UUID" first; some peripherals (cheap BLE bridge chips, NEEY balancers among the suspects)
 // answer that request wrongly, so fall back to listing all of them and matching here.
@@ -854,7 +874,8 @@ NimBLERemoteCharacteristic* findCharacteristic(NimBLERemoteService* service, con
 // What the peer really offers, for the log when a lookup fails.
 void logCharacteristics(const char* owner, NimBLERemoteService* service) {
   const auto& chars = service->getCharacteristics(false);
-  log_w("[ble] %s: service %s has %u characteristic(s):", owner, service->getUUID().toString().c_str(),
+  log_w("[ble] %s: service %s (handles 0x%04x-0x%04x) has %u characteristic(s):", owner,
+        service->getUUID().toString().c_str(), service->getStartHandle(), service->getEndHandle(),
         (unsigned)chars.size());
   for (NimBLERemoteCharacteristic* c : chars) {
     if (!c) continue;
@@ -1154,8 +1175,11 @@ void BleService::taskLoop() {
             fail("connect failed");
             break;
           }
-          NimBLERemoteService* service = l.client->getService(NimBLEUUID(std::string(l.spec.service)));
+          // Let the peer settle (connection parameter update, its own GATT setup) before discovery.
+          vTaskDelay(pdMS_TO_TICKS(200));
+          NimBLERemoteService* service = findService(l.client, l.spec.service);
           if (!service) {
+            logServices(l.spec.owner, l.client);
             fail("service not found");
             break;
           }
@@ -1163,6 +1187,7 @@ void BleService::taskLoop() {
           if (l.spec.notifyChar[0]) {
             notify = findCharacteristic(service, l.spec.notifyChar);
             if (!notify) {
+              logServices(l.spec.owner, l.client);
               logCharacteristics(l.spec.owner, service);
               fail("notify characteristic not found");
               break;
