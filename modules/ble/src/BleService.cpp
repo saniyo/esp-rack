@@ -840,6 +840,30 @@ void BleService::taskLoop() {
 
 namespace {
 
+// A characteristic of `service` by UUID. NimBLE asks the peer to "discover characteristics by
+// UUID" first; some peripherals (cheap BLE bridge chips, NEEY balancers among the suspects)
+// answer that request wrongly, so fall back to listing all of them and matching here.
+NimBLERemoteCharacteristic* findCharacteristic(NimBLERemoteService* service, const char* uuid) {
+  const NimBLEUUID want{std::string(uuid)};
+  if (NimBLERemoteCharacteristic* c = service->getCharacteristic(want)) return c;
+  for (NimBLERemoteCharacteristic* c : service->getCharacteristics(true))
+    if (c && c->getUUID() == want) return c;
+  return nullptr;
+}
+
+// What the peer really offers, for the log when a lookup fails.
+void logCharacteristics(const char* owner, NimBLERemoteService* service) {
+  const auto& chars = service->getCharacteristics(false);
+  log_w("[ble] %s: service %s has %u characteristic(s):", owner, service->getUUID().toString().c_str(),
+        (unsigned)chars.size());
+  for (NimBLERemoteCharacteristic* c : chars) {
+    if (!c) continue;
+    log_w("[ble]   %s %s%s%s%s%s", c->getUUID().toString().c_str(), c->canRead() ? "R" : "-",
+          c->canWrite() ? "W" : "-", c->canWriteNoResponse() ? "w" : "-", c->canNotify() ? "N" : "-",
+          c->canIndicate() ? "I" : "-");
+  }
+}
+
 // The state only; onState runs later from notifyStates(), outside every lock,
 // so a consumer callback can never deadlock against the radio mutex.
 void setState(BleService::Link& l, BleLinkState s) { l.st.store(s); }
@@ -1137,16 +1161,23 @@ void BleService::taskLoop() {
           }
           NimBLERemoteCharacteristic* notify = nullptr;
           if (l.spec.notifyChar[0]) {
-            notify = service->getCharacteristic(NimBLEUUID(std::string(l.spec.notifyChar)));
-            if (!notify || !(notify->canNotify() || notify->canIndicate())) {
+            notify = findCharacteristic(service, l.spec.notifyChar);
+            if (!notify) {
+              logCharacteristics(l.spec.owner, service);
               fail("notify characteristic not found");
+              break;
+            }
+            if (!(notify->canNotify() || notify->canIndicate())) {
+              logCharacteristics(l.spec.owner, service);
+              fail("characteristic cannot notify");
               break;
             }
           }
           NimBLERemoteCharacteristic* writer = nullptr;
           if (l.spec.writeChar[0]) {
-            writer = service->getCharacteristic(NimBLEUUID(std::string(l.spec.writeChar)));
+            writer = findCharacteristic(service, l.spec.writeChar);
             if (!writer || !(writer->canWrite() || writer->canWriteNoResponse())) {
+              logCharacteristics(l.spec.owner, service);
               fail("write characteristic not found");
               break;
             }
