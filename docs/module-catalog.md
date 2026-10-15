@@ -60,14 +60,14 @@ This is an audit snapshot of `feature/ses-light-support`, dated 2026-10-13:
 | features | `FeaturesModule` | 5 | none | `GET /api/v1/features` install map |
 | filesystem | `FileSystemModule` | 20 | none | File-manager REST API over flash (and optional SD) |
 | mothership | `MothershipModule` | 35 | wifi, cert-manager | mTLS check-in client and server-command dispatcher |
-| mqtt | `MqttModule` | 40 | wifi | MQTT client plus `IMqttProvider` subscription API |
+| mqtt | `MqttModule` | 40 | wifi | MQTT client plus `IMqttProvider` subscription API; device availability (retained `online`, `offline` last will) |
 | ntp | `NTPModule` | 30 | wifi | SNTP and timezone |
 | ota | `OTAModule` | 40 | wifi | ArduinoOTA (espota) network-upload listener |
 | presence | `PresenceModule` | 7 | none | Registry of active SPA tabs, plus `/ws/presence` |
 | restart | `RestartModule` | 90 | none | `system.restart` action and `restartNow()` helper |
 | security | `SecurityModule` | 8 | presence | Users, JWT, API tokens; the real `SecurityManager` |
-| system-status | `SystemStatusModule` | 80 | none | System → Identity and Resources tabs, `/api/v1/system/health` |
-| telegram | `TelegramModule` | 40 | wifi | Telegram bot sender plus `ITelegramProvider` |
+| system-status | `SystemStatusModule` | 80 | none | System → Identity and Resources tabs, `/api/v1/system/health`; Storage rows (supply, NVS, deferred saves, UI manifest size) |
+| telegram | `TelegramModule` | 40 | wifi | Telegram bot sender plus `ITelegramProvider`; bot commands (`onCommand`, allowed chats, admins); static form schema |
 | ui-dyn | `UiDynModule` | 6 | none | Legacy `/api/v1/ui/dynamic` control registry (always empty) |
 | upload-firmware | `UploadFirmwareModule` | 40 | none (uses restart, undeclared) | Firmware upload from the browser |
 | web-endpoints | `WebEndpointsModule` | 85 | none | System → Endpoints registry tab |
@@ -75,7 +75,7 @@ This is an audit snapshot of `feature/ses-light-support`, dated 2026-10-13:
 | wireguard | `WireGuardModule` | 14 | wifi, cert-manager | On-demand WireGuard tunnel to the mothership |
 | ws-diag | `WsDiagModule` | 80 | presence | System → Clients tab (presence table) |
 | template | `TemplateModule` | 60 | none | Skeleton to copy for new modules: UART line monitor (see module-guide) |
-| template-ext-hw | `TemplateExtHwModule` | 60 | none | Skeleton for external HW modules installed as instances: output pin + button (module-guide §10.1) |
+| template-ext-hw | `TemplateExtHwModule` | 60 | none | Skeleton for external HW modules installed as instances: output pin + button, owner-aware menu (`hwMenu`, `hwOwned`) (module-guide §10.1) |
 
 ---
 

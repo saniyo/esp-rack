@@ -8,7 +8,27 @@
 
 ---
 
-## 0. Status (2026-10-13)
+## 0. Status (2026-10-15)
+
+### 0.0 Landed on `master` (2026-10-15)
+
+`master` was fast-forwarded to `feature/ses-light-support` at `83a8225`.
+On top of core 0.6.0 it brings:
+- SES-LIB-003 (per-consumer UI bundles);
+- SES-LIB-023..026 (hardware registry follow-ups) and the console-UART fix;
+- SES-LIB-027 (TimeStep int64);
+- SES-LIB-020 (MQTT availability);
+- SES-LIB-028 (External Hardware under its owner);
+- SES-LIB-008 (persistence primitives, PowerGuard);
+- SES-LIB-029 / 029b / 029c / 029d (form layout from the backend, picker,
+  read-only tiles, element sizes);
+- SES-LIB-030 (compact manifest, lazy feature actions);
+- SES-LIB-019 (Telegram commands);
+- SES-LIB-032 (time zone out of the manifest);
+- SES-LIB-033 steps 1–2 (static form schema; Telegram migrated);
+- the index.html cache fix.
+
+Still to do in SES-LIB-033: External Hardware, WiFi and MQTT.
 
 ### 0.1 Phases
 
@@ -110,11 +130,10 @@ Work beyond the plan that has landed:
 
 ### 0.3 Branches
 
-| Branch | State |
-|---|---|
-| `master` | **Stale**: `8f8a262`, 2026-05-09, 128 commits behind the integration line. |
-| `feature/ses-light-support` | **Current integration line.** Contains `feature/ws-single-session` → `feature/api-v1` → `feature/device-mesh`, `feature/web-feature-builder`, `feature/web-buffer-auto-sizing`, `feature/wg-esprack-lib`, `feature/wireguard-tunnel`, `debug/esp32async-migration`, and the merged `mothership-phase1/2`. |
-| `feature/mothership-phase4-rotation`, `feature/mship-remote-control`, `feature/mship-ui-direct-monitor`, `feature/pki-approval-flow` | Side branches whose work was **partly** carried into the line under new commits. By subject: 3/5, 23/34, 24/44 and 9/15 commits respectively. The rest needs a keep-or-drop decision. |
+- `master` is the published line, fast-forwarded on 2026-10-15 (see 0.0).
+- `feature/ses-light-support` is the integration branch: verified work lands
+  there first, then on `master`.
+- `wip/*` are short-lived local task branches.
 
 ### 0.4 Known issues
 

@@ -10,7 +10,7 @@
 modules run on hardware in the reference consumer
 [`esp-rack-light-demo`](../esp-rack-light-demo). The API is not frozen.
 Current state, work in flight and known problems are in
-[`ROADMAP.md` → Status](ROADMAP.md#0-status-2026-10-13).
+[`ROADMAP.md` → Status](ROADMAP.md#0-status-2026-10-15).
 
 ## Quick taste
 
@@ -60,7 +60,7 @@ also has to list it in `lib_deps`. See
 | `ui/` | The React UI. A consumer's build copies it in and embeds it into the firmware as `WWWData.h`. |
 | `api/` | Generated OpenAPI spec + manifest dump (`scripts/gen_openapi.py`). |
 | `scripts/` | Dev tools: OpenAPI generator, mock mothership server, serial-log converter, `check_versions.py` (version/bundle drift), `check_module_deps.py` (cross-module includes vs declared dependencies), `check_security.py` (on-device auth regression). |
-| `test-host/` | Host unit tests for the Arduino-free parts of the core (`time/TimeArbiter`, `hw/HwClaims`): CMake + a Unity-compatible shim, any C++17 compiler; `run-host-tests.ps1` on Windows. |
+| `test-host/` | Host unit tests for the Arduino-free parts of the core (`time/TimeArbiter`, `hw/HwClaims`, `persist/*`, `power/PowerGuard`, the Telegram command parser): CMake + a Unity-compatible shim, any C++17 compiler; `run-host-tests.ps1` on Windows. |
 | `docs/` | Guides (below) and `docs/plans/`, the design notes and audits behind past work. |
 
 ## Documentation
@@ -74,15 +74,35 @@ also has to list it in `lib_deps`. See
 | [`ROADMAP.md`](ROADMAP.md) | Original design and phased plan, plus the current status section. |
 | `docs/plans/*.md` | Design notes per topic: API standardization, discovery protocol, memory/heap work, mothership, WireGuard, tree menu, form DSL. |
 
+## What's new (2026-10-15)
+
+- **External hardware:** drivers installed as instances
+  (`installExtHw<M>("id", ...).owner("module")`) with pin, UART and channel
+  claims and reservations, claims held until released, runtime notes, and an
+  External Hardware page grouped under the owning module.
+- **Persistence and power:** `NvsRecord<T>`, `RtcScratch<T>`,
+  `CheckpointPolicy`, and `PowerGuard`, which pauses flash writes on a power
+  failure.
+- **Time:** clock steps as int64 (`TimeStep`); the time zone is served at
+  runtime (`/api/v1/ui/device`).
+- **UI:**
+  - layout set from the backend (`web::Cols` / `web::Break`, `span`,
+    `fullRow`, one column by default) and a 24-hour date/time picker;
+  - the manifest is a cached, compact skeleton, with feature actions loaded
+    lazily;
+  - opt-in static form schema (`staticSchema()`).
+- **Messaging:** Telegram bot commands (`onCommand`, allowed chats, admins);
+  MQTT device availability with a last will.
+- **Build:** each consumer builds its own UI bundle in `<project>/.pio/www/`.
+
 ## Branches
 
-`master` is **stale**: it's at `8f8a262` (2026-05-09) and 128 commits
-behind the integration line. The current integration line is
-**`feature/ses-light-support`**. It contains `feature/ws-single-session`,
-which in turn contains `feature/api-v1`, `feature/device-mesh`,
-`feature/web-*`, `feature/wireguard-*` and `debug/esp32async-migration`.
-Build consumers against it. The branch table is in
-[`ROADMAP.md` → Status](ROADMAP.md#0-status-2026-10-13).
+- `master` is the published line. On 2026-10-15 it was fast-forwarded to the
+  integration branch at `83a8225`.
+- `feature/ses-light-support` is the integration branch. Verified work lands
+  there first, then on `master`.
+
+Details are in [`ROADMAP.md` → Status](ROADMAP.md#0-status-2026-10-15).
 
 ## License
 
