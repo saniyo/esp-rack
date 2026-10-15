@@ -173,8 +173,14 @@ This is an audit snapshot of `feature/ses-light-support`, dated 2026-10-13:
   - The NimBLE host's own heap is not measured.
 - **Lifecycle:**
   - BootGuard safe mode keeps the radio off.
-  - A settings save hands the new values to the task. Name, TX power and MTU restart the host, and links reconnect. Scan parameters apply live.
-  - `onShutdown()` stops the scan and disconnects every link without waiting.
+  - A settings save hands the new values to the task. Everything applies live:
+    - TX power at once;
+    - the MTU to the next connections;
+    - the name to the GAP service;
+    - scan parameters.
+  - Switching the radio off disconnects and deletes each client before `deinit`, so NimBLE never keeps a client that is still disconnecting.
+  - Discovery: one scan per attempt, then backoff when nothing matched; never back-to-back scans.
+  - `onShutdown()` only signals the ble task, which owns every stack object. That task stops the scan and drops the links; `onShutdown()` waits at most 300 ms for it.
 - **Caveats:**
   - Central role only; no advertising or GATT server.
   - One discovery scan serves every discovering link. A link connects only while no scan is running, because the controller refuses to connect while scanning.

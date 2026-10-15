@@ -134,9 +134,10 @@ struct BleService::Radio {
   uint16_t scanIntervalMs = 100, scanWindowMs = 50;
   bool activeScan = true;
   uint32_t scanMs = 5000;
-  bool hostRestart = false;   // name / power / MTU changed
+  bool hostParamsDirty = false;  // name / power / MTU changed: applied live
   bool scanParamsDirty = false;
   bool shuttingDown = false;
+  std::atomic<bool> shutdownDone{false};  // the task has stopped the scan and the links
 
   // Host state (written by the task).
   std::atomic<bool> hostUp{false};
@@ -491,7 +492,8 @@ void BleState::buildForm(BleState& s, JsonObject& root) {
   set.add(web::Switch("active_scan", s.activeScan).label("Active scan (ask for scan responses)").icon("Radar"));
   set.add(web::Number("scan_s", s.scanSeconds).min(1).max(60).format("0").unit("s").label("Scan duration")
               .icon("HourglassBottom"));
-  set.add(web::Message("m_apply", "Name, TX power and MTU restart the radio: open links reconnect.")
+  set.add(web::Message("m_apply", "Changes apply live: TX power at once, the MTU to the next connections, "
+                                  "the name to the GAP service.")
               .level("info"));
 }
 
@@ -620,7 +622,7 @@ void BleService::loop() {
       String name = s.deviceName.length() ? s.deviceName
                                           : DeviceIdentity::projectName() + "-" + DeviceIdentity::uidHex8();
       if (name != _radio->name || s.txPower != _radio->txPower || s.mtu != _radio->mtu)
-        _radio->hostRestart = true;
+        _radio->hostParamsDirty = true;
       if (s.scanIntervalMs != _radio->scanIntervalMs || s.scanWindowMs != _radio->scanWindowMs ||
           s.activeScan != _radio->activeScan)
         _radio->scanParamsDirty = true;
@@ -646,18 +648,14 @@ void BleService::loop() {
 
 void BleService::end() {
 #if ESPRACK_HAVE_NIMBLE
-  // restartDevice(): no new attempts, then a best-effort disconnect of every
-  // link (no waiting for the controller), well inside the shutdown budget.
+  // restartDevice(): the ble task owns every stack object, so it does the
+  // teardown (stop the scan, drop the links); wait a bounded time for it.
   {
     RadioLock lock(_radio);
     _radio->shuttingDown = true;
   }
-  if (_radio->hostUp.load()) {
-    NimBLEDevice::getScan()->stop();
-    for (Link& l : _radio->links) {
-      if (l.client && l.client->isConnected()) l.client->disconnect();
-    }
-  }
+  wake();
+  for (int i = 0; i < 30 && _radio->task && !_radio->shutdownDone.load(); i++) vTaskDelay(pdMS_TO_TICKS(10));
 #endif
 }
 
@@ -868,7 +866,7 @@ void BleService::taskLoop() {
   Radio& r = *_radio;
   for (;;) {
     // ---- settings snapshot ----
-    bool want, restart, scanDirty, shutting;
+    bool want, hostDirty, scanDirty, shutting;
     String name;
     int8_t power;
     uint16_t mtu, itvl, win;
@@ -877,8 +875,8 @@ void BleService::taskLoop() {
     {
       RadioLock lock(&r);
       want = r.wantEnabled && !r.shuttingDown;
-      restart = r.hostRestart;
-      r.hostRestart = false;
+      hostDirty = r.hostParamsDirty;
+      r.hostParamsDirty = false;
       scanDirty = r.scanParamsDirty;
       r.scanParamsDirty = false;
       shutting = r.shuttingDown;
@@ -894,8 +892,9 @@ void BleService::taskLoop() {
 
     // ---- host lifecycle ----
     const bool up = r.hostUp.load();
-    if (up && (!want || restart)) {
-      // Down: links go Disabled (or Backoff when coming back).
+    if (up && shutting) {
+      // restartDevice(): stop scanning and drop the links, then park. No deinit:
+      // the chip restarts right after the shutdown hooks.
       NimBLEDevice::getScan()->stop();
       for (Link& l : r.links) {
         xSemaphoreTake(l.writeMx, portMAX_DELAY);
@@ -903,7 +902,27 @@ void BleService::taskLoop() {
         xSemaphoreGive(l.writeMx);
         if (l.client && l.client->isConnected()) l.client->disconnect();
       }
-      NimBLEDevice::deinit(true);  // deletes the clients too
+      r.shutdownDone = true;
+      vTaskDelay(portMAX_DELAY);
+    }
+    if (up && !want) {
+      // Radio off. Disconnect each client and wait for it (NimBLE refuses to
+      // delete a client that is still disconnecting, and deinit would leak it),
+      // delete it, and only then stop the host.
+      NimBLEDevice::getScan()->stop();
+      for (Link& l : r.links) {
+        xSemaphoreTake(l.writeMx, portMAX_DELAY);
+        l.writer = nullptr;
+        xSemaphoreGive(l.writeMx);
+        if (!l.client) continue;
+        if (l.client->isConnected()) {
+          l.client->disconnect();
+          for (int i = 0; i < 100 && l.client->isConnected(); i++) vTaskDelay(pdMS_TO_TICKS(20));
+        }
+        if (!NimBLEDevice::deleteClient(l.client)) log_w("[ble] %s: client not deleted", l.spec.owner);
+        l.client = nullptr;
+      }
+      NimBLEDevice::deinit(true);
       {
         RadioLock lock(&r);
         for (Link& l : r.links) {
@@ -943,9 +962,16 @@ void BleService::taskLoop() {
       }
     }
     if (!r.hostUp.load()) {
+      if (shutting) r.shutdownDone = true;
       notifyStates();
       ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(shutting ? portMAX_DELAY : 1000));
       continue;
+    }
+    if (hostDirty) {
+      // Live: TX power now, MTU for the next connections, the name for the GAP service.
+      NimBLEDevice::setPower(power);
+      NimBLEDevice::setMTU(mtu);
+      NimBLEDevice::setDeviceName(std::string(name.c_str()));
     }
     if (scanDirty) {
       NimBLEScan* scan = NimBLEDevice::getScan();
@@ -964,15 +990,21 @@ void BleService::taskLoop() {
       if (r.scanning.load()) scan->stop();
       r.scanning = scan->start(userScan, false, true);
     }
+    // A link entering Discovering records the scan generation; it asks for a scan
+    // only until one has ended since then, so a failed discovery goes to Backoff
+    // instead of scanning back to back.
     uint32_t discoverMs = 0;
     {
       RadioLock lock(&r);
+      const uint32_t gen = r.scanGen.load();
       for (Link& l : r.links)
-        if (l.used && l.st.load() == BleLinkState::Discovering && !l.candidate[0] && l.spec.discoverScanMs > discoverMs)
+        if (l.used && l.st.load() == BleLinkState::Discovering && !l.candidate[0] && l.waitScanGen == gen &&
+            l.spec.discoverScanMs > discoverMs)
           discoverMs = l.spec.discoverScanMs;
     }
     if (discoverMs && !r.scanning.load() && !shutting) {
       r.scanning = scan->start(discoverMs, false, true);
+      if (!r.scanning.load()) r.scanGen++;  // refused: count it as an empty scan, back off
     }
 
     // ---- links ----
