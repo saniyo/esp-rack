@@ -93,6 +93,10 @@ also has to list it in `lib_deps`. See
   - opt-in static form schema (`staticSchema()`).
 - **Messaging:** Telegram bot commands (`onCommand`, allowed chats, admins);
   MQTT device availability with a last will.
+- **Bluetooth LE:** `modules/ble` owns the radio (NimBLE-Arduino 2.x) and
+  publishes `IBleProvider` (`app->ble()`): scans into a bounded table and
+  managed central links (discover, connect, subscribe, reconnect). See the
+  `ble` entry in [`docs/module-catalog.md`](docs/module-catalog.md).
 - **Build:** each consumer builds its own UI bundle in `<project>/.pio/www/`.
 
 ## Branches
