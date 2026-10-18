@@ -40,6 +40,7 @@
 #endif
 
 #include "StatefulService.h"
+#include "StateFace.h"
 #include "WebAuth.h"
 
 #ifndef MWS_DEFAULT_JSON_CAP
@@ -359,7 +360,7 @@ class WsManager {
     // Services should also gate earlier via hasClients(channel).
     if (subscriberCount(channel) == 0) return;
     String out;
-    if (!buildStateFrame(base, origin, out)) return;
+    if (!buildStateFrame(base, origin, out, ESPRack::StateFace::WsPush)) return;
     broadcast(channel, out, true);
   }
 
@@ -691,9 +692,11 @@ class WsManager {
   // (loop/async_tcp/mqtt/...); ws sends happen later in processTx, NOT here, so
   // the lock is never held across a socket write. ClientsLock is just a generic
   // recursive-mutex RAII guard, reused here for _txDocMx.
-  bool buildStateFrame(ChannelBase* base, const String& origin, String& out) {
+  bool buildStateFrame(ChannelBase* base, const String& origin, String& out, ESPRack::StateFace face) {
     if (!base) return false;
     ClientsLock g(_txDocMx);
+    // SES-LIB-033: readers can tell this frame (fixed buffer) from a REST read.
+    ESPRack::StateFaceScope faceScope(face);
     const size_t want = _maxWsCap + 256;
     if (!_txDoc || _txDoc->capacity() < want) {
       _txDoc.reset(new DynamicJsonDocument(want));   // one-time grow (channels register at boot)
@@ -725,7 +728,7 @@ class WsManager {
     ChannelBase* base = findChannel(channel);
     if (!base) return;
     String out;
-    if (!buildStateFrame(base, "ws_sub", out)) return;
+    if (!buildStateFrame(base, "ws_sub", out, ESPRack::StateFace::WsSnapshot)) return;
     sendTo(channel, cid, out, true);
   }
 
