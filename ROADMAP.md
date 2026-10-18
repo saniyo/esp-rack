@@ -25,10 +25,11 @@ On top of core 0.6.0 it brings:
 - SES-LIB-030 (compact manifest, lazy feature actions);
 - SES-LIB-019 (Telegram commands);
 - SES-LIB-032 (time zone out of the manifest);
-- SES-LIB-033 steps 1–2 (static form schema; Telegram migrated);
+- SES-LIB-033 steps 1–2 (static form schema; Telegram, System → External
+  Hardware, WiFi and MQTT migrated);
 - the index.html cache fix.
 
-Still to do in SES-LIB-033: External Hardware, WiFi and MQTT.
+SES-LIB-033 is done in the framework; SES moves its own modules over.
 
 ### 0.1 Phases
 
@@ -71,6 +72,11 @@ Work beyond the plan that has landed:
     milliseconds (DHT22) waits until no instance that decodes by interrupt
     timing (OpenTherm) is receiving. For the OpenTherm and DHT ExtHw modules
     in esp-rack-modules.
+  - SES-LIB-033 step 2: System → External Hardware (a bespoke page tab:
+    `WebTab::staticSchema(statePath)`), WiFi (scan rows and the live
+    connection as values, `sta_*` keys) and MQTT (seen, attached and
+    subscription rows in GET /state; `StateFace` keeps WS frames to what
+    changed) read a cached schema + their state.
   - SES-LIB-033 step 1: opt-in static form schema (`staticSchema()`,
     `?schema=1` with ETag/304, the UI merges the schema with `/state`).
   - SES-LIB-029c: one column unless a page groups (Cols/Break), equal

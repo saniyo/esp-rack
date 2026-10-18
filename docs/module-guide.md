@@ -908,10 +908,23 @@ Start from `modules/template-ext-hw/`. Its pieces:
     takes the values from `/state`. Only for a form whose fields never depend
     on the state:
     - every field's key is in the state reader under the same name (table
-      rows too);
+      rows too), and unique across the feature's tabs: the state is flat
+      (WiFi's status tab shows the live connection as `sta_*`);
     - no `if (state...)` around `f.add(...)`: use `showIf`;
-    - no options built from runtime data (scan lists): leave such forms
-      without `staticSchema()` for now.
+    - no options built from runtime data: show such data as table rows, as
+      the WiFi scan does.
+
+    Two more cases:
+    - **A bespoke page tab** (`addTabToFeature`, a raw handler) opts in with
+      `WebTab(...).staticSchema(statePath)`. Its handler answers `?schema=1`
+      with `sendFormSchema(...)`, and `statePath` serves the flat values.
+      Example: System → External Hardware.
+    - **A live feature's state reader** also builds its WS frames, which have
+      a fixed buffer. `ESPRack::stateFace()` (`StateFace.h`) tells a REST read
+      (`Rest`: GET /state, which a static-schema page reads all its values
+      from) from a WS frame (`WsSnapshot`, `WsPush`). Send the full lists
+      only in `Rest`, and only what changed in WS frames. Example: MQTT's seen
+      topics.
 14. **Interrupt timing between instances** (`hw/IrqTimed.h`).
     - A driver that decodes its input from interrupt timing (an edge ISR
       measuring pulse widths: OpenTherm, IR, 433 MHz) implements
