@@ -139,7 +139,15 @@ class HwRegistry {
   Inst* instOf(const ExtHwModule& who);
   const Inst* instOf(const ExtHwModule& who) const;
   void evaluate(Inst& x, const HwDescriptor& d);  // under _mx
-  void buildForm(JsonObject& root) const;
+  // System -> Hardware (SES-LIB-033): the form (values = false: the schema,
+  // no rows) and its flat values for GET .../state.
+  void buildForm(JsonObject& root, bool values) const;
+  void buildState(JsonObject& root) const;
+  // Under the lock.
+  void chipText(char* buf, size_t len) const;
+  void budgetText(char* buf, size_t len) const;
+  void fillInstanceRows(JsonArray rows) const;
+  void fillPinRows(JsonArray rows) const;
   void lock() const { xSemaphoreTake(_mx, portMAX_DELAY); }
   void unlock() const { xSemaphoreGive(_mx); }
 

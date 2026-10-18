@@ -5,11 +5,13 @@
 
 #include "AdaptiveJson.h"
 #include "App.h"
+#include "WebFeatureDelegate.h"
 #include "WebManager.h"
 #include "hw/BoardProfile.h"
 #include "web/Form.h"
 
 #define HW_FORM_PATH "/api/v1/system/hardware/form"
+#define HW_STATE_PATH "/api/v1/system/hardware/state"
 
 namespace ESPRack {
 
@@ -319,20 +321,41 @@ void HwRegistry::registerManifest(WebManager* web) {
   e.role = "hardwareForm";
   e.auth = WebAuthLevel::Authenticated;
   e.handler = [this](AsyncWebServerRequest* r) {
-    sendAdaptiveJson(r, [this](JsonObject& o) { buildForm(o); }, 1536);
+    // SES-LIB-033: the schema (static per firmware, ETag/304); the values
+    // come from HW_STATE_PATH.
+    if (r->hasParam("schema")) {
+      sendFormSchema(r, "systemHardware", 1024, [this](JsonObject& o) { buildForm(o, false); });
+      return;
+    }
+    sendAdaptiveJson(r, [this](JsonObject& o) { buildForm(o, true); }, 1536);
   };
   e.internalHandler = [this](JsonVariant /*in*/, JsonVariant out, int& status) {
     JsonObject o = out.to<JsonObject>();
-    buildForm(o);
+    buildForm(o, true);
     status = 200;
   };
   page.endpoints.push_back(std::move(e));
+  WebEndpointMeta st;
+  st.method = "GET";
+  st.path = HW_STATE_PATH;
+  st.role = "hardwareState";
+  st.auth = WebAuthLevel::Authenticated;
+  st.handler = [this](AsyncWebServerRequest* r) {
+    sendAdaptiveJson(r, [this](JsonObject& o) { buildState(o); }, 1024);
+  };
+  st.internalHandler = [this](JsonVariant /*in*/, JsonVariant out, int& status) {
+    JsonObject o = out.to<JsonObject>();
+    buildState(o);
+    status = 200;
+  };
+  page.endpoints.push_back(std::move(st));
   web->registerPage(std::move(page));
 
   WebTabSpec tab;
   tab.key = "hardware";
   tab.title = kLabel;
   tab.restPath = HW_FORM_PATH;
+  tab.statePath = HW_STATE_PATH;  // SES-LIB-033: cached schema + these values
   tab.postable = false;
   tab.auth = WebAuthLevel::Authenticated;
   tab.order = 14;  // after Identity (10) and Resources (12)
@@ -370,15 +393,13 @@ void HwRegistry::loop() {
 }
 
 #if ESPRACK_HW_TAB
-void HwRegistry::buildForm(JsonObject& root) const {
-  web::Form f(root, "hardware", kLabel);
-
-  lock();
+void HwRegistry::chipText(char* buf, size_t len) const {
   const BoardInfo& b = _claims.board();
-  char line[160];
-  snprintf(line, sizeof(line), "%s, %u GPIOs", b.chipName, (unsigned)b.gpioCount);
-  f.add(web::Text("chip", line).readOnly().label("Chip").icon("Memory"));
+  snprintf(buf, len, "%s, %u GPIOs", b.chipName, (unsigned)b.gpioCount);
+}
 
+void HwRegistry::budgetText(char* buf, size_t len) const {
+  const BoardInfo& b = _claims.board();
   const struct {
     const char* name;
     HwKind kind;
@@ -388,23 +409,17 @@ void HwRegistry::buildForm(JsonObject& root) const {
                 {"RMT RX", HwKind::RmtRx, b.rmtRx},  {"LEDC", HwKind::Ledc, b.ledc},
                 {"PCNT", HwKind::PcntUnit, b.pcnt}};
   size_t n = 0;
+  buf[0] = '\0';
   for (const auto& x : budget) {
-    const int w = snprintf(line + n, sizeof(line) - n, "%s%s %u/%u", n ? " · " : "", x.name,
-                           usedOf(_claims, x.kind), (unsigned)x.total);
-    if (w < 0 || (size_t)w >= sizeof(line) - n) break;
+    const int w = snprintf(buf + n, len - n, "%s%s %u/%u", n ? " \xC2\xB7 " : "", x.name, usedOf(_claims, x.kind),
+                           (unsigned)x.total);
+    if (w < 0 || (size_t)w >= len - n) break;
     n += (size_t)w;
   }
-  f.add(web::Text("budget", line).readOnly().label("Peripheral claims (used/available)").icon("Tune"));
+}
 
-  f.add(web::Table("instances")
-            .col("id", "Instance", "text")
-            .col("type", "Type", "text")
-            .col("owner", "Owner", "text")
-            .col("hw", "Hardware", "text")
-            .col("state", "State", "text")
-            .col("note", "Note", "text")
-            .label("Instances"));
-  JsonArray rows = f.rowsOf("instances");
+void HwRegistry::fillInstanceRows(JsonArray rows) const {
+  char line[160];
   for (const Inst& x : _inst) {
     JsonObject r = rows.createNestedObject();
     r["id"] = x.m->instanceId();
@@ -436,13 +451,11 @@ void HwRegistry::buildForm(JsonObject& root) const {
     r["state"] = "Not installed";
     r["note"] = x.why;
   }
+}
 
-  f.add(web::Table("pins")
-            .col("res", "Resource", "text")
-            .col("level", "Use", "text")
-            .col("reason", "Why", "text")
-            .label("Reserved and caution resources"));
-  JsonArray pins = f.rowsOf("pins");
+void HwRegistry::fillPinRows(JsonArray pins) const {
+  const BoardInfo& b = _claims.board();
+  char line[64];
   for (uint8_t i = 0; i < b.noteCount; ++i) {
     JsonObject r = pins.createNestedObject();
     snprintf(line, sizeof(line), "GPIO%d", b.notes[i].gpio);
@@ -458,9 +471,52 @@ void HwRegistry::buildForm(JsonObject& root) const {
     r["level"] = "reserved";
     r["reason"] = rc.owner;
   }
+}
+
+// values = false: the schema (SES-LIB-033) without rows; sendFormSchema nulls
+// the values anyway, and they come from buildState().
+void HwRegistry::buildForm(JsonObject& root, bool values) const {
+  web::Form f(root, "hardware", kLabel);
+  char line[160] = "";
+
+  lock();
+  if (values) chipText(line, sizeof(line));
+  f.add(web::Text("chip", line).readOnly().label("Chip").icon("Memory"));
+  if (values) budgetText(line, sizeof(line));
+  f.add(web::Text("budget", line).readOnly().label("Peripheral claims (used/available)").icon("Tune"));
+
+  f.add(web::Table("instances")
+            .col("id", "Instance", "text")
+            .col("type", "Type", "text")
+            .col("owner", "Owner", "text")
+            .col("hw", "Hardware", "text")
+            .col("state", "State", "text")
+            .col("note", "Note", "text")
+            .label("Instances"));
+  if (values) fillInstanceRows(f.rowsOf("instances"));
+
+  f.add(web::Table("pins")
+            .col("res", "Resource", "text")
+            .col("level", "Use", "text")
+            .col("reason", "Why", "text")
+            .label("Reserved and caution resources"));
+  if (values) fillPinRows(f.rowsOf("pins"));
   unlock();
 
   if (!_inst.empty()) f.add(web::Action("a_restore").ref("system.restoreFactoryHw"));
+}
+
+// GET .../state: every field of the tab under its key, flat.
+void HwRegistry::buildState(JsonObject& root) const {
+  char line[160];
+  lock();
+  chipText(line, sizeof(line));
+  root["chip"] = line;  // char arrays: copied
+  budgetText(line, sizeof(line));
+  root["budget"] = line;
+  fillInstanceRows(root.createNestedArray("instances"));
+  fillPinRows(root.createNestedArray("pins"));
+  unlock();
 }
 #endif  // ESPRACK_HW_TAB
 
