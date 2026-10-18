@@ -1,4 +1,4 @@
-import { mergeSchemaState } from './utils/formSchema';
+import { mergeSchemaState, staticStatePath } from './utils/formSchema';
 import { HeadingContext } from './HeadingContext';
 import { FC, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Navigate, Route, Routes } from 'react-router-dom';
@@ -36,9 +36,9 @@ const toSavePath = (formPath: string) => formPath.replace(/\/form$/, '/state');
 // /api/v1/system/status/form + /api/v1/ota/form + /api/v1/system/upload/form).
 interface DynamicTabPanelProps {
   tab: TabSpec;
-  // SES-LIB-033: the feature whose own form this tab reads has a static
-  // schema: cached schema + /state instead of the full form.
-  schemaOf?: string;
+  // SES-LIB-033: a static-schema tab: cached <restPath>?schema=1 + the values
+  // from this state path instead of the full form.
+  statePath?: string;
   ws?: {
     connected: boolean;
     wsData: any;
@@ -51,16 +51,16 @@ interface DynamicTabPanelProps {
   };
 }
 
-const DynamicTabPanel: FC<DynamicTabPanelProps> = ({ tab, ws, schemaOf }) => {
+const DynamicTabPanel: FC<DynamicTabPanelProps> = ({ tab, ws, statePath }) => {
   const read = useMemo(
     () => (): AxiosPromise<Record<string, any>> => {
-      if (!schemaOf) return AXIOS.get(toAxiosPath(tab.restPath));
+      if (!statePath) return AXIOS.get(toAxiosPath(tab.restPath));
       return Promise.all([
         AXIOS.get(`${toAxiosPath(tab.restPath)}?schema=1`),
-        AXIOS.get(`${schemaOf}/state`),
+        AXIOS.get(toAxiosPath(statePath)),
       ]).then(([schema, state]) => ({ ...schema, data: mergeSchemaState(schema.data, state.data) }));
     },
-    [tab.restPath, schemaOf]
+    [tab.restPath, statePath]
   );
   const update = useMemo(
     () =>
@@ -267,8 +267,8 @@ const DynamicFeature: FC<DynamicFeatureProps> = ({ featureId, fallback }) => {
   if (tabs.length === 0) return <FormLoader message="Feature has no tabs" />;
   const firstTabKey = tabs[0].key;
 
-  // SES-LIB-033: tabs reading this static-schema feature's own form.
-  const schemaOf = (t: TabSpec) => (entry.ss && t.restPath === `/api/v1/${entry.id}/form` ? entry.id : undefined);
+  // SES-LIB-033: static-schema tabs read the cached schema + their state.
+  const statePathOf = (t: TabSpec) => staticStatePath(entry, t);
 
   // Titles the page already shows; forms and cards below don't repeat them.
   const shown = (t: { title?: string; key: string }) => [entry.title, entry.menu?.label, t.title, t.key];
@@ -278,7 +278,7 @@ const DynamicFeature: FC<DynamicFeatureProps> = ({ featureId, fallback }) => {
       <>
         {banner}
         <HeadingContext.Provider value={shown(tabs[0])}>
-          <DynamicTabPanel tab={tabs[0]} ws={wsBundle} schemaOf={schemaOf(tabs[0])} />
+          <DynamicTabPanel tab={tabs[0]} ws={wsBundle} statePath={statePathOf(tabs[0])} />
         </HeadingContext.Provider>
       </>
     );
@@ -299,7 +299,7 @@ const DynamicFeature: FC<DynamicFeatureProps> = ({ featureId, fallback }) => {
             path={t.key}
             element={(
               <HeadingContext.Provider value={shown(t)}>
-                <DynamicTabPanel tab={t} ws={wsBundle} schemaOf={schemaOf(t)} />
+                <DynamicTabPanel tab={t} ws={wsBundle} statePath={statePathOf(t)} />
               </HeadingContext.Provider>
             )}
           />

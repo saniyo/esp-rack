@@ -28,6 +28,9 @@ export interface TabSpec {
   title?: string;
   icon?: string;        // optional per-tab MUI icon, surfaced on the menu sub-tab leaf
   restPath: string;
+  // SES-LIB-033: a bespoke page tab with a static schema: the UI caches
+  // <restPath>?schema=1 and takes the values from this flat GET path.
+  statePath?: string;
   postable?: boolean;  // tab can POST updates to restPath
   live?: boolean;       // tab subscribes to feature.ch over the shared /ws/app socket
   auth?: AuthLevel;

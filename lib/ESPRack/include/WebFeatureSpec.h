@@ -80,6 +80,11 @@ struct WebTabSpec {
   // so a feature-id rename can never silently desync a contributed tab.
   // Takes precedence over restPath when both are set.
   const char* formOf = nullptr;
+  // SES-LIB-033: a bespoke page tab whose form never depends on the state.
+  // The UI caches <restPath>?schema=1 (the page answers it with
+  // sendFormSchema) and takes the values from this flat GET path. Typed
+  // features opt in with WebFeature::staticSchema() instead.
+  const char* statePath = nullptr;
   bool postable = false;  // tab can POST updates to restPath
   bool live = false;      // tab subscribes to feature.wsPath for push updates
   WebAuthLevel auth = WebAuthLevel::Authenticated;

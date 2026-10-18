@@ -21,3 +21,15 @@ export function mergeSchemaState(form: Record<string, any>, state: Record<string
   });
   return out;
 }
+
+// Where a static-schema tab reads its values (SES-LIB-033), or undefined for
+// a tab that reads its full form: a bespoke page tab names its state path; a
+// static-schema feature's own tabs read /api/v1/<id>/state.
+export function staticStatePath(
+  entry: { id: string; ss?: number },
+  tab: { restPath: string; statePath?: string },
+): string | undefined {
+  if (tab.statePath) return tab.statePath;
+  if (entry.ss && tab.restPath === `/api/v1/${entry.id}/form`) return `/api/v1/${entry.id}/state`;
+  return undefined;
+}

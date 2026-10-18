@@ -243,6 +243,7 @@ class WebFeatureEntry : public IWebFeatureEntry {
       jt["postable"] = t.postable;
       jt["live"] = t.live;
       jt["auth"] = webAuthLevelToStr(t.auth);
+      if (t.statePath) jt["statePath"] = t.statePath;  // SES-LIB-033
     }
 
     JsonArray actions = obj.createNestedArray("actions");

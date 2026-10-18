@@ -115,6 +115,9 @@ class WebTab {
 
   WebTab& icon(const char* i)     { _t.icon = i; return *this; }
   WebTab& rest(const char* path)  { _t.restPath = path; return *this; }
+  // SES-LIB-033: this bespoke page tab's form never depends on the state; the
+  // UI caches <rest>?schema=1 and reads the values from `statePath` (flat).
+  WebTab& staticSchema(const char* statePath) { _t.statePath = statePath; return *this; }
   WebTab& postable(bool v = true) { _t.postable = v; return *this; }
   WebTab& live(bool v = true)     { _t.live = v; return *this; }
   WebTab& order(int o)            { _t.order = o; return *this; }

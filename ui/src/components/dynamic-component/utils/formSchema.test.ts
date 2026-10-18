@@ -1,7 +1,7 @@
 // SES-LIB-033 [host]: schema + state = the form.
 import { describe, expect, it } from '@jest/globals';
 
-import { mergeSchemaState } from './formSchema';
+import { mergeSchemaState, staticStatePath } from './formSchema';
 
 describe('static schema', () => {
   it('fills the values from the state', () => {
@@ -31,5 +31,22 @@ describe('static schema', () => {
     expect(f[5].missing).toBeNull();
     expect(m.settings.description).toBe('Meter');
     expect(m.other).toBe(1);
+  });
+});
+
+describe('where a static-schema tab reads its values', () => {
+  it('a static-schema feature: its own form tabs read its /state', () => {
+    const e = { id: 'telegram', ss: 1 };
+    expect(staticStatePath(e, { restPath: '/api/v1/telegram/form' })).toBe('/api/v1/telegram/state');
+    expect(staticStatePath(e, { restPath: '/api/v1/other/form' })).toBeUndefined();  // contributed
+  });
+  it('a bespoke page tab names its state path', () => {
+    const e = { id: 'system' };
+    const hw = { restPath: '/api/v1/system/hardware/form', statePath: '/api/v1/system/hardware/state' };
+    expect(staticStatePath(e, hw)).toBe('/api/v1/system/hardware/state');
+    expect(staticStatePath(e, { restPath: '/api/v1/system/status/form' })).toBeUndefined();
+  });
+  it('anything else reads its full form', () => {
+    expect(staticStatePath({ id: 'wifi' }, { restPath: '/api/v1/wifi/form' })).toBeUndefined();
   });
 });
