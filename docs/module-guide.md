@@ -912,6 +912,16 @@ Start from `modules/template-ext-hw/`. Its pieces:
     - no `if (state...)` around `f.add(...)`: use `showIf`;
     - no options built from runtime data (scan lists): leave such forms
       without `staticSchema()` for now.
+14. **Interrupt timing between instances** (`hw/IrqTimed.h`).
+    - A driver that decodes its input from interrupt timing (an edge ISR
+      measuring pulse widths: OpenTherm, IR, 433 MHz) implements
+      `IIrqTimed` (`"irqTimed.v1"`). `irqQuiet()` is true while nothing is
+      being received and nothing can start before its next `onLoop`.
+    - It keeps quiet moments coming, e.g. a pause between frames.
+    - A driver that masks interrupts for more than ~100 us (a bit-banged
+      DHT22 read) calls `ESPRack::irqQuiet(hw(), &busy)` on loopTask right
+      before it masks. When that is false, it tries again on a later pass,
+      never forces the read, and shows how long it has been waiting.
 
 `install<M>()` on an `ExtHwModule` and `installExtHw<M>()` on a plain module
 both fail to compile with a message saying which one to use. An invalid id

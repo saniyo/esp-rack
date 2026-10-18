@@ -67,6 +67,10 @@ Work beyond the plan that has landed:
   - SES-LIB-016 (UI pack B): dated table columns (`date/time/datetime/duration`),
     `Message.levelKey`, `Action.withClientTime`, `updateValue` for 32/64-bit
     integers, 13 icons. Plan: `docs/plans/ses-lib-016-ui-pack-b.md`.
+  - `IIrqTimed` (`hw/IrqTimed.h`): a driver that masks interrupts for
+    milliseconds (DHT22) waits until no instance that decodes by interrupt
+    timing (OpenTherm) is receiving. For the OpenTherm and DHT ExtHw modules
+    in esp-rack-modules.
   - SES-LIB-033 step 1: opt-in static form schema (`staticSchema()`,
     `?schema=1` with ETag/304, the UI merges the schema with `/state`).
   - SES-LIB-029c: one column unless a page groups (Cols/Break), equal
