@@ -72,6 +72,7 @@
 #define MQTT_RECONNECTION_DELAY 5000
 #define MQTT_TOPICS_LOG_MAX     50
 #define MQTT_SEEN_PAYLOAD_MAX   48     // truncate per-topic last-payload to this many chars
+#define MQTT_STATE_SEEN_MAX     20     // seen topics in a REST snapshot (GET /state): the newest
 #define MQTT_ATTACHED_TOPICS_MAX 16    // upper bound on persisted attached topics
 
 class WebManager;
@@ -189,8 +190,11 @@ class MqttSettings {
     root["sniffer_pattern"] = s.snifferPattern;
   }
 
-  /* ----- WS status reader (runtime + config echo) ----- */
-  static void staRead(MqttSettings& s, JsonObject& root) {
+  /* ----- state reader (runtime + config echo): WS frames and GET /state -----
+   * rest (SES-LIB-033): a REST snapshot (the static-schema page reads all its
+   * values from it) carries the newest seen topics; the WS faces carry the
+   * ones that changed since the last push. */
+  static void staRead(MqttSettings& s, JsonObject& root, bool rest = false) {
     root["status"] = statusLabel(s);
     root["enabled"] = s.enabled;
     root["connected"] = s.connected;
@@ -228,7 +232,9 @@ class MqttSettings {
     // frontend keys by `topic` and merges by row, accumulating up to
     // maxRows(MQTT_TOPICS_LOG_MAX). Same pattern the chart trends
     // use — frame size stays bounded regardless of broker volume.
-    if (!s.pendingSeenTopics.empty()) {
+    if (rest) {
+      seenRows(s, root.createNestedArray("seen_topics"));
+    } else if (!s.pendingSeenTopics.empty()) {
       JsonArray seen = root.createNestedArray("seen_topics");
       for (const auto& t : s.pendingSeenTopics) {
         for (const auto& e : s.seenTopics) {
@@ -245,6 +251,46 @@ class MqttSettings {
       // GET /api/v1/mqtt/state and WS snapshots, which must not steal the
       // rows from live subscribers. MqttSettingsService::pushLive() clears
       // them after the frame is built.
+    }
+  }
+
+  // The newest MQTT_STATE_SEEN_MAX seen topics, newest first (a REST snapshot).
+  static void seenRows(const MqttSettings& s, JsonArray rows) {
+    const size_t n = s.seenTopics.size();
+    bool taken[MQTT_TOPICS_LOG_MAX] = {};
+    for (size_t k = 0; k < n && k < MQTT_STATE_SEEN_MAX; ++k) {
+      size_t best = n;
+      for (size_t i = 0; i < n && i < MQTT_TOPICS_LOG_MAX; ++i) {
+        if (taken[i]) continue;
+        if (best == n || s.seenTopics[i].lastSeenAt_s > s.seenTopics[best].lastSeenAt_s) best = i;
+      }
+      if (best == n) break;
+      taken[best] = true;
+      const auto& e = s.seenTopics[best];
+      JsonObject row = rows.createNestedObject();
+      row["topic"]      = e.topic;
+      row["lastValue"]  = e.lastPayload;
+      row["count"]      = e.count;
+      row["lastSeenAt"] = e.lastSeenAt_s;
+    }
+  }
+
+  // Persistent subscriptions with the last value seen on each (wildcards
+  // match many topics: "(wildcard)").
+  static void attachedRows(const MqttSettings& s, JsonArray rows) {
+    for (const auto& t : s.attachedTopics) {
+      JsonObject row = rows.createNestedObject();
+      row["topic"] = t;
+      const bool isWildcard = (t.indexOf('+') >= 0) || (t.indexOf('#') >= 0);
+      if (isWildcard) {
+        row["value"] = "(wildcard)";
+      } else {
+        String val;
+        for (const auto& e : s.seenTopics) {
+          if (e.topic == t) { val = e.lastPayload; break; }
+        }
+        row["value"] = val;  // empty if no message yet (broker has nothing retained)
+      }
     }
   }
 
@@ -501,6 +547,8 @@ class MqttSettingsService : public StatefulService<MqttSettings>,
 
   // Subscription registry (new IMqttProvider path)
   std::vector<MqttSubscriptionRecord> _subs;
+  // The internal services' table (Subscriptions tab): the form and the REST state.
+  void subscriptionRows(JsonArray rows);
   uint32_t                            _nextSubId{1};
 
   // Helpers for subscription routing.

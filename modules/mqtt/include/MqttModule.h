@@ -10,7 +10,7 @@
 class MqttModule : public ESPRack::Module {
  public:
   void describe(ESPRack::ModuleDescriptor& d) override {
-    d.id = "mqtt"; d.version = "2.1.0"; d.priority = 40;
+    d.id = "mqtt"; d.version = "2.2.0"; d.priority = 40;
     d.requires_ = {"wifi"};
   }
   void onInstall(ESPRack::ModuleContext& ctx) override {

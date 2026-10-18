@@ -1,6 +1,6 @@
 {
   "name": "MqttModule",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "ESPRack module: mqtt — IMqttProvider subscription model with publish/inbound dispatch, sliding-window rate limit, Subscriptions UI tab.",
   "license": "MIT",
   "frameworks": [

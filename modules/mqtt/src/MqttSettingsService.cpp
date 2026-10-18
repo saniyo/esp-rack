@@ -1,5 +1,6 @@
 #include <MqttSettingsService.h>
 #include <WebManager.h>
+#include <StateFace.h>
 #include <DeviceIdentity.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -268,25 +269,7 @@ void MqttSettingsService::registerManifest(WebManager* web) {
                  .col("enabled", "Enabled", "text")
                  .mode("replace").maxRows(32)
                  .icon("Cable").label("Active subscriptions"));
-    JsonArray rows = subs.rowsOf("subscriptions");
-    uint32_t now_s = (uint32_t)(millis() / 1000);
-    for (const auto& r : _subs) {
-      if (r.id == 0) continue;
-      JsonObject row = rows.createNestedObject();
-      row["name"]      = r.name;
-      row["prefix"]    = r.cfg.defaultTopicPrefix.length() ? r.cfg.defaultTopicPrefix : String("(none)");
-      row["published"] = r.stats.published;
-      row["errors"]    = r.stats.publishErrors;
-      row["dropped"]   = r.stats.publishDropped;
-      row["received"]  = r.stats.received;
-      row["rate"]      = r.cfg.maxPublishesPerMinute;
-      row["lastPubAt"] = r.stats.lastPublishAt_s == 0
-                            ? 0
-                            : (now_s > r.stats.lastPublishAt_s
-                                ? now_s - r.stats.lastPublishAt_s
-                                : 0);
-      row["enabled"]   = r.enabled ? "yes" : "no";
-    }
+    subscriptionRows(subs.rowsOf("subscriptions"));
 
     // Persistent subscriptions — operator-attached topics that
     // survive reboot. Lives here on the Subscriptions tab next to
@@ -304,20 +287,7 @@ void MqttSettingsService::registerManifest(WebManager* web) {
                  .rowFill("selected_topic=topic")
                  .icon("PushPin").label("Persistent subscriptions"));
     JsonArray attRows = subs.rowsOf("attached_topics_view");
-    for (const auto& t : s.attachedTopics) {
-      JsonObject row = attRows.createNestedObject();
-      row["topic"] = t;
-      bool isWildcard = (t.indexOf('+') >= 0) || (t.indexOf('#') >= 0);
-      if (isWildcard) {
-        row["value"] = "(wildcard)";
-      } else {
-        String val;
-        for (const auto& e : s.seenTopics) {
-          if (e.topic == t) { val = e.lastPayload; break; }
-        }
-        row["value"] = val;  // empty if no message yet (broker has nothing retained)
-      }
-    }
+    MqttSettings::attachedRows(s, attRows);
     log_d("[mqtt.formBuild] attached_topics_view emitted %u rows (state=%u)",
                   attRows.size(), (unsigned)s.attachedTopics.size());
   };
@@ -327,11 +297,44 @@ void MqttSettingsService::registerManifest(WebManager* web) {
   // 503 this form whenever C3's ~9 KB maxAlloc had any neighbour in
   // flight). Runtime topic VALUES beyond the probed size ride the WS
   // delta channel (staRead), so the REST tree stays schema-bounded.
+  // SES-LIB-033: GET /state (the REST face) carries every field of the
+  // three tabs, so the UI caches the form's schema; WS frames keep carrying
+  // only what changed (their buffer is fixed).
+  auto stateReader = [this](MqttSettings& s, JsonObject& root) {
+    const bool rest = ESPRack::stateFace() == ESPRack::StateFace::Rest;
+    MqttSettings::staRead(s, root, rest);
+    if (!rest) return;
+    subscriptionRows(root.createNestedArray("subscriptions"));
+    MqttSettings::attachedRows(s, root.createNestedArray("attached_topics_view"));
+  };
+  spec.staticSchema = true;
+
   _feature = web->registerFeature<MqttSettings>(
       std::move(spec), this,
       fullReader,              MqttSettings::update,     // REST
-      MqttSettings::staRead,   MqttSettings::staUpd,     // WS
+      stateReader,             MqttSettings::staUpd,     // WS + GET /state
       WEBFEATURE_BUFFER_AUTO, 4096);
+}
+
+void MqttSettingsService::subscriptionRows(JsonArray rows) {
+  uint32_t now_s = (uint32_t)(millis() / 1000);
+  for (const auto& r : _subs) {
+    if (r.id == 0) continue;
+    JsonObject row = rows.createNestedObject();
+    row["name"]      = r.name;
+    row["prefix"]    = r.cfg.defaultTopicPrefix.length() ? r.cfg.defaultTopicPrefix : String("(none)");
+    row["published"] = r.stats.published;
+    row["errors"]    = r.stats.publishErrors;
+    row["dropped"]   = r.stats.publishDropped;
+    row["received"]  = r.stats.received;
+    row["rate"]      = r.cfg.maxPublishesPerMinute;
+    row["lastPubAt"] = r.stats.lastPublishAt_s == 0
+                          ? 0
+                          : (now_s > r.stats.lastPublishAt_s
+                              ? now_s - r.stats.lastPublishAt_s
+                              : 0);
+    row["enabled"]   = r.enabled ? "yes" : "no";
+  }
 }
 
 /* ---------- begin ---------- */
