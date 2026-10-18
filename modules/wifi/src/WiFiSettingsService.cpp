@@ -104,6 +104,24 @@ static String joinDns(bool connected) {
   return out;
 }
 
+// The networks the last scan found (scanN = WiFi.scanComplete()).
+static void scanRows(JsonArray arr, int scanN) {
+  for (int i = 0; i < scanN; ++i) {
+    JsonObject row = arr.createNestedObject();
+    row["ssid"]    = WiFi.SSID(i);
+    row["rssi"]    = WiFi.RSSI(i);
+    row["channel"] = WiFi.channel(i);
+#ifdef ESP32
+    uint8_t enc = (uint8_t)WiFi.encryptionType(i);
+    row["security"]    = encryptionLabel(enc);
+    row["avatar_icon"] = (enc == WIFI_AUTH_OPEN) ? "LockOpen" : "Lock";
+#else
+    row["security"]    = "";
+    row["avatar_icon"] = "Lock";
+#endif
+  }
+}
+
 /* ================= FORM ================= */
 void WiFiSettings::buildForm(WiFiSettings& s, JsonObject& root) {
   const wl_status_t wst = WiFi.status();
@@ -129,11 +147,11 @@ void WiFiSettings::buildForm(WiFiSettings& s, JsonObject& root) {
                  .label("Active AP").icon("SwapVerticalCircle"));
 
   const String ssidLive = connected ? WiFi.SSID() : String("");
-  status.add(web::Text("ssid", ssidLive.c_str()).readOnly()
+  status.add(web::Text("sta_ssid", ssidLive.c_str()).readOnly()
                  .label("SSID").icon("SettingsInputAntenna"));
 
   const String localIp = connected ? WiFi.localIP().toString() : String("");
-  status.add(web::Text("local_ip", localIp.c_str()).readOnly()
+  status.add(web::Text("sta_ip", localIp.c_str()).readOnly()
                  .label("Local IP").icon("Router"));
 
   // Same source as the cert CN / mothership deviceId / AutoUpdate
@@ -144,11 +162,11 @@ void WiFiSettings::buildForm(WiFiSettings& s, JsonObject& root) {
                  .label("MAC address").icon("DeviceHub"));
 
   const String subnetMask = connected ? WiFi.subnetMask().toString() : String("");
-  status.add(web::Text("subnet_mask", subnetMask.c_str()).readOnly()
+  status.add(web::Text("sta_mask", subnetMask.c_str()).readOnly()
                  .label("Subnet mask").icon("Language"));
 
   const String gatewayIp = connected ? WiFi.gatewayIP().toString() : String("none");
-  status.add(web::Text("gateway_ip", gatewayIp.c_str()).readOnly()
+  status.add(web::Text("sta_gateway", gatewayIp.c_str()).readOnly()
                  .label("Gateway IP").icon("Router"));
 
   String dnsJoined = joinDns(connected);
@@ -191,23 +209,7 @@ void WiFiSettings::buildForm(WiFiSettings& s, JsonObject& root) {
                .loadingIf("scan_status:Scanning"));
 
   const int scanN = WiFi.scanComplete();
-  if (scanN > 0) {
-    JsonArray arr = scan.rowsOf("networks");
-    for (int i = 0; i < scanN; ++i) {
-      JsonObject row = arr.createNestedObject();
-      row["ssid"]    = WiFi.SSID(i);
-      row["rssi"]    = WiFi.RSSI(i);
-      row["channel"] = WiFi.channel(i);
-#ifdef ESP32
-      uint8_t enc = (uint8_t)WiFi.encryptionType(i);
-      row["security"]    = encryptionLabel(enc);
-      row["avatar_icon"] = (enc == WIFI_AUTH_OPEN) ? "LockOpen" : "Lock";
-#else
-      row["security"]    = "";
-      row["avatar_icon"] = "Lock";
-#endif
-    }
-  }
+  scanRows(scan.rowsOf("networks"), scanN);
 
   const String phase = scanPhaseLabel(scanN);
   scan.add(web::Text("scan_status", phase.c_str()).readOnly().icon("Refresh"));
@@ -256,6 +258,39 @@ void WiFiSettings::buildForm(WiFiSettings& s, JsonObject& root) {
               .card("wifi_advanced").showIf("static_ip_config", "true"));
   set.add(web::Ip("dns_ip_2", s.dnsIP2.toString().c_str()).label("DNS server 2").icon("Dns")
               .card("wifi_advanced").showIf("static_ip_config", "true"));
+}
+
+/* ================= STATE ================= */
+void WiFiSettings::readState(WiFiSettings& s, JsonObject& root) {
+  const wl_status_t wst = WiFi.status();
+  const bool connected = (wst == WL_CONNECTED);
+
+  // Status tab
+  root["status"] = connStatusLabel(wst);
+  root["active_ap"] = connected ? (s_activeAp == 1 ? "Secondary" : "Primary") : "—";
+  root["sta_ssid"] = connected ? WiFi.SSID() : String("");
+  root["sta_ip"] = connected ? WiFi.localIP().toString() : String("");
+  root["mac_address"] = DeviceIdentity::macColon();
+  root["sta_mask"] = connected ? WiFi.subnetMask().toString() : String("");
+  root["sta_gateway"] = connected ? WiFi.gatewayIP().toString() : String("none");
+  const String dns = joinDns(connected);
+  root["dns_servers"] = dns.length() ? dns : String("none");
+
+  // Scan tab
+  const int scanN = WiFi.scanComplete();
+  scanRows(root.createNestedArray("networks"), scanN);
+  root["scan_status"] = scanPhaseLabel(scanN);
+
+  // Settings tab (the passwords stay on the device)
+  root["ssid"] = s.ssid;
+  root["ssid_2"] = s.ssid2;
+  root["hostname"] = s.hostname;
+  root["static_ip_config"] = s.staticIPConfig;
+  JsonUtils::writeIP(root, "local_ip", s.localIP);
+  JsonUtils::writeIP(root, "gateway_ip", s.gatewayIP);
+  JsonUtils::writeIP(root, "subnet_mask", s.subnetMask);
+  JsonUtils::writeIP(root, "dns_ip_1", s.dnsIP1);
+  JsonUtils::writeIP(root, "dns_ip_2", s.dnsIP2);
 }
 
 /* ================= UPDATE ================= */
@@ -454,10 +489,15 @@ void WiFiSettingsService::registerManifest(WebManager* web) {
   // would silently drop. 6144 = base tree (~3 KB pool) + a realistic
   // scan result set. (Was 16 KB once — exceeded the C3 max-contiguous
   // window entirely and produced literal "null" bodies.)
+  // SES-LIB-033: the form never depends on the state (the scan rows and the
+  // live connection are values), so the UI caches its schema and reads the
+  // values from GET /state (readState).
+  spec.staticSchema = true;
   _feature = web->registerFeature<WiFiSettings>(
       std::move(spec), this,
-      WiFiSettings::buildForm, WiFiSettings::update,
-      6144);
+      WiFiSettings::buildForm, WiFiSettings::update,   // form (and its schema)
+      WiFiSettings::readState, WiFiSettings::update,   // GET /state
+      6144, 2048);
 }
 
 void WiFiSettingsService::begin() {

@@ -24,7 +24,7 @@ class WiFiModule : public ESPRack::Module {
 
   void describe(ESPRack::ModuleDescriptor& d) override {
     d.id       = "wifi";
-    d.version  = "1.0.0";
+    d.version  = "1.1.0";
     d.priority = 10;
   }
 
