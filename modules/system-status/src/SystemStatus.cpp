@@ -32,6 +32,43 @@ SystemStatus::SystemStatus(AsyncWebServer* server, SecurityManager* securityMana
   (void)_server; (void)_sec;
 }
 
+namespace {
+
+// LittleFS keeps no used-space counter: usedBytes() walks the whole file
+// system on the caller's task (0.7 s on a busy partition, on async_tcp for the
+// status pages, and sendAdaptiveJson may build a page more than once). The
+// pages ask on every load, so the numbers are cached for a minute.
+constexpr uint32_t kFsUsageTtlMs = 60000;
+
+struct FsUsage {
+  size_t total = 0;
+  size_t used = 0;
+};
+
+FsUsage fsUsage() {
+  static portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
+  static FsUsage cached;
+  static uint32_t atMs = 0;
+  static bool valid = false;
+  const uint32_t now = millis();
+  portENTER_CRITICAL(&mux);
+  const bool fresh = valid && now - atMs < kFsUsageTtlMs;
+  const FsUsage c = cached;
+  portEXIT_CRITICAL(&mux);
+  if (fresh) return c;
+  FsUsage n;  // the slow part, outside the lock (two callers may both walk it once)
+  n.total = ESPFS.totalBytes();
+  n.used = ESPFS.usedBytes();
+  portENTER_CRITICAL(&mux);
+  cached = n;
+  atMs = millis();
+  valid = true;
+  portEXIT_CRITICAL(&mux);
+  return n;
+}
+
+}  // namespace
+
 void SystemStatus::registerManifest(WebManager* web) {
   if (!web) return;
   using namespace std::placeholders;
@@ -231,8 +268,9 @@ void SystemStatus::buildForm(JsonObject& root,
   sta.add(web::Text("flash_chip_size_speed", flash.c_str()).readOnly()
               .label("Flash (size / speed)").icon("SdStorage"));
 
-  size_t fsTotal = ESPFS.totalBytes();
-  size_t fsUsed  = ESPFS.usedBytes();
+  const FsUsage fsu = fsUsage();  // cached: a walk of the whole file system
+  size_t fsTotal = fsu.total;
+  size_t fsUsed  = fsu.used;
   size_t fsFree  = fsTotal > fsUsed ? fsTotal - fsUsed : 0;
   String fs = String(fsUsed) + " / " + String(fsTotal) + " bytes (" + String(fsFree) + " free)";
   sta.add(web::Text("file_system_used_total", fs.c_str()).readOnly()
@@ -381,8 +419,9 @@ void SystemStatus::systemStatus(AsyncWebServerRequest* request) {
     root["hardware_uid"] = DeviceIdentity::uidHex32();
     root["flash_uid"]    = DeviceIdentity::flashUidHex();
 
-    root["fs_total"] = ESPFS.totalBytes();
-    root["fs_used"]  = ESPFS.usedBytes();
+    const FsUsage fsu = fsUsage();
+    root["fs_total"] = fsu.total;
+    root["fs_used"]  = fsu.used;
   }, 1792);
 }
 
