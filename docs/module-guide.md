@@ -266,6 +266,13 @@ Semantics, verified in `lib/ESPRack/include/ConfigManager.h`:
   successful write (`ConfigManager.h:120`).
 - Keep **runtime values out of `readConfig`**. Otherwise every tick looks
   "changed".
+- **With a `formReader`, the form runs inside the `ConfigDelegate`
+  constructor**: registration renders the whole form once to find the secret
+  keys. Make `_cfg` the **last member** of the service (and last in the
+  initializer list). A member declared after it isn't constructed yet when
+  the form reads it: a status row reading an `std::atomic<const char*>`
+  declared after `_cfg` crashed a CAN port on boot (`LoadProhibited` at
+  `0xa5a5a5a5`).
 - `saveIfChanged` allocates a `bufferSize` document each call. Don't route
   10 Hz runtime updates through propagated `update()`. Use
   `updateWithoutPropagation()` and push WS yourself (§6).
