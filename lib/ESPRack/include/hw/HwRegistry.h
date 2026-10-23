@@ -55,7 +55,8 @@ class HwRegistry {
 
   // An instance by id, as interface I (nullptr when there's no such
   // instance or it doesn't implement I). Instances in Conflict are
-  // returned too: they report their own state.
+  // returned too: they report their own state. Takes no lock (the instance
+  // list is fixed after Builder::build()), so describeHw() may call it.
   template <class I>
   I* find(const char* instanceId) const {
     ExtHwModule* m = findInstance(instanceId);
@@ -68,6 +69,19 @@ class HwRegistry {
     for (const Inst& x : _inst) {
       if (void* p = x.m->queryInterface(I::kIfaceId)) fn(*static_cast<I*>(p), x.m->instanceId());
     }
+  }
+  // fn(const char* instanceId, const HwResource& r, HwState state) for every
+  // resource of `kind` in every instance's last describeHw(), in install
+  // order (SES-LIB-034). Instances that don't hold it are listed too, with
+  // their state: Conflict, Disabled, NotConfigured (r.index -1). An I2C bus
+  // page lists its devices with HwKind::I2cAddr: the rows whose r.bus is
+  // its controller (II2cBus.h). Any task: the rows are copied under the
+  // lock and fn runs after it is released, so fn may call the registry.
+  template <class Fn>
+  void forEachClaim(HwKind kind, Fn fn) const {
+    std::vector<ClaimRow> rows;
+    claimsOf(kind, rows);
+    for (const ClaimRow& c : rows) fn(c.id, c.res, c.state);
   }
 
   // SES-LIB-024: `who` has let go of the hardware it gave up (pins switched
@@ -136,6 +150,12 @@ class HwRegistry {
   void loop();                       // App::loop: a pending "restore factory pins"
 
   ExtHwModule* findInstance(const char* id) const;
+  struct ClaimRow {
+    const char* id;  // the module's instanceId() buffer
+    HwResource res;
+    HwState state;
+  };
+  void claimsOf(HwKind kind, std::vector<ClaimRow>& out) const;  // forEachClaim: copies under the lock
   Inst* instOf(const ExtHwModule& who);
   const Inst* instOf(const ExtHwModule& who) const;
   void evaluate(Inst& x, const HwDescriptor& d);  // under _mx

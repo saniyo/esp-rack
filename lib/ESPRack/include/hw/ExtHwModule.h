@@ -56,7 +56,8 @@ class ExtHwModule : public Module {
 
   // Resources this instance uses NOW, from its settings (-1 = not
   // configured). Called on the loop task at boot and from update() — never
-  // with a registry lock held, but it must not call into the registry.
+  // with a registry lock held, but it must not call into the registry
+  // (except find(), which takes no lock: i2cDeviceClaim() uses it).
   // The boot call comes before onBegin: load the settings here if they
   // aren't loaded yet (ConfigDelegate::ensureLoaded()).
   virtual void describeHw(HwDescriptor& d) const = 0;

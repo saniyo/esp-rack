@@ -8,6 +8,7 @@
 #include "WebFeatureDelegate.h"
 #include "WebManager.h"
 #include "hw/BoardProfile.h"
+#include "hw/II2cBus.h"
 #include "web/Form.h"
 
 #define HW_FORM_PATH "/api/v1/system/hardware/form"
@@ -134,14 +135,11 @@ void HwRegistry::evaluate(Inst& x, const HwDescriptor& d) {
     _claims.releaseAll(id, applied, now);
     return;
   }
-  for (uint8_t i = 0; i < d.count; ++i) {
-    const HwResource& r = d.res[i];
-    if (r.index == kHwNotConfigured && !(r.flags & kHwOptional)) {
-      x.state = HwState::NotConfigured;
-      snprintf(x.reason, sizeof(x.reason), "%s not set", r.role ? r.role : hwKindName(r.kind));
-      _claims.releaseAll(id, applied, now);
-      return;
-    }
+  if (const HwResource* r = d.missing()) {
+    x.state = HwState::NotConfigured;
+    snprintf(x.reason, sizeof(x.reason), "%s not set", r->role ? r->role : hwKindName(r->kind));
+    _claims.releaseAll(id, applied, now);
+    return;
   }
   x.state = HwState::Ok;
   if (c.warning) strlcpy(x.reason, c.reason, sizeof(x.reason));
@@ -268,6 +266,22 @@ bool HwRegistry::heldByOther(const ExtHwModule& who, HwKind kind, int index) con
   }
   unlock();
   return held;
+}
+
+void HwRegistry::claimsOf(HwKind kind, std::vector<ClaimRow>& out) const {
+  lock();
+  for (const Inst& x : _inst) {
+    for (uint8_t i = 0; i < x.desc.count; ++i) {
+      if (x.desc.res[i].kind == kind) out.push_back(ClaimRow{x.m->instanceId(), x.desc.res[i], x.state});
+    }
+  }
+  unlock();
+}
+
+bool i2cDeviceClaim(const HwRegistry* hw, const char* busId, uint8_t addr, const char* label, HwDescriptor& d,
+                    uint8_t flags) {
+  const II2cBus* bus = hw && busId && *busId ? hw->find<II2cBus>(busId) : nullptr;
+  return i2cAddrClaim(bus, addr, label, d, flags);
 }
 
 bool HwRegistry::reserved(int gpio, const char** reason) const {

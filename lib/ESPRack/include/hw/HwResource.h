@@ -19,8 +19,9 @@ namespace ESPRack {
 enum class HwKind : uint8_t {
   Gpio,      // index = GPIO
   Uart,      // index = UART port
-  I2cBus,    // index = I2C bus; claim SDA/SCL too: Gpio, kHwShared, bus = the bus, role "sda"/"scl"
-  I2cAddr,   // index = 7-bit address, bus = I2C bus (-1 = bus 0)
+  I2cBus,    // index = I2C bus. A bus instance (hw/II2cBus.h) holds it and SDA/SCL exclusively; a driver
+             // that opens the bus itself: kHwShared, SDA/SCL as Gpio, kHwShared, bus = the bus, role "sda"/"scl"
+  I2cAddr,   // index = 7-bit address, bus = I2C bus (-1 = bus 0); a device on a bus instance: i2cAddrClaim()
   SpiBus,    // index = SPI host (0 = the first general-purpose one); pins as for I2C ("sck"...)
   SpiCs,     // index = CS GPIO, bus = SPI host
   RmtTx,     // index = channel or kHwAnyChannel
@@ -63,6 +64,14 @@ struct HwDescriptor {
   void clear() {
     count = 0;
     disabled = false;
+  }
+  // The first required resource left at -1 (no kHwOptional): the instance
+  // is NotConfigured for want of it. nullptr when there's none.
+  const HwResource* missing() const {
+    for (uint8_t i = 0; i < count; ++i) {
+      if (res[i].index == kHwNotConfigured && !(res[i].flags & kHwOptional)) return &res[i];
+    }
+    return nullptr;
   }
 };
 
