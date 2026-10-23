@@ -935,6 +935,21 @@ Start from `modules/template-ext-hw/`. Its pieces:
       DHT22 read) calls `ESPRack::irqQuiet(hw(), &busy)` on loopTask right
       before it masks. When that is false, it tries again on a later pass,
       never forces the read, and shows how long it has been waiting.
+15. **CAN ports** (`hw/ICanPort.h`).
+    - Only the CAN interface is an external HW instance (`can-twai`: TX/RX
+      pins, controller index; a chip with two controllers is two
+      instances). It implements `ICanPort` (`"canPort.v1"`): `begin(bitrate)`,
+      `end()`, `write(frame)`, `read(frame, timeoutMs)`, `stats()` (bus-off
+      count and frame counters).
+    - The software on the bus is a plain module, `install<M>(portId)`. In
+      `onBegin` it takes `app->hw()->find<ICanPort>(portId)`, calls
+      `claim(myId)` (one user per port; a second claim fails and the port
+      page shows who holds it) and wraps the port in its library's
+      transport. The port id is a setting; a change ends, releases and
+      claims again without a reboot.
+    - The application reaches a plain module's interface with
+      `app->find<I>(moduleId)` (`Module::queryInterface`, same ids as
+      external HW). Look it up once and keep the pointer.
 
 `install<M>()` on an `ExtHwModule` and `installExtHw<M>()` on a plain module
 both fail to compile with a message saying which one to use. An invalid id

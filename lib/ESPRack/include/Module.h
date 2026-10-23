@@ -141,6 +141,14 @@ class Module {
   // Non-null for an external HW module instance (hw/ExtHwModule.h) — the
   // framework's way to find instances without RTTI. Don't override.
   virtual ExtHwModule* asExtHw() { return nullptr; }
+
+  // The implemented interface for `ifaceId` (I::kIfaceId, a versioned string
+  // id compared by content), or nullptr. Found through app->find<I>(id) for
+  // any module, app->hw()->find<I>(id) for external HW instances.
+  virtual void* queryInterface(const char* ifaceId) {
+    (void)ifaceId;
+    return nullptr;
+  }
 };
 
 }  // namespace ESPRack

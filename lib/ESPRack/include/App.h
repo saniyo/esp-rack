@@ -185,6 +185,18 @@ class App {
   // forEach<I>(fn) lookup. Always present.
   HwRegistry*         hw()                              { return hw_.get(); }
 
+  // Any installed module by its descriptor id (an external HW instance by
+  // its instance id), or nullptr. Walks the modules and asks describe(), so
+  // look up once (onBegin) and keep the pointer.
+  Module* findModule(const char* moduleId) const;
+  // A module by id, as interface I (nullptr when there's no such module or
+  // it doesn't implement I): app->find<IJkBus>("jkBus").
+  template <class I>
+  I* find(const char* moduleId) const {
+    Module* m = findModule(moduleId);
+    return m ? static_cast<I*>(m->queryInterface(I::kIfaceId)) : nullptr;
+  }
+
   // Read-only device identity — useful for AutoUpdateModule etc. that
   // pass these to their underlying service ctor. Set once at App
   // construction.

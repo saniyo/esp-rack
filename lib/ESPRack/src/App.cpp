@@ -10,6 +10,7 @@
 #include "HeapMonitor.h"
 #include "ProblemJson.h"
 #include "time/TimeSync.h"
+#include "hw/ExtHwModule.h"
 #include "hw/HwRegistry.h"
 #include "system/BootGuard.h"
 #include "system/LoopWdt.h"
@@ -221,6 +222,22 @@ App::~App() {
 
 void App::adoptModules(std::vector<std::unique_ptr<Module>>&& modules) {
   modules_ = std::move(modules);
+}
+
+Module* App::findModule(const char* moduleId) const {
+  if (!moduleId || !*moduleId) return nullptr;
+  for (const auto& m : modules_) {
+    if (!m) continue;
+    // An instance's id is its instance id, whatever describe() says.
+    if (ExtHwModule* x = m->asExtHw()) {
+      if (strcmp(x->instanceId(), moduleId) == 0) return m.get();
+      continue;
+    }
+    ModuleDescriptor d;
+    m->describe(d);
+    if (d.id && strcmp(d.id, moduleId) == 0) return m.get();
+  }
+  return nullptr;
 }
 
 void App::begin() {

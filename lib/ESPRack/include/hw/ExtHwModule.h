@@ -62,7 +62,7 @@ class ExtHwModule : public Module {
   virtual void describeHw(HwDescriptor& d) const = 0;
 
   // The implemented interface for `ifaceId` (I::kIfaceId), or nullptr.
-  virtual void* queryInterface(const char* ifaceId) {
+  void* queryInterface(const char* ifaceId) override {
     (void)ifaceId;
     return nullptr;
   }
