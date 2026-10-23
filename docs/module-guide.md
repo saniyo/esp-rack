@@ -954,24 +954,37 @@ Start from `modules/template-ext-hw/`. Its pieces:
 16. **I2C bus** (`hw/II2cBus.h`).
     - The bus is an external HW instance of its own (`i2c-bus`: controller,
       SDA/SCL). It claims `HwKind::I2cBus` and both pins exclusively and
-      implements `II2cBus` (`"i2cBus.v1"`): `write`, `read`, `writeRead`
-      (repeated start), `probe`, `stats()`. Each call is one transaction,
-      from any task, serialised by the bus lock and bounded (about 20 ms).
-      It returns an `I2cResult`; `i2cResultName()` names it for logs.
+      implements `II2cBus` (`"i2cBus.v1"`): `write`, `writeAt` (register
+      bytes + data, no STOP between), `read`, `writeRead` (repeated start),
+      `probe`, `stats()`. Each call is one transaction, from any task,
+      serialised by the bus lock: it waits at most `kLockWaitMs` for the
+      lock (`Busy`: normal under load, try again), then the transfer has
+      its own timeout. It returns an `I2cResult`; `i2cResultName()` names
+      it for logs. Every method is safe in every bus state; a bus that
+      isn't started answers `NotReady`.
     - A device claims only its address, in `describeHw` (the bus id is a
       setting): `i2cDeviceClaim(hw(), busId, 0x68, "rtc", d)`. Two devices
       conflict only on the same address on the same controller. Without a
-      bus the device is `NotConfigured`. It keeps
+      bus the device is `NotConfigured` ("i2c bus not set"). It keeps
       `hw()->find<II2cBus>(busId)` from `onBegin` and retries on `NotReady`.
-    - Several transactions with nothing in between (a FRAM's address, then
-      its page) go under `I2cBusGuard g(bus, waitMs)` when `g.ok()`. The
-      lock is recursive per task.
-    - The bus comes first in install order: its module's `priority` is below
-      its device drivers' (Builder sorts by priority, not by the install
-      calls, §3.4). A driver that opens `Wire` itself (item 2) can't share a
-      controller with a bus instance: the second one is `Conflict`.
+      When the bus-id setting changes it calls `hw()->update(*this)` and
+      looks the bus up again, as a CAN user does with its port id.
+    - A register or memory access is one transaction: read with
+      `writeRead(addr, reg, ...)`, write with `writeAt(addr, reg, ..., data, n)`
+      (a FRAM's 2-byte address + up to `kMaxXfer - 2` bytes). Several
+      transactions with nothing from another task in between (a status
+      read-modify-write, a write and its verify read) go under
+      `I2cBusGuard g(bus, waitMs)` when `g.ok()`. The lock is recursive per
+      task.
+    - The bus comes first in install order. Give its module a `priority`
+      below its device drivers' and install it before them in the Builder
+      chain: Builder sorts by `requires_`, then priority, and falls back to
+      the order of the install calls when a dependency is missing (§3.4). A
+      driver that opens `Wire` itself (item 2) can't share a controller with
+      a bus instance: the second one is `Conflict`.
     - The bus page lists its devices with
-      `hw()->forEachClaim(HwKind::I2cAddr, fn)`, the rows on its controller.
+      `hw()->forEachClaim(HwKind::I2cAddr, fn)`, keeping the rows for which
+      `i2cAddrOn(r, controller())` holds (bus -1 counts as I2C0).
 
 `install<M>()` on an `ExtHwModule` and `installExtHw<M>()` on a plain module
 both fail to compile with a message saying which one to use. An invalid id
