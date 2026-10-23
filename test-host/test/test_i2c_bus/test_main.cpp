@@ -4,6 +4,7 @@
 // the result names.
 #include <unity.h>
 
+#include <new>
 #include <stdio.h>
 #include <string.h>
 
@@ -33,9 +34,10 @@ class FakeBus : public II2cBus {
   int controller() const override { return _controller; }
   bool ready() const override { return false; }
   I2cResult write(uint8_t, const uint8_t*, size_t) override { return I2cResult::NotReady; }
+  I2cResult writeAt(uint8_t, const uint8_t*, size_t, const uint8_t*, size_t) override { return I2cResult::NotReady; }
   I2cResult read(uint8_t, uint8_t*, size_t) override { return I2cResult::NotReady; }
   I2cResult writeRead(uint8_t, const uint8_t*, size_t, uint8_t*, size_t) override { return I2cResult::NotReady; }
-  bool probe(uint8_t) override { return false; }
+  I2cResult probe(uint8_t) override { return I2cResult::NotReady; }
   bool lock(uint32_t waitMs) override {
     ++locks;
     lastWait = waitMs;
@@ -103,8 +105,9 @@ static void test_result_names(void) {
   TEST_ASSERT_EQUAL_STRING("not-ready", i2cResultName(I2cResult::NotReady));
   TEST_ASSERT_EQUAL_STRING("too-long", i2cResultName(I2cResult::TooLong));
   TEST_ASSERT_EQUAL_STRING("error", i2cResultName(I2cResult::Error));
-  // every value has its own name, nothing past Error has one
-  const int n = static_cast<int>(I2cResult::Error) + 1;
+  // every value has its own name, nothing past the last one has one
+  static_assert(kI2cResultCount == static_cast<int>(I2cResult::Error) + 1, "a new I2cResult: name it and test it");
+  const int n = kI2cResultCount;
   for (int i = 0; i < n; ++i) {
     const char* a = i2cResultName(static_cast<I2cResult>(i));
     TEST_ASSERT_TRUE(strcmp(a, "?") != 0);
@@ -114,8 +117,33 @@ static void test_result_names(void) {
 
   TEST_ASSERT_EQUAL_STRING("i2cBus.v1", II2cBus::kIfaceId);
   TEST_ASSERT_EQUAL_UINT(128, II2cBus::kMaxXfer);
-  const I2cBusStats s{};
-  TEST_ASSERT_EQUAL_UINT32(0, s.xfers + s.nacks + s.timeouts + s.busyWaits + s.recoveries + s.errors);
+  TEST_ASSERT_EQUAL_UINT32(20, II2cBus::kLockWaitMs);
+  // default-initialised (no {}) over garbage: the member initialisers zero it
+  alignas(I2cBusStats) unsigned char buf[sizeof(I2cBusStats)];
+  memset(buf, 0xff, sizeof(buf));
+  const I2cBusStats* s = new (buf) I2cBusStats;
+  TEST_ASSERT_EQUAL_UINT32(0, s->xfers | s->nacks | s->timeouts | s->busyWaits | s->recoveries | s->errors);
+}
+
+// Which forEachClaim rows a bus page lists: held addresses on its controller,
+// bus -1 being I2C0 as in the claim rules.
+static void test_addr_on(void) {
+  FakeBus bus0(0), bus1(1);
+  const HwResource on0 = device(&bus0, 0x68, "rtc").res[0];
+  const HwResource on1 = device(&bus1, 0x50, "fram").res[0];
+  const HwResource none = device(nullptr, 0x68, "rtc").res[0];
+  HwDescriptor legacy;  // bus left at -1
+  legacy.add(HwKind::I2cAddr, 0x3c, "oled");
+  HwDescriptor pin;
+  pin.add(HwKind::Gpio, 8, "sda");
+  TEST_ASSERT_TRUE(i2cAddrOn(on0, 0));
+  TEST_ASSERT_FALSE(i2cAddrOn(on0, 1));
+  TEST_ASSERT_TRUE(i2cAddrOn(on1, 1));
+  TEST_ASSERT_FALSE(i2cAddrOn(on1, 0));
+  TEST_ASSERT_TRUE(i2cAddrOn(legacy.res[0], 0));
+  TEST_ASSERT_FALSE(i2cAddrOn(legacy.res[0], 1));
+  TEST_ASSERT_FALSE(i2cAddrOn(none, 0));
+  TEST_ASSERT_FALSE(i2cAddrOn(pin.res[0], 0));
 }
 
 static void test_addr_claim(void) {
@@ -193,8 +221,8 @@ static void test_device_without_bus(void) {
   TEST_ASSERT_EQUAL_UINT8(1, d.count);
   TEST_ASSERT_TRUE(d.res[0].kind == HwKind::I2cAddr);
   TEST_ASSERT_EQUAL_INT(kHwNotConfigured, d.res[0].index);
-  TEST_ASSERT_TRUE(d.missing() == &d.res[0]);  // HwRegistry: "rtc not set"
-  TEST_ASSERT_EQUAL_STRING("rtc", d.missing()->role);
+  TEST_ASSERT_TRUE(d.missing() == &d.res[0]);  // HwRegistry: "i2c bus not set"
+  TEST_ASSERT_EQUAL_STRING("i2c bus", d.missing()->role);
   ASSERT_OK(c.check("rtc", d));  // holds nothing, blocks nobody
   ASSERT_STATE(NotConfigured, apply(c, "rtc", d));
   ASSERT_STATE(NotConfigured, apply(c, "rtc2", device(nullptr, 0x68, "rtc")));
@@ -281,6 +309,7 @@ int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_result_names);
   RUN_TEST(test_addr_claim);
+  RUN_TEST(test_addr_on);
   RUN_TEST(test_bus_and_devices);
   RUN_TEST(test_same_address_conflict);
   RUN_TEST(test_two_controllers);

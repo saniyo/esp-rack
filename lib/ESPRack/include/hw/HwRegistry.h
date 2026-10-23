@@ -74,8 +74,8 @@ class HwRegistry {
   // resource of `kind` in every instance's last describeHw(), in install
   // order (SES-LIB-034). Instances that don't hold it are listed too, with
   // their state: Conflict, Disabled, NotConfigured (r.index -1). An I2C bus
-  // page lists its devices with HwKind::I2cAddr: the rows whose r.bus is
-  // its controller (II2cBus.h). Any task: the rows are copied under the
+  // page lists its devices with HwKind::I2cAddr: the rows for which
+  // i2cAddrOn(r, controller()) holds (II2cBus.h). Any task: the rows are copied under the
   // lock and fn runs after it is released, so fn may call the registry.
   template <class Fn>
   void forEachClaim(HwKind kind, Fn fn) const {
