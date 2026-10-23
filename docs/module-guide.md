@@ -832,7 +832,8 @@ Start from `modules/template-ext-hw/`. Its pieces:
    calls it before `onBegin`, so load the config there
    (`_cfg.ensureLoaded()`). Bus pins are shared claims with the bus number
    and a role: `d.add(HwKind::Gpio, sda, "sda", kHwShared, bus)`, next to
-   `HwKind::I2cBus` (shared) and the device's `HwKind::I2cAddr`.
+   `HwKind::I2cBus` (shared) and the device's `HwKind::I2cAddr`. A device
+   on an I2C bus instance claims only its address (item 16).
 3. **Load verbatim, check web writes.** Give `ConfigDelegate` the plain
    updater, so a saved clash shows up as `Conflict` instead of losing the
    file. Make it fill in the factory pins when the payload is empty (no
@@ -950,6 +951,27 @@ Start from `modules/template-ext-hw/`. Its pieces:
     - The application reaches a plain module's interface with
       `app->find<I>(moduleId)` (`Module::queryInterface`, same ids as
       external HW). Look it up once and keep the pointer.
+16. **I2C bus** (`hw/II2cBus.h`).
+    - The bus is an external HW instance of its own (`i2c-bus`: controller,
+      SDA/SCL). It claims `HwKind::I2cBus` and both pins exclusively and
+      implements `II2cBus` (`"i2cBus.v1"`): `write`, `read`, `writeRead`
+      (repeated start), `probe`, `stats()`. Each call is one transaction,
+      from any task, serialised by the bus lock and bounded (about 20 ms).
+      It returns an `I2cResult`; `i2cResultName()` names it for logs.
+    - A device claims only its address, in `describeHw` (the bus id is a
+      setting): `i2cDeviceClaim(hw(), busId, 0x68, "rtc", d)`. Two devices
+      conflict only on the same address on the same controller. Without a
+      bus the device is `NotConfigured`. It keeps
+      `hw()->find<II2cBus>(busId)` from `onBegin` and retries on `NotReady`.
+    - Several transactions with nothing in between (a FRAM's address, then
+      its page) go under `I2cBusGuard g(bus, waitMs)` when `g.ok()`. The
+      lock is recursive per task.
+    - The bus comes first in install order: its module's `priority` is below
+      its device drivers' (Builder sorts by priority, not by the install
+      calls, §3.4). A driver that opens `Wire` itself (item 2) can't share a
+      controller with a bus instance: the second one is `Conflict`.
+    - The bus page lists its devices with
+      `hw()->forEachClaim(HwKind::I2cAddr, fn)`, the rows on its controller.
 
 `install<M>()` on an `ExtHwModule` and `installExtHw<M>()` on a plain module
 both fail to compile with a message saying which one to use. An invalid id
