@@ -141,6 +141,25 @@ Useful build flags for a consumer's `[env]`:
 | `-D ESPRACK_WS_MAX_CLIENTS=<n>` | Concurrent live UI clients (default 3 on C3, 6 elsewhere). |
 | `-D ESPRACK_SHUTDOWN_BUDGET_MS=<ms>` | Per-module `onShutdown()` budget before a reboot (default 500). |
 
+**Bluetooth LE (`BleModule`).** It needs these in the build:
+
+- `h2zero/NimBLE-Arduino @ 2.5.1` in `lib_deps`.
+- A central-only build drops the roles it doesn't use:
+  `-D CONFIG_BT_NIMBLE_ROLE_PERIPHERAL_DISABLED`,
+  `-D CONFIG_BT_NIMBLE_ROLE_BROADCASTER_DISABLED` and
+  `-D CONFIG_BT_NIMBLE_MAX_CONNECTIONS=<n>`. Keep `ESPRACK_BLE_MAX_LINKS`
+  at `n` or less.
+- With PSRAM, `-D CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL=1` moves the NimBLE
+  host into PSRAM.
+- Without PSRAM, Wi-Fi, BLE and the web server don't fit together in an S3's
+  internal RAM: the first page load failed with `WebResponses.cpp _ack():
+  Failed to allocate`. Ship such a board with `-D FACTORY_BLE_ENABLED=false`.
+
+**Native USB console** (`ARDUINO_USB_CDC_ON_BOOT=1`): after a reset the port
+enumerates again, and the first boot lines are lost before the monitor
+reconnects. To see them, wait for the monitor in `setup()`, e.g.
+`for (uint32_t t = millis(); !Serial && millis() - t < 3000;) delay(10);`.
+
 > **Build from PowerShell or cmd, not Git Bash/MSYS.** On a fresh toolchain
 > install, pioarduino runs ESP-IDF's `idf_tools.py`, which aborts under MSYS
 > ("MSys/Mingw is not supported"). The build then fails with

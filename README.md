@@ -74,7 +74,21 @@ also has to list it in `lib_deps`. See
 | [`ROADMAP.md`](ROADMAP.md) | Original design and phased plan, plus the current status section. |
 | `docs/plans/*.md` | Design notes per topic: API standardization, discovery protocol, memory/heap work, mothership, WireGuard, tree menu, form DSL. |
 
-## What's new (2026-10-15)
+## What's new (0.7.0, 2026-10-24)
+
+- **Buses as shared hardware:** a CAN port (`hw/ICanPort.h`) and an I2C bus
+  (`hw/II2cBus.h`) are external HW instances that software modules and device
+  instances find by id. I2C devices claim only their address, and a conflict
+  needs the same address on the same controller. The drivers (`can-twai`,
+  `can-mcp2515`, `i2c-bus`) live in esp-rack-modules.
+- **Interfaces of plain modules:** `Module::queryInterface()` and
+  `app->find<I>("moduleId")`.
+- **Bluetooth LE:** `modules/ble` owns the radio (NimBLE-Arduino 2.x) and
+  publishes `IBleProvider` (`app->ble()`): scans into a bounded table and
+  managed central links (discover, connect, subscribe, reconnect). See the
+  `ble` entry in [`docs/module-catalog.md`](docs/module-catalog.md).
+
+## Earlier (2026-10-15)
 
 - **External hardware:** drivers installed as instances
   (`installExtHw<M>("id", ...).owner("module")`) with pin, UART and channel
@@ -93,10 +107,6 @@ also has to list it in `lib_deps`. See
   - opt-in static form schema (`staticSchema()`).
 - **Messaging:** Telegram bot commands (`onCommand`, allowed chats, admins);
   MQTT device availability with a last will.
-- **Bluetooth LE:** `modules/ble` owns the radio (NimBLE-Arduino 2.x) and
-  publishes `IBleProvider` (`app->ble()`): scans into a bounded table and
-  managed central links (discover, connect, subscribe, reconnect). See the
-  `ble` entry in [`docs/module-catalog.md`](docs/module-catalog.md).
 - **Build:** each consumer builds its own UI bundle in `<project>/.pio/www/`.
 
 ## Branches
