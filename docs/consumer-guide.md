@@ -79,7 +79,8 @@ lib_deps        = ESPRack
                   mobizt/ESP_SSLClient@3.1.3     ; always — core's PersistentTlsClient needs it
                   ; + per module: AsyncMqttClient@0.9.0 (mqtt),
                   ;   https://github.com/saniyo/WireGuard-ESPRack.git (wireguard),
-                  ;   https://github.com/saniyo/Universal-Arduino-Telegram-Bot (telegram)
+                  ;   https://github.com/saniyo/Universal-Arduino-Telegram-Bot (telegram),
+                  ;   h2zero/NimBLE-Arduino @ 2.5.1 (ble)
 lib_compat_mode = strict
 lib_ignore      = ESPAsyncTCP
 extra_scripts   = pre:scripts/compute_flavor.py

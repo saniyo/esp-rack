@@ -791,7 +791,26 @@ which peripheral or pins to use.
    `submitGps()`, it doesn't depend on the location module. Code that needs
    a trustworthy clock checks `ESPRack::TimeSync::clockSane()` or
    `isValid()`, and can `subscribe()` (in `onBegin`) to clock events.
-8. **Never include another module's header** unless your `library.json`
+8. **BLE peripherals** (a balancer, a sensor) never touch the BLE stack
+   themselves. `BleModule` owns it and publishes `ESPRack::IBleProvider`
+   (`ble/IBleProvider.h`, `app->ble()`). A driver registers a central link
+   in `onBegin` and keeps the returned `IBleLink*`:
+
+   ```cpp
+   ESPRack::BleLinkSpec spec;
+   spec.owner = "balancer";
+   spec.setNamePrefixes("GW-,EK-");    // or spec.setAddress(mac, type)
+   spec.setService("ffe0");
+   spec.setNotifyChar("ffe1");         // the write char defaults to it
+   spec.onNotify = [this](const uint8_t* d, size_t n) { feed(d, n); };     // BLE host task
+   spec.onState  = [this](ESPRack::BleLinkState s) { if (s == ESPRack::BleLinkState::Connected) hello(); };
+   _link = app->ble()->registerLink(spec, &why);   // null + why when refused
+   ```
+
+   The module finds the peer, connects, subscribes and reconnects with
+   backoff. Callbacks must copy and return. Add `requires_ = {"ble"}` and
+   `h2zero/NimBLE-Arduino` to the consumer's `lib_deps`.
+9. **Never include another module's header** unless your `library.json`
    lists that module in `dependencies`. PlatformIO's library finder (chain
    mode) follows every `#include` without evaluating `#if` or
    `__has_include`, so such an include drags the other module (and its own
@@ -800,14 +819,14 @@ which peripheral or pins to use.
    `IMothershipProvider`, `IWireguardProvider`), late-bound through `App`;
    restart goes through the core's `ESPRack::restartDevice()`.
    `scripts/check_module_deps.py` checks this.
-9. **Boot loops and the loop watchdog** (`system/BootGuard.h`,
+10. **Boot loops and the loop watchdog** (`system/BootGuard.h`,
    `system/LoopWdt.h`):
    - Read `ESPRack::BootGuard::info().safeMode` in `onBegin()`. In safe mode,
      leave outputs off; the crash run that caused it is in `info()`.
    - With `LoopWdt` armed by the consumer, one `loop()` pass longer than 5 s
      resets the chip. Never block. Bracket one-off long work (erasing NVS, a
      big file) with `LoopWdt::pause()` / `resume()`.
-10. **Reboot only through `ESPRack::restartDevice(reason)`**, never
+11. **Reboot only through `ESPRack::restartDevice(reason)`**, never
    `ESP.restart()`, and make `onShutdown()` leave the hardware safe: outputs
    off, counters persisted, within 500 ms. A stray `esp_restart()` still
    runs the hooks through the shutdown handler, but on whatever task called

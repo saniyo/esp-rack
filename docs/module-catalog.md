@@ -53,6 +53,7 @@ This is an audit snapshot of `feature/ses-light-support`, dated 2026-10-13:
 |---|---|---|---|---|
 | ap | `APModule` | 10 | none | Soft-AP plus captive-portal DNS for provisioning and fallback |
 | auto-update | `AutoUpdateModule` | 40 | wifi | Periodic HTTP pull-OTA from an update server |
+| ble | `BleModule` | 12 | none | Owner of the BLE host stack: `IBleProvider` scans and managed central links (added after this audit) |
 | cert-manager | `CertManagerModule` | 12 | wifi | Device PKI: ECDSA key, CSR, enroll, rotate, recover; mTLS identity |
 | config-manager-ui | `ConfigManagerUiModule` | 85 | none | System → Config Manager tab with snapshot/restore actions |
 | discovery | `DiscoveryModule` | 24 | wifi | UDP multicast discovery of sibling ESPRack devices on the LAN |
@@ -127,6 +128,64 @@ This is an audit snapshot of `feature/ses-light-support`, dated 2026-10-13:
   - On timeout, `vTaskDelete`s the task mid-HTTP and reboots (`:164-179`).
   - The 1–10080 min and 30–600 s ranges are only enforced in the form, not in `updatePersistence` (`modules/auto-update/include/AutoUpdateService.h:111-121`).
   - Dead macros (see the dead-code bug at the end).
+
+### `ble` — BleModule
+
+> Added on 2026-10-15, after this audit. Unlike the other entries, this one describes the code as written: it was built and run against the esp-rack-rd-neey consumer, but nothing below was measured on hardware.
+
+- **Purpose:** The chip's Bluetooth LE radio as a framework service. It is an internal module, like `wifi`, not an external HW instance. It is the only owner of the BLE host stack, which is NimBLE-Arduino 2.x:
+  - on-demand scans into a bounded table;
+  - managed central links. The module finds the peer by fixed address, advertised name prefix or advertised service, then connects, subscribes, reconnects with exponential backoff and counts traffic. The consumer only writes and handles notifications.
+- **Install:** `#include <BleModule.h>` then `.install<BleModule>()`. The consumer adds `h2zero/NimBLE-Arduino @ 2.5.1` to `lib_deps`.
+  - Without NimBLE, or on a chip without BLE, the module still builds as a stub: the page says the stack is missing and `registerLink()` refuses (`modules/ble/src/BleService.cpp`, `ESPRACK_HAVE_NIMBLE`).
+- **Module identity:** id `"ble"`, version `"0.1.0"`, priority 12, no `requires_` (`modules/ble/include/BleModule.h:33`).
+  - Hooks: `onInstall` calls `app->setBle()` (`:41`), plus `onBegin`, `onLoop` and `onShutdown` (`:48`).
+- **Public API:** `ESPRack::IBleProvider` in the core (`lib/ESPRack/include/ble/IBleProvider.h:173`), reached through `app->ble()` (null when not installed).
+  - Scans and radio state: `ready()`, `ownAddress()`, `requestScan(ms)`, `scanning()`, `scanGeneration()`, `scanResults(rows, max)` (strongest first).
+  - Links: `registerLink(BleLinkSpec, &why)` returns an `IBleLink*` (`:134`). The link offers:
+    - `write()`, `state()`, `connected()`, `peerAddress()`, `rssi()`, `mtu()`, `stats()`;
+    - `setTarget()`, `setEnabled()`, `reconnect()`, `release()`.
+  - The `BleLinkSpec` (`:71`) carries strings copied at registration, plus two callbacks:
+    - `onNotify` runs on the BLE host task;
+    - `onState` runs on the module's BLE task with no lock held.
+  - No stack types appear in the interface.
+- **Web/REST/WS:**
+  - Typed feature `"ble"` ("Bluetooth", menu order 145). Feature auth is Authenticated, writes need `adminWrite`.
+  - Tabs:
+    - `status` (live): radio, own address, links table;
+    - `scan` (REST): results table, re-fetched after the action;
+    - `settings` (postable, admin).
+  - Endpoints: `/api/v1/ble/form`, `/api/v1/ble/state`, WS channel `ble`, and action `ble.scan` (Authenticated) (`modules/ble/src/BleService.cpp:550-582`).
+- **Persistence:**
+  - `/config/ble.json`, id `"ble"`, 1024 B.
+  - Keys: `enabled, device_name, tx_power, mtu, scan_interval_ms, scan_window_ms, active_scan, scan_s`.
+  - Factory defaults: `FACTORY_BLE_ENABLED` / `_DEVICE_NAME` / `_TX_POWER` / `_MTU` (`modules/ble/include/BleService.h:54-65`).
+  - The device name defaults to `<project>-<uid8>`.
+- **library.json deps:** `ESPRack` only. NimBLE-Arduino is declared in the root `library.json`, like the other third-party libraries.
+- **Threads:**
+  - Task `"ble"`: 6144 B **static** stack (`ESPRACK_BLE_TASK_STACK`), priority 2, no core affinity. It runs host start/stop, scans, the link state machines and every blocking stack call (connect, service discovery, subscribe).
+  - The loop task only mirrors the engine once a second and pushes WS while someone watches.
+- **Cost notes:**
+  - Link slots: `ESPRACK_BLE_MAX_LINKS`, default 3, capped by `CONFIG_BT_NIMBLE_MAX_CONNECTIONS`.
+  - Scan table: `ESPRACK_BLE_SCAN_ROWS` = 24 fixed rows. NimBLE keeps no results (`setMaxResults(0)`).
+  - REST buffer 7168 B, because the scan rows are baked into GET `/form`; WS buffer 2048 B.
+  - esp-rack-rd-neey, S3 N8, full module set: static RAM 76,088 B with the module and its static stack, against 69,528 B without it (still on its own NimBLE use). Flash +53 KB.
+  - The NimBLE host's own heap is not measured.
+- **Lifecycle:**
+  - BootGuard safe mode keeps the radio off.
+  - A settings save hands the new values to the task. Everything applies live:
+    - TX power at once;
+    - the MTU to the next connections;
+    - the name to the GAP service;
+    - scan parameters.
+  - Switching the radio off disconnects and deletes each client before `deinit`, so NimBLE never keeps a client that is still disconnecting.
+  - Discovery: one scan per attempt, then backoff when nothing matched; never back-to-back scans.
+  - `onShutdown()` only signals the ble task, which owns every stack object. That task stops the scan and drops the links; `onShutdown()` waits at most 300 ms for it.
+- **Caveats:**
+  - Central role only; no advertising or GATT server.
+  - One discovery scan serves every discovering link. A link connects only while no scan is running, because the controller refuses to connect while scanning.
+  - A discovered (not configured) peer is forgotten after 3 failed attempts and searched for again.
+  - `write()` with `writeWithResponse` blocks the caller until the peer acknowledges.
 
 ### `cert-manager` — CertManagerModule
 - **Purpose:** Manages the device PKI:
