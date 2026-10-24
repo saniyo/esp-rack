@@ -178,9 +178,12 @@ void SystemStatus::buildForm(JsonObject& root,
   // Boot-loop guard + loop watchdog (SES-LIB-014).
   {
     const ESPRack::BootInfo& bi = ESPRack::BootGuard::info();
+    const String wdt = ESPRack::LoopWdt::armed()
+                           ? String(ESPRack::LoopWdt::paused() ? "paused" : "armed") + " (" +
+                                 (unsigned)(ESPRack::LoopWdt::timeoutMs() / 1000) + " s)"
+                           : String("off");
     String boot = String("#") + bi.bootCount + " · crash run " + (unsigned)bi.quickReboots +
-                  (bi.safeMode ? " · SAFE MODE" : "") + " · loop WDT " +
-                  (ESPRack::LoopWdt::armed() ? (ESPRack::LoopWdt::paused() ? "paused" : "armed") : "off");
+                  (bi.safeMode ? " · SAFE MODE" : "") + " · loop WDT " + wdt;
     sta.add(web::Text("boot", boot.c_str()).readOnly()
                 .label("Boot").icon(bi.safeMode ? "ReportProblem" : "Update")
                 .color(bi.safeMode ? "error" : "info"));
