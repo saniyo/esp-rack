@@ -13,7 +13,7 @@ import { useSnackbar } from 'notistack';
 
 import { Field } from '../types';
 import { useFieldParser } from '../utils/useFieldParser';
-import { AXIOS } from '../../../api/endpoints';
+import { AXIOS, toAxiosPath } from '../../../api/endpoints';
 import { extractErrorMessage } from '../../../utils';
 import { resolveIcon } from '../utils/iconRegistry';
 import { useManifest } from '../../../contexts/manifest';
@@ -43,8 +43,6 @@ type MuiColor =
   | 'info'
   | 'inherit';
 
-const toAxiosPath = (absPath: string) =>
-  absPath.startsWith('/api/v1/') ? absPath.slice(7) : absPath;
 
 const isMuiColor = (s?: string): s is MuiColor =>
   !!s && ['primary', 'secondary', 'error', 'warning', 'success', 'info', 'inherit'].includes(s);

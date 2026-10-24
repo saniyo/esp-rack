@@ -1,5 +1,5 @@
 import { AxiosPromise, AxiosRequestConfig } from 'axios';
-import { AXIOS } from './endpoints';
+import { AXIOS, toAxiosPath } from './endpoints';
 
 // Paths keyed by role. Defaults mirror the canonical routes; when the
 // UI manifest is loaded, configureFsEndpoints() overwrites any roles the
@@ -52,9 +52,6 @@ export function configureFsEndpoints(endpoints: ManifestFsEndpoint[] | undefined
   });
 }
 
-// AXIOS uses baseURL='/api/v1/'; strip the '/api/v1' prefix before passing to axios.
-const toAxios = (absPath: string) =>
-  absPath.startsWith('/api/v1/') ? absPath.slice(7) : absPath;
 
 export interface FsVolume {
   name: string;
@@ -80,15 +77,15 @@ export interface FsListResponse {
 }
 
 export function listVolumes(): AxiosPromise<FsVolume[]> {
-  return AXIOS.get(toAxios(FS_PATHS.volumes));
+  return AXIOS.get(toAxiosPath(FS_PATHS.volumes));
 }
 
 export function listDir(path: string): AxiosPromise<FsListResponse> {
-  return AXIOS.get(toAxios(FS_PATHS.list), { params: { path } });
+  return AXIOS.get(toAxiosPath(FS_PATHS.list), { params: { path } });
 }
 
 export function stat(path: string): AxiosPromise<FsEntry> {
-  return AXIOS.get(toAxios(FS_PATHS.stat), { params: { path } });
+  return AXIOS.get(toAxiosPath(FS_PATHS.stat), { params: { path } });
 }
 
 export function downloadUrl(path: string): string {
@@ -112,7 +109,7 @@ export function uploadFile(
   const headers: Record<string, string> = { 'Content-Type': 'multipart/form-data' };
   if (opts?.sha256) headers['X-File-SHA256'] = opts.sha256;
   if (opts?.crc32) headers['X-File-CRC32'] = opts.crc32;
-  return AXIOS.post(toAxios(FS_PATHS.upload), form, {
+  return AXIOS.post(toAxiosPath(FS_PATHS.upload), form, {
     params: { path: targetDir },
     headers,
     onUploadProgress: onUploadProgress as any,
@@ -121,23 +118,23 @@ export function uploadFile(
 }
 
 export function mkdir(path: string): AxiosPromise<{ ok: boolean }> {
-  return AXIOS.post(toAxios(FS_PATHS.mkdir), { path });
+  return AXIOS.post(toAxiosPath(FS_PATHS.mkdir), { path });
 }
 
 export function remove(path: string, recursive = false): AxiosPromise<{ ok: boolean }> {
-  return AXIOS.post(toAxios(FS_PATHS.delete), { path, recursive });
+  return AXIOS.post(toAxiosPath(FS_PATHS.delete), { path, recursive });
 }
 
 export function rename(from: string, to: string): AxiosPromise<{ ok: boolean }> {
-  return AXIOS.post(toAxios(FS_PATHS.rename), { from, to });
+  return AXIOS.post(toAxiosPath(FS_PATHS.rename), { from, to });
 }
 
 export function fetchSchema(): AxiosPromise<any> {
-  return AXIOS.get(toAxios(FS_PATHS.schema));
+  return AXIOS.get(toAxiosPath(FS_PATHS.schema));
 }
 
 export function formatVolume(volume: string): AxiosPromise<{ ok: boolean }> {
-  return AXIOS.post(toAxios(FS_PATHS.format), { volume, confirm: true });
+  return AXIOS.post(toAxiosPath(FS_PATHS.format), { volume, confirm: true });
 }
 
 export interface FormatStatus {
@@ -148,7 +145,7 @@ export interface FormatStatus {
 }
 
 export function formatStatus(volume: string): AxiosPromise<FormatStatus> {
-  return AXIOS.get(toAxios(FS_PATHS.formatStatus), { params: { volume } });
+  return AXIOS.get(toAxiosPath(FS_PATHS.formatStatus), { params: { volume } });
 }
 
 export type ArchiveState = 'idle' | 'walking' | 'ready' | 'streaming' | 'error';
@@ -164,11 +161,11 @@ export interface ArchiveStatus {
 }
 
 export function archivePrepare(path: string): AxiosPromise<{ ok: boolean; status?: string }> {
-  return AXIOS.post(toAxios(FS_PATHS.archivePrepare), { path });
+  return AXIOS.post(toAxiosPath(FS_PATHS.archivePrepare), { path });
 }
 
 export function archiveStatus(): AxiosPromise<ArchiveStatus> {
-  return AXIOS.get(toAxios(FS_PATHS.archiveStatus));
+  return AXIOS.get(toAxiosPath(FS_PATHS.archiveStatus));
 }
 
 export function archiveDownloadUrl(): string {
@@ -176,19 +173,19 @@ export function archiveDownloadUrl(): string {
 }
 
 export function archiveCancel(): AxiosPromise<{ ok: boolean }> {
-  return AXIOS.post(toAxios(FS_PATHS.archiveCancel), {});
+  return AXIOS.post(toAxiosPath(FS_PATHS.archiveCancel), {});
 }
 
 export function unmountVolume(volume: string): AxiosPromise<{ ok: boolean }> {
-  return AXIOS.post(toAxios(FS_PATHS.unmount), { volume });
+  return AXIOS.post(toAxiosPath(FS_PATHS.unmount), { volume });
 }
 
 export function mountVolume(volume: string): AxiosPromise<{ ok: boolean }> {
-  return AXIOS.post(toAxios(FS_PATHS.mount), { volume });
+  return AXIOS.post(toAxiosPath(FS_PATHS.mount), { volume });
 }
 
 export function readText(path: string): AxiosPromise<string> {
-  return AXIOS.get(toAxios(FS_PATHS.download), {
+  return AXIOS.get(toAxiosPath(FS_PATHS.download), {
     params: { path },
     responseType: 'text',
     transformResponse: [(data) => data],
@@ -209,15 +206,15 @@ export interface HashStatus {
 }
 
 export function hashStart(path: string): AxiosPromise<{ ok: boolean; status?: string }> {
-  return AXIOS.post(toAxios(FS_PATHS.hashStart), { path });
+  return AXIOS.post(toAxiosPath(FS_PATHS.hashStart), { path });
 }
 
 export function hashStatus(): AxiosPromise<HashStatus> {
-  return AXIOS.get(toAxios(FS_PATHS.hashStatus));
+  return AXIOS.get(toAxiosPath(FS_PATHS.hashStatus));
 }
 
 export function hashCancel(): AxiosPromise<{ ok: boolean }> {
-  return AXIOS.post(toAxios(FS_PATHS.hashCancel), {});
+  return AXIOS.post(toAxiosPath(FS_PATHS.hashCancel), {});
 }
 
 export function writeText(path: string, content: string): AxiosPromise<{ ok: boolean }> {
@@ -226,7 +223,7 @@ export function writeText(path: string, content: string): AxiosPromise<{ ok: boo
   const name = slash >= 0 ? path.slice(slash + 1) : path;
   const form = new FormData();
   form.append('file', new Blob([content], { type: 'text/plain' }), name);
-  return AXIOS.post(toAxios(FS_PATHS.upload), form, {
+  return AXIOS.post(toAxiosPath(FS_PATHS.upload), form, {
     params: { path: dir },
     headers: { 'Content-Type': 'multipart/form-data' },
   });

@@ -7,6 +7,12 @@ export const API_BASE_URL = '/api/v1/';
 export const ACCESS_TOKEN = 'access_token';
 export const WEB_SOCKET_ROOT = calculateWebSocketRoot(WS_BASE_URL);
 
+// AXIOS uses baseURL='/api/v1/'. The manifest and the forms publish absolute
+// paths; strip the '/api/v1' prefix before handing one to AXIOS, or it ends
+// up double-prefixed ('/api/v1/api/v1/...') and the device answers 404.
+export const toAxiosPath = (absPath: string) =>
+  absPath.startsWith('/api/v1/') ? absPath.slice(7) : absPath;
+
 export const AXIOS = axios.create({
   baseURL: API_BASE_URL,
   headers: {

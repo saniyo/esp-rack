@@ -5,7 +5,7 @@ import { Navigate, Route, Routes } from 'react-router-dom';
 import { AxiosPromise } from 'axios';
 import { Tab } from '@mui/material';
 
-import { AXIOS } from '../../api/endpoints';
+import { AXIOS, toAxiosPath } from '../../api/endpoints';
 import { RouterTabs, useRouterTab, useLayoutTitle } from '../../components';
 import DynamicStatus from './DynamicStatus';
 import DynamicSettings from './DynamicSettings';
@@ -18,11 +18,6 @@ import { useRest } from '../../utils';
 import { useWsChannel } from '../../utils/useWsChannel';
 import { DynamicFormContext, DynamicFormCtx } from './DynamicFormContext';
 
-// AXIOS baseURL is '/api/v1/'. Manifest publishes absolute paths; strip the
-// '/api/v1' prefix before handing to axios so we don't end up with a
-// double-prefixed URL that the server rewrites into the SPA fallback.
-const toAxiosPath = (absPath: string) =>
-  absPath.startsWith('/api/v1/') ? absPath.slice(7) : absPath;
 
 // C1 path contract: a typed feature serves its UI form at /api/v1/<id>/form
 // (GET only) and its write face at /api/v1/<id>/state (POST). Postable tabs

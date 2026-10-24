@@ -3,7 +3,7 @@ import axios from 'axios';
 import { Box, Typography } from '@mui/material';
 
 import SingleUpload, { UploadThemeColor } from '../../upload/SingleUpload';
-import { AXIOS } from '../../../api/endpoints';
+import { AXIOS, toAxiosPath } from '../../../api/endpoints';
 import { Field } from '../types';
 import { useFieldParser } from '../utils/useFieldParser';
 
@@ -41,7 +41,7 @@ const UploadField: FC<UploadFieldProps> = ({ field }) => {
       try {
         const form = new FormData();
         form.append('file', accepted[0], accepted[0].name);
-        await AXIOS.post(url, form, {
+        await AXIOS.post(toAxiosPath(url), form, {
           headers: { 'Content-Type': 'multipart/form-data' },
           onUploadProgress: (ev: ProgressEvent) => setProgress(ev),
           cancelToken: src.token,
