@@ -71,6 +71,18 @@ describe('Trend', () => {
     ]);
   });
 
+  it('reads vertical lines and the y axis range', () => {
+    const p = parseFieldOptions('t', 'trend;r;cat;vrefl=cell_min:#e53935:min|cell_max::;ymin=3.1;ypad=0.05');
+    expect(p.optionMap.vrefl?.value).toEqual([
+      { key: 'cell_min', color: '#e53935', label: 'min' },
+      { key: 'cell_max', color: '', label: '' },
+    ]);
+    expect(p.optionMap.ymin?.value).toBe(3.1);
+    expect(p.optionMap.ypad?.value).toBe(0.05);
+    expect(p.optionMap.ymax).toBeUndefined();
+    expect(p.optionMap.refl).toBeUndefined();  // vrefl is not refl
+  });
+
   it('without xFmt nothing new is set (old trends unchanged)', () => {
     // web::Trend("rate").line("rate_bps", "#1e88e5", "monotone").maxPoints(60) (the template)
     const p = parseFieldOptions('rate', 'trend;r;mode=lineChart;xAxis=timestamp;lines=rate_bps:color=#1e88e5,type=monotone;maxPoints=60');

@@ -46,7 +46,7 @@ const DynamicStatus: FC<DynamicStatusProps> = ({
   const editingFields = useRef(new Set<string>());
 
   // Shallow merge of every live frame: lets widgets read sibling readState
-  // keys that aren't fields themselves (progress maxKey/markerKey, trend refl).
+  // keys that aren't fields themselves (progress maxKey/markerKey, trend refl/vrefl).
   const [liveValues, setLiveValues] = useState<Record<string, any>>({});
 
   const getVal = (src: any, key: string) =>

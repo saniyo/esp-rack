@@ -109,6 +109,10 @@ constexpr const char* XFormat       = "xFmt";         // trend — epoch|time|da
 constexpr const char* Category      = "cat";          // trend — bare flag: x is a category, data replaced per push
 constexpr const char* Stack         = "stack";        // trend — "a+b|c+d" stacked groups
 constexpr const char* RefLine       = "refl";         // trend — "key:color:label|…" (y = sibling key's value)
+constexpr const char* VRefLine      = "vrefl";        // trend — "key:color:label|…" (x = sibling key's value)
+constexpr const char* YMin          = "ymin";         // trend — fixed lower end of the y axis
+constexpr const char* YMax          = "ymax";         // trend — fixed upper end of the y axis
+constexpr const char* YPad          = "ypad";         // trend — free ends follow the data, margin = pad x span
 
 // Progress.
 constexpr const char* MaxKey        = "maxKey";       // progress — max from a sibling key

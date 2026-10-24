@@ -54,7 +54,7 @@ interface DynamicContentHandlerProps {
   hideTitle?: boolean;
   // Latest live state of the tab's channel (every readState key, shallow).
   // Widgets that reference a sibling VALUE (progress maxKey/markerKey,
-  // trend refl) look it up here first, then among the form's fields.
+  // trend refl/vrefl) look it up here first, then among the form's fields.
   liveValues?: Record<string, any>;
 }
 

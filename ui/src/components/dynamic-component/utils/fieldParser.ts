@@ -16,9 +16,10 @@ export const fieldConfigurations = {
   dropdown: { options: ['r', 'rw', 'options', 'pl', 'icon', 'color', 'colorMap', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const },
   textarea: { options: ['r', 'rw', 'pl', 'icon', 'color', 'colorMap', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const },
   radio: { options: ['r', 'rw', 'options', 'pl', 'icon', 'color', 'colorMap', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const },
-  // xFmt/cat/stack/refl (SES-LIB-015): device-TZ x labels, category data,
-  // stacked bars, reference lines at sibling values.
-  trend: { options: ['to', 'xAxis', 'lines', 'legend', 'tooltip', 'maxPoints', 'mode', 'xFmt', 'cat', 'stack', 'refl', 'icon', 'color', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const },
+  // xFmt/cat/stack/refl: device-TZ x labels, category data, stacked bars,
+  // reference lines at sibling values; vrefl: vertical ones; ymin/ymax/ypad:
+  // the y axis range.
+  trend: { options: ['to', 'xAxis', 'lines', 'legend', 'tooltip', 'maxPoints', 'mode', 'xFmt', 'cat', 'stack', 'refl', 'vrefl', 'ymin', 'ymax', 'ypad', 'icon', 'color', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const },
   files: { options: ['r', 'rw', 'base', 'initial', 'uploadBase', 'icon', 'color', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const },
   upload: { options: ['r', 'rw', 'url', 'accept', 'icon', 'color', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const },
   // table supports two render modes via layout:
@@ -64,12 +65,21 @@ export interface ThresholdStep {
   color: string;
 }
 
-// trend `refl=key:color:label|…`
+// trend `refl=key:color:label|…` (and `vrefl=`, the vertical lines)
 export interface RefLineSpec {
   key: string;
   color: string;
   label: string;
 }
+
+const parseRefLines = (list: string): RefLineSpec[] =>
+  list
+    .split('|')
+    .map((spec) => {
+      const [k, color, ...rest] = spec.split(':');
+      return { key: (k || '').trim(), color: (color || '').trim(), label: rest.join(':').trim() };
+    })
+    .filter((r) => r.key);
 
 export interface BadgeSpec {
   field: string;
@@ -344,16 +354,12 @@ const optionParsers: Record<string, (option: string) => ParsedFieldOption> = {
       .filter((g) => g.length > 0),
   }),
   // trend: "key:color:label|…" (label may be empty).
-  refl: (opt) => ({
-    key: 'refl',
-    value: getAfter(opt, 'refl')
-      .split('|')
-      .map((spec) => {
-        const [k, color, ...rest] = spec.split(':');
-        return { key: (k || '').trim(), color: (color || '').trim(), label: rest.join(':').trim() };
-      })
-      .filter((r) => r.key),
-  }),
+  refl: (opt) => ({ key: 'refl', value: parseRefLines(getAfter(opt, 'refl')) }),
+  vrefl: (opt) => ({ key: 'vrefl', value: parseRefLines(getAfter(opt, 'vrefl')) }),
+  // trend: y axis ends and padding (NaN when not a number: ignored).
+  ymin: (opt) => ({ key: 'ymin', value: parseFloat(getAfter(opt, 'ymin')) }),
+  ymax: (opt) => ({ key: 'ymax', value: parseFloat(getAfter(opt, 'ymax')) }),
+  ypad: (opt) => ({ key: 'ypad', value: parseFloat(getAfter(opt, 'ypad')) }),
 
   // table `layout=grid|cards` picks between data-grid and avatar-card list.
   layout: (opt) => ({ key: 'layout', value: getAfter(opt, 'layout').trim() }),

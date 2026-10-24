@@ -343,6 +343,12 @@ const TrendChart: React.FC<TrendChartProps> = ({ field, value = [], getSibling }
   const isCategory = !!om.cat;
   const stacks: string[][] = useMemo(() => (Array.isArray(om.stack?.value) ? om.stack.value : []), [om.stack]);
   const refLines: RefLineSpec[] = useMemo(() => (Array.isArray(om.refl?.value) ? om.refl.value : []), [om.refl]);
+  const vrefLines: RefLineSpec[] = useMemo(() => (Array.isArray(om.vrefl?.value) ? om.vrefl.value : []), [om.vrefl]);
+  const finite = (o: any): number | undefined =>
+    typeof o?.value === 'number' && Number.isFinite(o.value) ? o.value : undefined;
+  const yMin = finite(om.ymin);
+  const yMax = finite(om.ymax);
+  const yPad = finite(om.ypad);
   const zone = useDeviceZone();
 
   // Шукаємо "mode=..." (lineChart / barChart / pieChart)
@@ -694,6 +700,77 @@ const TrendChart: React.FC<TrendChartProps> = ({ field, value = [], getSibling }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refLines, sibKey]);
 
+  // vrefl=key:color:label — a vertical line at the x the sibling's live value
+  // names: on a category axis the category equal to it, else the nearest x
+  // in the data. Hidden while the value is missing or outside the data. The
+  // label on top reads "label value".
+  const vsibVals = vrefLines.map((r) => getSibling?.(r.key));
+  const vsibKey = JSON.stringify(vsibVals);
+  const renderVRefLines = useMemo(() => {
+    const xs = chartDataForLine.map((r) => r[xAxisKey]);
+    const numeric = !isCategory && xs.length > 0 && xs.every((v) => typeof v === 'number');
+    return vrefLines
+      .map((r, i) => {
+        const raw = vsibVals[i];
+        if (raw === undefined || raw === null || raw === '') return null;
+        let x: any;
+        if (numeric) {
+          const n = typeof raw === 'number' ? raw : parseFloat(raw);
+          if (!Number.isFinite(n) || n < xs[0] || n > xs[xs.length - 1]) return null;
+          x = xs.reduce((best, v) => (Math.abs(v - n) < Math.abs(best - n) ? v : best), xs[0]);
+        } else {
+          x = xs.find((v) => String(v) === String(raw));
+          if (x === undefined) return null;
+        }
+        const shown = numeric && tickFormatter ? tickFormatter(x) : String(raw);
+        const color = r.color || '#888';
+        return (
+          <ReferenceLine
+            key={`vrefl-${r.key}`}
+            x={x}
+            stroke={color}
+            strokeDasharray="4 4"
+            label={{ value: r.label ? `${r.label} ${shown}` : shown, position: 'top', fontSize: 11, fill: color }}
+          />
+        );
+      })
+      .filter(Boolean);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [vrefLines, vsibKey, chartDataForLine, xAxisKey, isCategory, tickFormatter]);
+
+  // ymin/ymax fix an end of the y axis. ypad lets the free ends follow the
+  // visible data with that margin (a fraction of its span), rounded to a
+  // tidy step; without it a free end is recharts' 'auto'. With none of them
+  // the axis stays as before (from 0).
+  const yDomain = useMemo<[number | string, number | string] | undefined>(() => {
+    if (yMin === undefined && yMax === undefined && yPad === undefined) return undefined;
+    if (yPad === undefined) return [yMin ?? 'auto', yMax ?? 'auto'];
+    let lo = Infinity;
+    let hi = -Infinity;
+    const keys = mergedLineConfigs.filter((c) => !hiddenLines[c.dataKey]).map((c) => c.dataKey);
+    chartDataForLine.forEach((row) =>
+      keys.forEach((k) => {
+        const v = row[k];
+        if (typeof v === 'number' && Number.isFinite(v)) {
+          lo = Math.min(lo, v);
+          hi = Math.max(hi, v);
+        }
+      })
+    );
+    if (lo > hi) return [yMin ?? 'auto', yMax ?? 'auto'];
+    const span = hi - lo || Math.abs(hi) || 1;
+    const step = Math.pow(10, Math.floor(Math.log10(span)) - 1);
+    const tidy = (v: number) => Number(v.toPrecision(12));
+    return [
+      yMin ?? tidy(Math.floor((lo - yPad * span) / step) * step),
+      yMax ?? tidy(Math.ceil((hi + yPad * span) / step) * step),
+    ];
+  }, [yMin, yMax, yPad, mergedLineConfigs, hiddenLines, chartDataForLine]);
+  const chartMargin = useMemo(
+    () => ({ top: vrefLines.length ? 20 : 5, right: 30, left: 20, bottom: 5 }),
+    [vrefLines.length]
+  );
+
   const renderPie = useMemo(() => {
     // Для прикладу фільтруємо все, що "приховане" або зі значенням < 0 (можна змінити логіку)
     const visiblePieData = pieChartData.filter((data) => {
@@ -771,11 +848,11 @@ const TrendChart: React.FC<TrendChartProps> = ({ field, value = [], getSibling }
         return (
           <LineChart
             data={chartDataForLine}
-            margin={{ top: 5, right: 30, left: 20, bottom: 5 }}
+            margin={chartMargin}
           >
             <CartesianGrid strokeDasharray="3 3" />
             <XAxis dataKey={xAxisKey} tickFormatter={tickFormatter} />
-            <YAxis />
+            <YAxis domain={yDomain} />
             <Tooltip
               content={(props: RechartsTooltipProps<any, any>) => (
                 <CustomTooltipComponent
@@ -802,6 +879,7 @@ const TrendChart: React.FC<TrendChartProps> = ({ field, value = [], getSibling }
             />
             {renderLines}
             {renderRefLines}
+            {renderVRefLines}
           </LineChart>
         );
 
@@ -813,12 +891,12 @@ const TrendChart: React.FC<TrendChartProps> = ({ field, value = [], getSibling }
         return (
           <BarChart
             data={chartDataForLine}
-            margin={{ top: 5, right: 30, left: 20, bottom: 5 }}
+            margin={chartMargin}
             barCategoryGap="20%"
           >
             <CartesianGrid strokeDasharray="3 3" />
             <XAxis dataKey={xAxisKey} tickFormatter={tickFormatter} />
-            <YAxis />
+            <YAxis domain={yDomain} />
             <Tooltip
               content={(props: RechartsTooltipProps<any, any>) => (
                 <CustomTooltipComponent
@@ -850,6 +928,7 @@ const TrendChart: React.FC<TrendChartProps> = ({ field, value = [], getSibling }
               })
             )}
             {renderRefLines}
+            {renderVRefLines}
           </BarChart>
         );
 
@@ -880,6 +959,9 @@ const TrendChart: React.FC<TrendChartProps> = ({ field, value = [], getSibling }
     tickFormatter,
     tooltipLabel,
     renderRefLines,
+    renderVRefLines,
+    yDomain,
+    chartMargin,
   ]);
 
   // ***************************************************

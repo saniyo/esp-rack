@@ -1,6 +1,7 @@
 #ifndef WEB_FORM_H
 #define WEB_FORM_H
 
+#include <stdio.h>
 #include <string.h>
 
 #include <ArduinoJson.h>
@@ -322,6 +323,22 @@ class Trend : public FieldSpec<Trend> {
     _refl += key_; _refl += ':'; _refl += (color ? color : ""); _refl += ':'; _refl += (label ? label : "");
     return *this;
   }
+  // Vertical line at the x the sibling state key's live value names: on a
+  // category axis the category equal to it (hidden when there is none), else
+  // the nearest x in the data (hidden outside it). The label on top reads
+  // "label value". No ':' '|' ';' in label.
+  Trend& vrefLine(const char* key_, const char* color, const char* label = nullptr) {
+    if (_vrefl.length()) _vrefl += '|';
+    _vrefl += key_; _vrefl += ':'; _vrefl += (color ? color : ""); _vrefl += ':'; _vrefl += (label ? label : "");
+    return *this;
+  }
+  // The y axis. yMin / yMax fix an end. yAuto(pad): the free ends follow the
+  // visible data with a margin of pad x its span (rounded to a tidy step)
+  // instead of starting at 0, e.g. cell voltages: .yAuto(0.05). Without any
+  // of them the axis starts at 0 as before.
+  Trend& yMin(double v)            { _yMin = v; _y |= 1; return *this; }
+  Trend& yMax(double v)            { _yMax = v; _y |= 2; return *this; }
+  Trend& yAuto(double pad = 0.05)  { _yPad = pad; _y |= 4; return *this; }
   // A series: its state key, color, curve type and, optionally, the name the
   // legend and the tooltip show (default: the key). No ',' ';' ':' '=' in name.
   Trend& line(const char* key_, const char* color, const char* type, const char* name = nullptr) {
@@ -351,16 +368,27 @@ class Trend : public FieldSpec<Trend> {
     if (_cat) { o += ';'; o += Opt::Category; }
     if (_stack.length()) { o += ';'; o += Opt::Stack; o += '='; o += _stack; }
     if (_refl.length()) { o += ';'; o += Opt::RefLine; o += '='; o += _refl; }
+    if (_vrefl.length()) { o += ';'; o += Opt::VRefLine; o += '='; o += _vrefl; }
+    if (_y & 1) num(o, Opt::YMin, _yMin);
+    if (_y & 2) num(o, Opt::YMax, _yMax);
+    if (_y & 4) num(o, Opt::YPad, _yPad);
     o += tail();
     f["o"] = o;
   }
  private:
+  static void num(String& o, const char* opt, double v) {
+    char b[24];
+    snprintf(b, sizeof b, "%g", v);
+    o += ';'; o += opt; o += '='; o += b;
+  }
   const char* _mode = "lineChart";
   String _xAxis = "timestamp";
   String _lines;
   const char* _xFmt = nullptr;
   bool _cat = false;
-  String _stack, _refl;
+  String _stack, _refl, _vrefl;
+  double _yMin = 0, _yMax = 0, _yPad = 0;
+  uint8_t _y = 0;  // bits: yMin, yMax, yAuto set
   bool _legend = false, _tooltip = false;
   int _maxPoints = 100;
 };
