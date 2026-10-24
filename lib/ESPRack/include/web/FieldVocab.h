@@ -97,6 +97,7 @@ constexpr const char* Step          = "st";           // slider
 
 // Dropdown / radio.
 constexpr const char* Options       = "options";      // dropdown/radio — "Label:val,Label:val"
+constexpr const char* StringValues  = "sv";           // dropdown — bare flag: option values are strings
 
 // Trend.
 constexpr const char* TrendXAxis    = "xAxis";        // trend

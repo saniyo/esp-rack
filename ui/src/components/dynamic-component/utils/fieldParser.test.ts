@@ -71,6 +71,12 @@ describe('Trend', () => {
     ]);
   });
 
+  it('marks a dropdown with string values', () => {
+    const p = parseFieldOptions('port', 'dropdown;rw;options=can0:can0,can9 (not in this firmware):can9;sv');
+    expect(p.optionMap.sv?.value).toBe(true);
+    expect(p.optionMap.options?.value).toEqual(['can0:can0', 'can9 (not in this firmware):can9']);
+  });
+
   it('reads vertical lines and the y axis range', () => {
     const p = parseFieldOptions('t', 'trend;r;cat;vrefl=cell_min:#e53935:min|cell_max::;ymin=3.1;ypad=0.05');
     expect(p.optionMap.vrefl?.value).toEqual([

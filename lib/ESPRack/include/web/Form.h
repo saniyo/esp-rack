@@ -250,23 +250,35 @@ class Slider : public FieldSpec<Slider> {
 class Dropdown : public FieldSpec<Dropdown> {
  public:
   Dropdown(const char* key, int selected) : FieldSpec(key), _v(selected) {}
+  // String values (e.g. an instance id): the field holds the chosen
+  // option's value string. No ',' or ':' in labels or values.
+  Dropdown(const char* key, const char* selected) : FieldSpec(key), _s(selected ? selected : ""), _str(true) {}
   Dropdown& option(const char* label, int value) {
     if (_options.length()) _options += ',';
     _options += label; _options += ':'; _options += value;
+    return *this;
+  }
+  Dropdown& option(const char* label, const char* value) {
+    if (_options.length()) _options += ',';
+    _options += label; _options += ':'; _options += (value ? value : "");
     return *this;
   }
   Dropdown& placeholder(const char* p) { return putStr(Opt::Placeholder, p); }
   Dropdown& colorMap(const char* spec) { return putStr(Opt::ColorMap, spec); }
   void writeTo(JsonArray& fields) const {
     JsonObject f = fields.createNestedObject();
-    f[_key] = _v;
+    if (_str) f[_key] = _s;
+    else f[_key] = _v;
     String o = head(FieldType::Dropdown);
     if (_options.length()) { o += ';'; o += Opt::Options; o += '='; o += _options; }
+    if (_str) { o += ';'; o += Opt::StringValues; }
     o += tail();
     f["o"] = o;
   }
  private:
-  int _v;
+  int _v = 0;
+  String _s;
+  bool _str = false;
   String _options;
 };
 

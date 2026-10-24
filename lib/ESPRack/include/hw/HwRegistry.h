@@ -70,6 +70,24 @@ class HwRegistry {
       if (void* p = x.m->queryInterface(I::kIfaceId)) fn(*static_cast<I*>(p), x.m->instanceId());
     }
   }
+  // A settings dropdown of the instances implementing I (label and value =
+  // the instance id). A `selected` id that isn't one of them stays in the
+  // list, marked, so a stale setting is visible rather than blank:
+  //   web::Dropdown port("port", set.port);
+  //   app->hw()->instanceOptions<ESPRack::ICanPort>(port, set.port);
+  template <class I, class D>
+  void instanceOptions(D& dropdown, const char* selected) const {
+    bool seen = false;
+    forEach<I>([&](I&, const char* id) {
+      dropdown.option(id, id);
+      if (selected && strcmp(id, selected) == 0) seen = true;
+    });
+    if (selected && selected[0] && !seen) {
+      char label[64];
+      snprintf(label, sizeof label, "%s (not in this firmware)", selected);
+      dropdown.option(label, selected);
+    }
+  }
   // fn(const char* instanceId, const HwResource& r, HwState state) for every
   // resource of `kind` in every instance's last describeHw(), in install
   // order. Instances that don't hold it are listed too, with

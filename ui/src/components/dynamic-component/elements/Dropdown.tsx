@@ -19,8 +19,8 @@ import { FieldAvatar } from '../utils/iconRegistry';
 interface DropdownProps {
   field: Field;
   value: string | number;
-  onChange: (label: string, value: number) => void;
-  onBlur?: (label: string, value: number) => void;
+  onChange: (label: string, value: number | string) => void;
+  onBlur?: (label: string, value: number | string) => void;
 }
 
 // Стилізований компонент для Select з використанням transient props ($isReadOnly)
@@ -34,7 +34,7 @@ const StyledSelect = styled((props: any) => <Select {...props} />)<{ $isReadOnly
 
 interface DropdownOpt {
   label: string;
-  value: number;
+  value: number | string;
 }
 
 const Dropdown: React.FC<DropdownProps> = ({ field, value, onChange, onBlur }) => {
@@ -45,7 +45,9 @@ const Dropdown: React.FC<DropdownProps> = ({ field, value, onChange, onBlur }) =
   // Backend may emit either:
   //   options=Label1,Label2,Label3        (legacy; value = 1-based index)
   //   options=Label1:0,Label2:1,Label3:2  (explicit ints per label)
+  //   options=Label1:a,Label2:b;sv         (string values, e.g. instance ids)
   // Prefer explicit values when present, falling back to 1-based index otherwise.
+  const stringValues = !!(optionMap as any).sv;
   const parsedOptions: DropdownOpt[] = React.useMemo(() => {
     const optionsVal = optionMap.options?.value;
     const raw = Array.isArray(optionsVal) ? (optionsVal as string[]) : [];
@@ -53,14 +55,17 @@ const Dropdown: React.FC<DropdownProps> = ({ field, value, onChange, onBlur }) =
       const colonIdx = entry.lastIndexOf(':');
       if (colonIdx > 0) {
         const label = entry.substring(0, colonIdx);
-        const n = parseInt(entry.substring(colonIdx + 1), 10);
+        const rawValue = entry.substring(colonIdx + 1);
+        if (stringValues) return { label, value: rawValue };
+        const n = parseInt(rawValue, 10);
         return { label, value: Number.isFinite(n) ? n : idx + 1 };
       }
-      return { label: entry, value: idx + 1 };
+      return { label: entry, value: stringValues ? entry : idx + 1 };
     });
-  }, [optionMap]);
+  }, [optionMap, stringValues]);
 
   const findLabelForValue = (v: any): string => {
+    if (stringValues) return parsedOptions.find((o) => o.value === String(v ?? ''))?.label || '';
     const n = Number(v);
     return parsedOptions.find((o) => o.value === n)?.label || '';
   };
@@ -110,7 +115,7 @@ const Dropdown: React.FC<DropdownProps> = ({ field, value, onChange, onBlur }) =
             $isReadOnly={isReadOnly}
           >
             {parsedOptions.map((opt) => (
-              <MenuItem key={opt.value} value={opt.label}>
+              <MenuItem key={String(opt.value)} value={opt.label}>
                 {opt.label}
               </MenuItem>
             ))}

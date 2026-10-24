@@ -13,7 +13,7 @@ export const fieldConfigurations = {
   checkbox: { options: ['r', 'rw', 'pl', 'icon', 'color', 'colorMap', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const },
   button: { options: ['r', 'rw', 'pl', 'icon', 'color', 'colorMap', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const },
   switch: { options: ['r', 'rw', 'pl', 'icon', 'color', 'colorMap', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const },
-  dropdown: { options: ['r', 'rw', 'options', 'pl', 'icon', 'color', 'colorMap', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const },
+  dropdown: { options: ['r', 'rw', 'options', 'sv', 'pl', 'icon', 'color', 'colorMap', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const },
   textarea: { options: ['r', 'rw', 'pl', 'icon', 'color', 'colorMap', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const },
   radio: { options: ['r', 'rw', 'options', 'pl', 'icon', 'color', 'colorMap', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const },
   // xFmt/cat/stack/refl: device-TZ x labels, category data, stacked bars,
