@@ -38,6 +38,7 @@ struct HistSeriesDef {
   const HistColumn* cols; uint8_t nCols;
   const HistTier* tiers; uint8_t nTiers;  // tier 0 + rollups (rollups only when bucketS > 0)
   uint32_t maxBytes = 0;                  // 0 = a share of the global cap
+  bool localDays = false;                 // whole-day tiers start at local midnight
 };
 class IHistorySeries {
   virtual HistPut add(uint32_t t, const double* v, size_t n) = 0;       // sample -> open bucket (agg)
@@ -114,6 +115,20 @@ class IHistoryProvider {
 - **Retention.** Retention works by time (`keepS` per tier) and by size
   (`maxBytes` per series, plus a global cap). The oldest whole segments are
   deleted.
+  - The global cap goes to the series without their own `maxBytes` in
+    proportion to what each needs for its whole retention
+    (`recSize × keepS / bucketS` per tier). Within a series its bytes go to
+    the tiers the same way. When everything fits, every series keeps its
+    whole retention; when not, all are cut by the same ratio.
+- **Unknown, not zero.** An element that got no sample in a bucket is
+  stored as unknown for every aggregate: a Sum of nothing is not 0. A
+  producer that means "nothing happened" adds an explicit 0.
+- **Local days.** `localDays` makes whole-day tiers start at local midnight
+  in the device's time zone (a DST day is 23 or 25 h long). It is part of
+  the schema hash, so switching it starts new files. Rollups stay
+  consistent because the hours below are UTC-aligned and the usual offsets
+  are whole hours; under a half-hour zone an hour goes to the day it starts
+  in.
 - **Write budget.**
   - The budget is in KB per day. Exceeding it doubles the flush interval
     and shows a warning.

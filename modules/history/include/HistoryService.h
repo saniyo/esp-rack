@@ -11,7 +11,8 @@
 //     shutdown — only while PowerGuard allows writes. An unexpected reset
 //     loses at most what was waiting and the open buckets.
 //   * Retention runs once an hour: by each tier's time, then by size (the
-//     series' maxBytes, else an even share of the global cap).
+//     series' maxBytes, else a share of the global cap in proportion to
+//     what its retention needs; within a series, per tier the same way).
 //   * Writes are counted per day against budget_kb_day; past it the flush
 //     interval doubles (up to 16x) and the page says so, with a rough flash
 //     wear estimate.

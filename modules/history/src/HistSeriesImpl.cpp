@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include <algorithm>
 #include <memory>
@@ -14,6 +15,16 @@ namespace ESPRack {
 namespace histmod {
 
 namespace {
+// Seconds east of UTC at `utc` in the device's time zone (TimeSync owns TZ).
+int32_t utcOffsetAt(uint32_t utc) {
+  const time_t t = time_t(utc);
+  struct tm g, l;
+  gmtime_r(&t, &g);
+  localtime_r(&t, &l);
+  int32_t days = l.tm_year != g.tm_year ? (l.tm_year > g.tm_year ? 1 : -1) : l.tm_yday - g.tm_yday;
+  return days * 86400 + (l.tm_hour - g.tm_hour) * 3600 + (l.tm_min - g.tm_min) * 60 + (l.tm_sec - g.tm_sec);
+}
+
 
 constexpr uint32_t kMinValidT = 1577836800;  // 2020-01-01: before it the clock isn't set
 constexpr uint32_t kPutRecords = 16;         // a put-series' ring: its reserve
@@ -166,7 +177,7 @@ void Series::closedLocked(uint8_t tier, uint32_t t, const double* v) {
 
 void Series::rollupLocked(uint8_t tier, uint32_t t, const double* v) {
   Tier& z = tier_[tier];
-  const uint32_t bs = hist::bucketStart(t, tiers_[tier].bucketS);
+  const uint32_t bs = hist::tierStart(def_, tier, t, &utcOffsetAt);
   if (z.queuedNewest && bs <= z.queuedNewest) return;  // already rolled up (on file)
   if (!z.bucket.empty() && z.bucket.start() != bs) {
     if (bs < z.bucket.start()) return;
@@ -185,7 +196,7 @@ HistPut Series::add(uint32_t t, const double* v, size_t n) {
   Lock l(mx_);
   if (!mounted_) return HistPut::NotReady;
   Tier& z = tier_[0];
-  const uint32_t bs = hist::bucketStart(t, tiers_[0].bucketS);
+  const uint32_t bs = hist::tierStart(def_, 0, t, &utcOffsetAt);
   if (z.queuedNewest && bs <= z.queuedNewest) {
     ++stale_;
     return HistPut::Stale;
@@ -210,7 +221,7 @@ HistPut Series::put(uint32_t t, const double* v, size_t n) {
   Lock l(mx_);
   if (!mounted_) return HistPut::NotReady;
   Tier& z = tier_[0];
-  const uint32_t at = hist::isPutSeries(def_) ? t : hist::bucketStart(t, tiers_[0].bucketS);
+  const uint32_t at = hist::isPutSeries(def_) ? t : hist::tierStart(def_, 0, t, &utcOffsetAt);
   const HistPut c = hist::putCheck(z.queuedNewest, at);
   if (c != HistPut::Ok) {
     if (c == HistPut::Stale) ++stale_;
@@ -357,7 +368,9 @@ void Series::scanTier(fs::FS& fs, uint8_t tier) {
 void Series::rebuildRollup(fs::FS& fs, uint8_t tier) {
   // Lower-tier records newer than this tier's newest bucket go into its open
   // bucket again (and close any older buckets on the way).
-  const uint32_t from = tier_[tier].fileNewest ? tier_[tier].fileNewest + tiers_[tier].bucketS : 0;
+  // (+1, not + bucketS: a local day can be 23 or 25 h; rollupLocked skips
+  // what the newest bucket already holds.)
+  const uint32_t from = tier_[tier].fileNewest ? tier_[tier].fileNewest + 1 : 0;
   std::vector<double> v(tier_[tier - 1].lay.nValues);
   std::vector<uint8_t> rec(tier_[tier - 1].lay.recSize);
   struct Ctx {
@@ -471,8 +484,25 @@ size_t Series::flush(fs::FS& fs, uint8_t* scratch, size_t scratchLen) {
   return written;
 }
 
+uint64_t Series::needBytes() const {
+  if (hist::isPutSeries(def_)) {
+    Lock l(mx_);
+    return uint64_t(tier_[0].bytes) + tier_[0].qCap;
+  }
+  uint64_t need = 0;
+  for (uint8_t k = 0; k < def_.nTiers; ++k) need += hist::tierNeed(def_, k, tier_[k].lay.recSize);
+  return need;
+}
+
 void Series::retention(fs::FS& fs, uint32_t now, uint32_t maxBytes) {
-  const uint32_t tierCap = maxBytes ? maxBytes / def_.nTiers : 0;
+  // The series' bytes go to its tiers by what each needs for its retention.
+  uint32_t tierCap[hist::kMaxTiers] = {};
+  if (maxBytes) {
+    uint64_t need[hist::kMaxTiers];
+    for (uint8_t k = 0; k < def_.nTiers; ++k) need[k] = hist::tierNeed(def_, k, tier_[k].lay.recSize);
+    if (hist::isPutSeries(def_)) need[0] = 1;
+    hist::splitByNeed(maxBytes, need, def_.nTiers, tierCap);
+  }
   for (uint8_t k = 0; k < def_.nTiers; ++k) {
     char dir[48];
     dirOf(k, dir, sizeof dir);
@@ -494,7 +524,7 @@ void Series::retention(fs::FS& fs, uint32_t now, uint32_t maxBytes) {
       }
     }
     std::unique_ptr<bool[]> d(new bool[names.size()]);
-    hist::retention(info.data(), info.size(), now, tiers_[k].keepS, tierCap, d.get());
+    hist::retention(info.data(), info.size(), now, tiers_[k].keepS, tierCap[k], d.get());
     bool removed = false;
     for (size_t i = 0; i < names.size(); ++i) {
       if (!d[i]) continue;

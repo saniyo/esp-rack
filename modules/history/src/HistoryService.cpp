@@ -349,11 +349,21 @@ void HistoryService::run() {
     if (due) flushAll(false);
     if (millis() - _lastRetentionMs >= kRetentionMs && now > kMinValidT) {
       _lastRetentionMs = millis();
-      const uint32_t cap = capBytes();
+      // The global cap goes to the series without their own maxBytes, in
+      // proportion to what each needs for its whole retention.
+      std::vector<Series*> pooled;
+      std::vector<uint64_t> need;
       for (Series* s : list) {
-        const uint32_t share = s->def().maxBytes ? s->def().maxBytes : cap / uint32_t(list.size());
-        s->retention(ESPFS, uint32_t(now), share);
+        if (s->def().maxBytes) {
+          s->retention(ESPFS, uint32_t(now), s->def().maxBytes);
+        } else {
+          pooled.push_back(s);
+          need.push_back(s->needBytes());
+        }
       }
+      std::vector<uint32_t> share(pooled.size());
+      ESPRack::hist::splitByNeed(capBytes(), need.data(), pooled.size(), share.data());
+      for (size_t i = 0; i < pooled.size(); ++i) pooled[i]->retention(ESPFS, uint32_t(now), share[i]);
     }
   }
   flushAll(true);  // shutdown, OTA, restart: what is waiting goes to flash (if power allows)

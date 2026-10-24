@@ -57,6 +57,9 @@ class Series : public IHistorySeries {
   void mount(fs::FS& fs);
   size_t flush(fs::FS& fs, uint8_t* scratch, size_t scratchLen);  // bytes written
   void retention(fs::FS& fs, uint32_t now, uint32_t maxBytes);
+  // Bytes for the whole retention of all tiers (a put-series: what it has
+  // on file plus its buffer), the weight of its share of the global cap.
+  uint64_t needBytes() const;
   void erase(fs::FS& fs);
 
   // ---- queries (any task) ----

@@ -201,8 +201,12 @@ static void test_bucket_aggregates(void) {
 
   b.reset(7200);
   b.finish(kAgg, out);
-  TEST_ASSERT_DOUBLE_WITHIN(1e-9, 0, out[0]);  // a sum of nothing is 0
-  TEST_ASSERT_TRUE(isnan(out[1]) && isnan(out[2]) && isnan(out[3]) && isnan(out[4]));
+  // No sample: unknown for every aggregate, a Sum of nothing too.
+  TEST_ASSERT_TRUE(isnan(out[0]) && isnan(out[1]) && isnan(out[2]) && isnan(out[3]) && isnan(out[4]));
+  const double unknown[5] = {NAN, NAN, NAN, NAN, NAN};
+  b.add(kAgg, unknown);
+  b.finish(kAgg, out);
+  TEST_ASSERT_TRUE(isnan(out[0]));  // only unknown samples: still unknown
   TEST_ASSERT_EQUAL_UINT32(7200, bucketStart(7200 + 3599, 3600));
 }
 
@@ -297,6 +301,71 @@ static void test_names_and_columns(void) {
   TEST_ASSERT_EQUAL_STRING("full", histPutName(HistPut::Full));
 }
 
+// Local days: a fixed UTC+2 zone, and one that falls back from +3 to +2 at
+// 01:00 UTC on day D.
+static const uint32_t D = 1761264000;  // a UTC midnight
+static int32_t plus2(uint32_t) { return 7200; }
+static int32_t fallBack(uint32_t t) { return t < D + 3600 ? 10800 : 7200; }
+
+static void test_local_days(void) {
+  const HistTier tiers[] = {{3600, 7 * 86400}, {86400, 365 * 86400}};
+  HistSeriesDef utc{"days", "Days", kAggCols, 5, tiers, 2};
+  HistSeriesDef local = utc;
+  local.localDays = true;
+  TEST_ASSERT_FALSE(localTier(local, 0));
+  TEST_ASSERT_TRUE(localTier(local, 1));
+  TEST_ASSERT_FALSE(localTier(utc, 1));
+
+  // UTC tiers and hour tiers: plain bucketStart.
+  TEST_ASSERT_EQUAL_UINT32(D, tierStart(utc, 1, D + 43200, &plus2));
+  TEST_ASSERT_EQUAL_UINT32(D + 39600 - 39600 % 3600, tierStart(local, 0, D + 39600 + 5, &plus2));
+  TEST_ASSERT_EQUAL_UINT32(D, tierStart(local, 1, D + 43200, nullptr));
+
+  // UTC+2: the local day starts at 22:00 UTC the day before.
+  TEST_ASSERT_EQUAL_UINT32(D - 7200, tierStart(local, 1, D + 43200, &plus2));
+  TEST_ASSERT_EQUAL_UINT32(D + 86400 - 7200, tierStart(local, 1, D + 82800, &plus2));
+  TEST_ASSERT_EQUAL_UINT32(D - 7200, tierStart(local, 1, D - 7200, &plus2));
+
+  // Fall back: the day starting at D - 3 h (summer midnight) lasts 25 h.
+  const uint32_t day = tierStart(local, 1, D + 43200, &fallBack);
+  const uint32_t next = tierStart(local, 1, D + 86400 + 3600, &fallBack);
+  TEST_ASSERT_EQUAL_UINT32(D - 10800, day);
+  TEST_ASSERT_EQUAL_UINT32(90000, next - day);
+  TEST_ASSERT_EQUAL_UINT32(D - 86400 - 10800, tierStart(local, 1, D - 43200, &fallBack));
+
+  // Part of the schema: other bucket starts, other files.
+  Layout a, b;
+  TEST_ASSERT_TRUE(layoutOf(utc, 1, a) && layoutOf(local, 1, b));
+  TEST_ASSERT_TRUE(a.schemaHash != b.schemaHash);
+  TEST_ASSERT_TRUE(layoutOf(utc, 0, a) && layoutOf(local, 0, b));
+  TEST_ASSERT_EQUAL_UINT32(a.schemaHash, b.schemaHash);
+}
+
+static void test_split_by_need(void) {
+  uint32_t share[3];
+  const uint64_t need[] = {100, 300};
+  splitByNeed(1000, need, 2, share);
+  TEST_ASSERT_EQUAL_UINT32(250, share[0]);
+  TEST_ASSERT_EQUAL_UINT32(750, share[1]);
+
+  const uint64_t none[] = {0, 0, 0};  // unknown needs: equal shares
+  splitByNeed(30, none, 3, share);
+  TEST_ASSERT_EQUAL_UINT32(10, share[0]);
+  TEST_ASSERT_EQUAL_UINT32(10, share[2]);
+
+  const uint64_t lopsided[] = {1, 1000000};  // never 0: that would mean no cap
+  splitByNeed(1, lopsided, 2, share);
+  TEST_ASSERT_EQUAL_UINT32(1, share[0]);
+  TEST_ASSERT_EQUAL_UINT32(1, share[1]);
+
+  Layout l;
+  TEST_ASSERT_TRUE(layoutOf(kWide, 0, l));
+  TEST_ASSERT_EQUAL_UINT64(uint64_t(7 * 24 + 1) * l.recSize, tierNeed(kWide, 0, l.recSize));
+  const HistTier putTier[] = {{0, 365 * 86400}};
+  HistSeriesDef put{"rec", "Records", kAggCols, 5, putTier, 1};
+  TEST_ASSERT_EQUAL_UINT64(0, tierNeed(put, 0, 64));
+}
+
 int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_validate);
@@ -308,5 +377,7 @@ int main(void) {
   RUN_TEST(test_downsample);
   RUN_TEST(test_retention);
   RUN_TEST(test_names_and_columns);
+  RUN_TEST(test_local_days);
+  RUN_TEST(test_split_by_need);
   return UNITY_END();
 }

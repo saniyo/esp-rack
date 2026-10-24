@@ -22,6 +22,14 @@
 //     record with the caller's time; t <= newestT() is Duplicate/Stale and
 //     writes nothing (re-appending after a reboot is safe).
 //
+// Lifetime: series() copies the id and the column and tier arrays, but keeps
+// pointers to `title` and to each column's `key` and `unit`: those strings
+// must live as long as the module (string literals, as above).
+//
+// An element that got no sample in a bucket (only NaN, or nothing at all) is
+// stored as unknown, for every HistAgg: a Sum of nothing is not 0. Add an
+// explicit 0 when "nothing happened" is a known value.
+//
 // Threads: series(), add(), put(), putRaw() from any task; they only touch
 // RAM under a short lock. Files are written by the module's own task, in
 // batches, while PowerGuard allows writes. An unexpected reset loses at most
@@ -72,7 +80,14 @@ struct HistSeriesDef {
   uint8_t nCols;
   const HistTier* tiers;
   uint8_t nTiers;
-  uint32_t maxBytes = 0;  // 0: a share of the module's global cap
+  // This series' own cap on file, outside the module's global one. 0: a
+  // share of the global cap, in proportion to what each series needs to keep
+  // its whole retention (record size x keepS / bucketS, per tier).
+  uint32_t maxBytes = 0;
+  // Whole-day tiers (bucketS a multiple of a day) start at local midnight in
+  // the device's time zone instead of UTC; a DST day is 23 or 25 h long.
+  // Changing it starts new files (it is part of the schema).
+  bool localDays = false;
 };
 
 struct HistSeriesStats {

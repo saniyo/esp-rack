@@ -77,6 +77,23 @@ size_t validRecords(const uint8_t* data, size_t len, uint16_t recSize);
 HistPut putCheck(uint32_t newest, uint32_t t);
 uint32_t bucketStart(uint32_t t, uint32_t bucketS);
 
+// Seconds east of UTC at the instant `utc` (the device's time zone).
+using UtcOffsetFn = int32_t (*)(uint32_t utc);
+// True for a tier whose buckets start at local midnights: a localDays series
+// and a bucketS that is a whole number of days.
+bool localTier(const HistSeriesDef& def, uint8_t tier);
+// Start of the bucket holding t on `tier`: bucketStart(), or for a local tier
+// the local midnight (UTC multiples of bucketS in local time). `off` null:
+// UTC.
+uint32_t tierStart(const HistSeriesDef& def, uint8_t tier, uint32_t t, UtcOffsetFn off);
+
+// Bytes a tier needs for its whole retention: keepS / bucketS records
+// (0 for a put-series: only the producer knows its rate).
+uint64_t tierNeed(const HistSeriesDef& def, uint8_t tier, uint16_t recSize);
+// Splits `cap` over n users in proportion to `need` (a zero need counts as
+// one byte). Every share is at least 1: 0 would mean "no cap".
+void splitByNeed(uint64_t cap, const uint64_t* need, size_t n, uint32_t* share);
+
 // One open bucket: per value element, by its column's aggregate. The module
 // gives it storage (PSRAM or internal) for `nValues` doubles and counters.
 class Bucket {
@@ -84,7 +101,8 @@ class Bucket {
   void attach(double* acc, uint32_t* cnt, uint16_t nValues);
   void reset(uint32_t start);
   void add(const HistSeriesDef& def, const double* v);
-  // The aggregated values; elements that got no sample are NaN.
+  // The aggregated values; elements that got no sample are NaN, for every
+  // aggregate (a Sum of nothing is unknown, not 0).
   void finish(const HistSeriesDef& def, double* out) const;
   bool empty() const { return samples_ == 0; }
   uint32_t start() const { return start_; }

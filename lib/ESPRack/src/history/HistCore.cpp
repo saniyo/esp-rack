@@ -221,6 +221,7 @@ bool layoutOf(const HistSeriesDef& def, uint8_t tier, Layout& out) {
   const uint8_t version = kSegVersion;
   fnv(h, &version, 1);
   fnv(h, &def.tiers[tier].bucketS, 4);
+  if (localTier(def, tier)) fnv(h, "local", 5);  // other bucket starts: other files
   size_t bytes = 0, values = 0;
   for (uint8_t i = 0; i < def.nCols; ++i) {
     const HistColumn& c = def.cols[i];
@@ -333,6 +334,37 @@ HistPut putCheck(uint32_t newest, uint32_t t) {
 
 uint32_t bucketStart(uint32_t t, uint32_t bucketS) { return bucketS ? t - t % bucketS : t; }
 
+bool localTier(const HistSeriesDef& def, uint8_t tier) {
+  const uint32_t b = def.tiers[tier].bucketS;
+  return def.localDays && b && b % 86400 == 0;
+}
+
+uint32_t tierStart(const HistSeriesDef& def, uint8_t tier, uint32_t t, UtcOffsetFn off) {
+  const uint32_t b = def.tiers[tier].bucketS;
+  if (!off || !localTier(def, tier)) return bucketStart(t, b);
+  const int64_t local = int64_t(t) + off(t);
+  const int64_t localStart = local - (local % b + b) % b;
+  int64_t utc = localStart - off(t);        // with t's offset first,
+  if (utc < 0) return 0;
+  utc = localStart - off(uint32_t(utc));    // then the offset at that midnight (DST)
+  if (utc < 0) return 0;
+  return utc > t ? bucketStart(t, b) : uint32_t(utc);  // never after t
+}
+
+uint64_t tierNeed(const HistSeriesDef& def, uint8_t tier, uint16_t recSize) {
+  const HistTier& z = def.tiers[tier];
+  return z.bucketS ? uint64_t(z.keepS / z.bucketS + 1) * recSize : 0;
+}
+
+void splitByNeed(uint64_t cap, const uint64_t* need, size_t n, uint32_t* share) {
+  double total = 0;
+  for (size_t i = 0; i < n; ++i) total += need[i] ? double(need[i]) : 1.0;
+  for (size_t i = 0; i < n; ++i) {
+    const double s = total > 0 ? double(cap) * (need[i] ? double(need[i]) : 1.0) / total : 0;
+    share[i] = s < 1 ? 1 : s >= 4294967295.0 ? 0xFFFFFFFFu : uint32_t(s);
+  }
+}
+
 // ---- Bucket ----
 
 void Bucket::attach(double* acc, uint32_t* cnt, uint16_t nValues) {
@@ -379,7 +411,7 @@ void Bucket::finish(const HistSeriesDef& def, double* out) const {
     const HistColumn& c = def.cols[i];
     for (uint16_t e = 0; e < c.width; ++e, ++k) {
       if (!cnt_[k]) {
-        out[k] = c.agg == HistAgg::Sum ? 0.0 : NAN;  // a sum of nothing is 0
+        out[k] = NAN;  // no sample: unknown, also for a Sum
       } else {
         out[k] = c.agg == HistAgg::Avg ? acc_[k] / cnt_[k] : acc_[k];
       }
