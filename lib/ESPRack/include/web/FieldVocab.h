@@ -118,6 +118,9 @@ constexpr const char* History       = "hist";         // trend — the History s
 constexpr const char* HistPeriods   = "hper";         // trend — "live,24h,7d,30d,1y,date" (the switch's choices)
 constexpr const char* HistDefault   = "hdef";         // trend — the initial period (default live)
 constexpr const char* HistLiveLabel = "hlive";        // trend — the Live choice's label
+constexpr const char* HistSince     = "hsince";       // trend — a state key with the epoch the Live data starts at
+constexpr const char* Zero          = "y0";           // trend — 0 always on the y axis, with a zero line
+constexpr const char* Height        = "hgt";          // trend — plot height, px (default 400)
 
 // Progress.
 constexpr const char* MaxKey        = "maxKey";       // progress — max from a sibling key

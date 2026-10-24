@@ -20,7 +20,7 @@ export const fieldConfigurations = {
   // reference lines at sibling values; vrefl: vertical ones; ymin/ymax/ypad:
   // the y axis range; hist/hper/hdef/hlive/unit: history mode (a period
   // switch reading the History module's series).
-  trend: { options: ['to', 'xAxis', 'lines', 'legend', 'tooltip', 'maxPoints', 'mode', 'xFmt', 'cat', 'stack', 'refl', 'vrefl', 'ymin', 'ymax', 'ypad', 'hist', 'hper', 'hdef', 'hlive', 'unit', 'icon', 'color', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const },
+  trend: { options: ['to', 'xAxis', 'lines', 'legend', 'tooltip', 'maxPoints', 'mode', 'xFmt', 'cat', 'stack', 'refl', 'vrefl', 'ymin', 'ymax', 'ypad', 'hist', 'hper', 'hdef', 'hlive', 'hsince', 'y0', 'hgt', 'unit', 'icon', 'color', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const },
   files: { options: ['r', 'rw', 'base', 'initial', 'uploadBase', 'icon', 'color', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const },
   upload: { options: ['r', 'rw', 'url', 'accept', 'icon', 'color', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const },
   // table supports two render modes via layout:
@@ -370,6 +370,13 @@ const optionParsers: Record<string, (option: string) => ParsedFieldOption> = {
   }),
   hdef: (opt) => ({ key: 'hdef', value: getAfter(opt, 'hdef').trim() }),
   hlive: (opt) => ({ key: 'hlive', value: getAfter(opt, 'hlive').trim() }),
+  hsince: (opt) => ({ key: 'hsince', value: getAfter(opt, 'hsince').trim() }),
+  // trend: 0 on the y axis (y0=1), the plot height (hgt=260).
+  y0: (opt) => ({ key: 'y0', value: getAfter(opt, 'y0').trim() !== '0' }),
+  hgt: (opt) => {
+    const n = parseInt(getAfter(opt, 'hgt'), 10);
+    return { key: 'hgt', value: Number.isFinite(n) && n > 0 ? n : undefined };
+  },
 
   // table `layout=grid|cards` picks between data-grid and avatar-card list.
   layout: (opt) => ({ key: 'layout', value: getAfter(opt, 'layout').trim() }),

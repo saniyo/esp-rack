@@ -364,6 +364,12 @@ class Trend : public FieldSpec<Trend> {
   Trend& period(const char* p)          { return safe(Opt::HistDefault, p, ",;:|="); }   // initial, default live
   Trend& liveLabel(const char* s)       { return safe(Opt::HistLiveLabel, s, ",;:|="); } // e.g. "Since reset"
   Trend& unit(const char* u)            { return safe(Opt::Unit, u, ",;:|="); }          // y axis and tooltip
+  // A state key holding the epoch the Live data starts at ("since reset").
+  Trend& liveSince(const char* key)     { return safe(Opt::HistSince, key, ",;:|="); }
+  // 0 always inside the y axis, with a line at 0 (e.g. a current, + and -).
+  Trend& zero()                         { return putFlag1(Opt::Zero); }
+  // The plot's height in px (default 400).
+  Trend& height(int px)                 { return px > 0 ? putInt(Opt::Height, px) : *this; }
   // The history column of the last line() (server syntax: col, col[i],
   // col[min|avg|max]; default: the line's key) and its sign: -1 draws it
   // below 0, as the live push does.

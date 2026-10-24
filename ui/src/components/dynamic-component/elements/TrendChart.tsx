@@ -844,6 +844,21 @@ const TrendChart: React.FC<TrendChartProps> = ({ field, value = [], getSibling }
       yMax ?? tidy(Math.ceil((hi + yPad * span) / step) * step),
     ];
   }, [yMin, yMax, yPad, plotConfigs, hiddenLines, plotRows]);
+  // .zero(): 0 always inside the axis (a zero line is drawn too).
+  const zeroAxis = !!om.y0?.value;
+  const yDomainZ = useMemo<any>(() => {
+    if (!zeroAxis) return yDomain;
+    const [lo, hi] = yDomain ?? ['auto', 'auto'];
+    return [
+      typeof lo === 'number' ? Math.min(0, lo) : (m: number) => Math.min(0, m),
+      typeof hi === 'number' ? Math.max(0, hi) : (m: number) => Math.max(0, m),
+    ];
+  }, [zeroAxis, yDomain]);
+  const plotHeight = (om.hgt?.value as number | undefined) || 400;
+  const liveSinceKey = om.hsince?.value as string | undefined;
+  const liveSinceRaw = liveSinceKey ? getSibling?.(liveSinceKey) : undefined;
+  const liveSince = typeof liveSinceRaw === 'number' ? liveSinceRaw : typeof liveSinceRaw === 'string' ? Number(liveSinceRaw) : undefined;
+
   const chartMargin = useMemo(
     () => ({ top: vrefLines.length ? 20 : 5, right: 30, left: 20, bottom: 5 }),
     [vrefLines.length]
@@ -930,7 +945,8 @@ const TrendChart: React.FC<TrendChartProps> = ({ field, value = [], getSibling }
           >
             <CartesianGrid strokeDasharray="3 3" />
             <XAxis dataKey={xAxisKey} {...xAxisProps} />
-            <YAxis domain={yDomain} />
+            <YAxis domain={yDomainZ} />
+            {zeroAxis && <ReferenceLine y={0} stroke="#888" />}
             <Tooltip
               content={(props: RechartsTooltipProps<any, any>) => (
                 <CustomTooltipComponent
@@ -976,7 +992,8 @@ const TrendChart: React.FC<TrendChartProps> = ({ field, value = [], getSibling }
           >
             <CartesianGrid strokeDasharray="3 3" />
             <XAxis dataKey={xAxisKey} {...xAxisProps} />
-            <YAxis domain={yDomain} />
+            <YAxis domain={yDomainZ} />
+            {zeroAxis && <ReferenceLine y={0} stroke="#888" />}
             <Tooltip
               content={(props: RechartsTooltipProps<any, any>) => (
                 <CustomTooltipComponent
@@ -1046,7 +1063,8 @@ const TrendChart: React.FC<TrendChartProps> = ({ field, value = [], getSibling }
     tooltipLabel,
     renderRefLines,
     renderVRefLines,
-    yDomain,
+    yDomainZ,
+    zeroAxis,
     chartMargin,
   ]);
 
@@ -1061,6 +1079,7 @@ const TrendChart: React.FC<TrendChartProps> = ({ field, value = [], getSibling }
           iconName={(parsedOptions.optionMap as any).icon?.value as string | undefined}
           periods={histBinding.periods}
           liveLabel={histBinding.liveLabel}
+          liveSince={liveSince && Number.isFinite(liveSince) && liveSince > 1e9 ? liveSince : undefined}
           h={hist}
         />
       ) : (
@@ -1074,7 +1093,7 @@ const TrendChart: React.FC<TrendChartProps> = ({ field, value = [], getSibling }
         <Box
           sx={{
             width: '100%',
-            height: 400,
+            height: plotHeight,
             border: '1px solid #ccc',
             position: 'relative',
             overflow: 'visible',

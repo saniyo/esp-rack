@@ -26,10 +26,11 @@ interface Props {
   iconName?: string;
   periods: HistPeriod[];
   liveLabel: string;
+  liveSince?: number;  // epoch s the Live data starts at (.liveSince())
   h: HistoryState;
 }
 
-const TrendHistoryBar: React.FC<Props> = ({ title, iconName, periods, liveLabel, h }) => {
+const TrendHistoryBar: React.FC<Props> = ({ title, iconName, periods, liveLabel, liveSince, h }) => {
   const boxRef = useRef<HTMLDivElement>(null);
   const dateRef = useRef<HTMLInputElement>(null);
   const [width, setWidth] = useState(WIDE);
@@ -53,6 +54,10 @@ const TrendHistoryBar: React.FC<Props> = ({ title, iconName, periods, liveLabel,
     return `${pad(w.d)}.${pad(w.mo)}`;
   };
   const dmy = (t: number) => `${dm(t)}.${wallParts(t, h.zone).y}`;
+  const hm = (t: number) => {
+    const w = wallParts(t, h.zone);
+    return `${pad(w.h)}:${pad(w.mi)}`;
+  };
 
   const openPicker = () => {
     const el = dateRef.current;
@@ -133,6 +138,7 @@ const TrendHistoryBar: React.FC<Props> = ({ title, iconName, periods, liveLabel,
         }}
       />
       {liveLabel}
+      {liveSince !== undefined ? ` · since ${dmy(liveSince)} ${hm(liveSince)}` : ''}
     </Box>
   );
 

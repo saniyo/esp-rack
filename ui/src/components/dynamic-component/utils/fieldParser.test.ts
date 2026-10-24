@@ -88,6 +88,14 @@ describe('Trend', () => {
     expect(lines).not.toContain('hist=');
   });
 
+  it('reads the zero line, the height and the live start key', () => {
+    const p = parseFieldOptions('bt_i', 'trend;r;mode=lineChart;xAxis=timestamp;lines=i:color=#1e88e5,type=monotone;y0=1;hgt=160;hsince=st_since');
+    expect(p.optionMap.y0?.value).toBe(true);
+    expect(p.optionMap.hgt?.value).toBe(160);
+    expect(p.optionMap.hsince?.value).toBe('st_since');
+    expect((p.optionMap.lines?.value as string).split(';')).toHaveLength(1);
+  });
+
   it('marks a dropdown with string values', () => {
     const p = parseFieldOptions('port', 'dropdown;rw;options=can0:can0,can9 (not in this firmware):can9;sv');
     expect(p.optionMap.sv?.value).toBe(true);
