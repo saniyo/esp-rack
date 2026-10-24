@@ -279,6 +279,18 @@ static void test_names_and_columns(void) {
   TEST_ASSERT_FALSE(findColumn(kJk, "in_mah[96]", 10, col, el));
   TEST_ASSERT_FALSE(findColumn(kJk, "nope", 4, col, el));
   TEST_ASSERT_FALSE(findColumn(kJk, "in_mah[x]", 9, col, el));
+  TEST_ASSERT_TRUE(findColumn(kJk, "in_mah[min]", 11, col, el));
+  TEST_ASSERT_EQUAL_INT(kRowMin, el);
+  TEST_ASSERT_TRUE(findColumn(kJk, "out_mah[avg]", 12, col, el));
+  TEST_ASSERT_EQUAL_INT(kRowAvg, el);
+  TEST_ASSERT_TRUE(findColumn(kJk, "out_mah[max]", 12, col, el));
+  TEST_ASSERT_EQUAL_INT(kRowMax, el);
+  const double row[4] = {3300, NAN, 3290, 3310};
+  TEST_ASSERT_DOUBLE_WITHIN(1e-9, 3290, rowDerived(row, 4, kRowMin));
+  TEST_ASSERT_DOUBLE_WITHIN(1e-9, 3300, rowDerived(row, 4, kRowAvg));  // the unknown cell doesn't count
+  TEST_ASSERT_DOUBLE_WITHIN(1e-9, 3310, rowDerived(row, 4, kRowMax));
+  const double none[2] = {NAN, NAN};
+  TEST_ASSERT_TRUE(isnan(rowDerived(none, 2, kRowAvg)));
 
   TEST_ASSERT_EQUAL_STRING("sum", histAggName(HistAgg::Sum));
   TEST_ASSERT_EQUAL_STRING("i64", histTypeName(HistType::I64));

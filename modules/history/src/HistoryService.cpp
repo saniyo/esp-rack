@@ -112,6 +112,8 @@ void emitRow(void* ctx, uint32_t t, const double* v, uint16_t) {
     const double* cv = v + p->offsets[p->picks[i].col];
     if (p->picks[i].element >= 0) {
       putNumber(row, cv[p->picks[i].element]);
+    } else if (p->picks[i].element <= ESPRack::hist::kRowMin) {
+      putNumber(row, ESPRack::hist::rowDerived(cv, c.width, p->picks[i].element));
     } else if (c.width == 1) {
       putNumber(row, cv[0]);
     } else {
@@ -485,17 +487,19 @@ void HistoryService::sendRows(AsyncWebServerRequest* r, Series* s) {
   JsonArray cols = root.createNestedArray("cols");
   cols.add("t");
   for (const Pick& p : picks) {
-    if (p.element < 0) {
+    char k[48];
+    if (p.element == ESPRack::hist::kAll) {
       cols.add(def.cols[p.col].key);
-    } else {
-      char k[48];
-      snprintf(k, sizeof k, "%s[%d]", def.cols[p.col].key, p.element);
-      cols.add(String(k));
+      continue;
     }
+    if (p.element >= 0) snprintf(k, sizeof k, "%s[%d]", def.cols[p.col].key, p.element);
+    else snprintf(k, sizeof k, "%s[%s]", def.cols[p.col].key,
+                  p.element == ESPRack::hist::kRowMin ? "min" : p.element == ESPRack::hist::kRowAvg ? "avg" : "max");
+    cols.add(String(k));
   }
 
   size_t slots = 2;  // the row array and t
-  for (const Pick& p : picks) slots += (p.element >= 0 || def.cols[p.col].width == 1) ? 1 : def.cols[p.col].width + 1;
+  for (const Pick& p : picks) slots += (p.element != ESPRack::hist::kAll || def.cols[p.col].width == 1) ? 1 : def.cols[p.col].width + 1;
   Page page{&def, picks.data(), picks.size(), offsets.data(), root.createNestedArray("rows"), root, capacity,
             slots * kSlot};
   std::vector<double> v(n), acc, out;

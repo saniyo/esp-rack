@@ -136,9 +136,15 @@ void retention(const SegInfo* segs, size_t n, uint32_t now, uint32_t keepS, uint
 // YYYYMM for daily or longer buckets and for put-series.
 uint32_t segmentKey(uint32_t t, uint32_t bucketS);
 
-// The schema-independent column lookup for queries: the column `key` and an
-// optional element "key[5]". false when there is no such column / element.
+// The schema-independent column lookup for queries: "key" (the whole
+// column), "key[5]" (one element) or "key[min]" / "key[avg]" / "key[max]"
+// (derived over the row's elements, unknown ones skipped). element is the
+// index, kAll or one of the derived codes. false: no such column / element.
+constexpr int kAll = -1, kRowMin = -2, kRowAvg = -3, kRowMax = -4;
 bool findColumn(const HistSeriesDef& def, const char* spec, size_t specLen, uint8_t& col, int& element);
+// The derived value of a row's elements (kRowMin/kRowAvg/kRowMax); NaN when
+// none is known.
+double rowDerived(const double* v, uint16_t n, int code);
 
 }  // namespace hist
 }  // namespace ESPRack

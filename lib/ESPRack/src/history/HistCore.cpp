@@ -461,6 +461,22 @@ uint32_t segmentKey(uint32_t t, uint32_t bucketS) {
   return (y * 100 + m) * 100 + d;
 }
 
+double rowDerived(const double* v, uint16_t n, int code) {
+  double acc = 0;
+  uint16_t k = 0;
+  for (uint16_t i = 0; i < n; ++i) {
+    const double x = v[i];
+    if (isnan(x)) continue;
+    if (!k) acc = x;
+    else if (code == kRowMin) acc = x < acc ? x : acc;
+    else if (code == kRowMax) acc = x > acc ? x : acc;
+    else acc += x;
+    ++k;
+  }
+  if (!k) return NAN;
+  return code == kRowAvg ? acc / k : acc;
+}
+
 bool findColumn(const HistSeriesDef& def, const char* spec, size_t specLen, uint8_t& col, int& element) {
   size_t keyLen = specLen;
   element = -1;
@@ -468,6 +484,12 @@ bool findColumn(const HistSeriesDef& def, const char* spec, size_t specLen, uint
     if (spec[i] != '[') continue;
     keyLen = i;
     if (specLen < i + 3 || spec[specLen - 1] != ']') return false;
+    const char* in = spec + i + 1;
+    const size_t inLen = specLen - i - 2;
+    if (inLen == 3 && (!strncmp(in, "min", 3) || !strncmp(in, "avg", 3) || !strncmp(in, "max", 3))) {
+      element = in[1] == 'i' ? kRowMin : in[1] == 'v' ? kRowAvg : kRowMax;
+      break;
+    }
     int e = 0;
     for (size_t j = i + 1; j + 1 < specLen; ++j) {
       if (spec[j] < '0' || spec[j] > '9') return false;
