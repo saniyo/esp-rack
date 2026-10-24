@@ -60,6 +60,12 @@ class HwRegistry;          // hw/HwRegistry.h — owned by App
 // it themselves if the loop doesn't respond within 3 s. Without an App it
 // is a plain esp_restart(). Never returns.
 //
+// Deadline: the chip resets within ESPRACK_RESTART_DEADLINE_MS (30 s, or the
+// hooks' total budget + 5 s when that is longer) whatever a hook does, and
+// within it again once afterShutdown starts. A hook that hangs (the loop
+// watchdog is paused for them) can't keep the device down. Also for a reset
+// that bypasses restartDevice (esp_restart from a library).
+//
 // `afterShutdown` (optional) runs once, AFTER every onShutdown() and right
 // before the chip resets — e.g. factory reset wipes /config there, so a
 // module that persists state in onShutdown() can't resurrect the files.
@@ -234,6 +240,7 @@ class App {
   void runAfterShutdownOnce();             // runs it, or waits for the task that does
   bool waitHooks(uint32_t ms) const;       // true when the hooks finished in time
   uint32_t shutdownGraceMs() const;
+  uint32_t restartDeadlineMs() const;      // the hooks' share of the deadline
   static void onEspShutdown();             // esp_register_shutdown_handler hook
   std::function<void()> afterShutdown_;
   std::atomic<uint8_t> afterState_ {0};    // 0 not started, 1 running, 2 done

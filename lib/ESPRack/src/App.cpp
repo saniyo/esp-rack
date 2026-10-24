@@ -117,6 +117,29 @@ void resolveLastRestartReason() {
 }
 }  // namespace
 
+#ifndef ESPRACK_RESTART_DEADLINE_MS
+// A restart resets the chip within this, whatever the hooks do (App.h).
+#define ESPRACK_RESTART_DEADLINE_MS 30000
+#endif
+
+namespace {
+// The restart deadline: one esp_timer, created in App::begin(), started by
+// every restart path. Never stopped — the chip resets before it fires, or it
+// resets the chip.
+esp_timer_handle_t s_deadline = nullptr;
+
+void deadlinePassed(void*) {
+  log_e("[restart] deadline passed — a shutdown step hangs, resetting now");
+  esp_restart();  // the hooks are already claimed: straight to the reset
+}
+
+void armRestartDeadline(uint32_t ms) {
+  if (!s_deadline) return;
+  (void)esp_timer_stop(s_deadline);  // ESP_ERR_INVALID_STATE when not running
+  (void)esp_timer_start_once(s_deadline, (uint64_t)ms * 1000);
+}
+}  // namespace
+
 #ifndef ESPRACK_SHUTDOWN_BUDGET_MS
 // Per-module onShutdown() budget. Not preemptive (a hook can't be
 // interrupted) — an overrun is logged so the offending module shows up.
@@ -251,6 +274,13 @@ void App::begin() {
   loopTask_ = xTaskGetCurrentTaskHandle();
   if (esp_register_shutdown_handler(&App::onEspShutdown) != ESP_OK) {
     log_w("[restart] esp_register_shutdown_handler failed — only restartDevice() runs onShutdown");
+  }
+  if (!s_deadline) {
+    const esp_timer_create_args_t args{&deadlinePassed, nullptr, ESP_TIMER_TASK, "restart-dl", false};
+    if (esp_timer_create(&args, &s_deadline) != ESP_OK) {
+      s_deadline = nullptr;
+      log_w("[restart] no deadline timer — a hanging onShutdown() can keep the device down");
+    }
   }
 
   // Time first (SES-LIB-002): restores a soft-reset hold and owns the TZ
@@ -662,7 +692,8 @@ bool App::runShutdownOnce(const char* reason) {
     return true;
   }
   begun_ = false;                             // App::loop stops ticking modules
-  // The hooks may take longer than the loop watchdog's 5 s in total.
+  // The hooks may take longer than the loop watchdog in total; the restart
+  // deadline (restartDevice) bounds them instead.
   LoopWdt::pause();
   log_w("[restart] graceful shutdown (reason=%s)", reason ? reason : "?");
   // Reverse install order so dependents tear down first.
@@ -693,6 +724,13 @@ uint32_t App::shutdownGraceMs() const {
   return (uint32_t)modules_.size() * ESPRACK_SHUTDOWN_BUDGET_MS + 2000;
 }
 
+uint32_t App::restartDeadlineMs() const {
+  // Longer than an off-loop caller's own patience (3 s handoff + grace), so
+  // its orderly takeover (abandon the hooks, still run afterShutdown) wins.
+  const uint32_t need = 3000 + shutdownGraceMs() + 5000;
+  return need > ESPRACK_RESTART_DEADLINE_MS ? need : ESPRACK_RESTART_DEADLINE_MS;
+}
+
 bool App::waitHooks(uint32_t ms) const {
   const uint32_t t0 = millis();
   while (!hooksDone_.load() && millis() - t0 < ms) vTaskDelay(pdMS_TO_TICKS(20));
@@ -702,7 +740,10 @@ bool App::waitHooks(uint32_t ms) const {
 void App::runAfterShutdownOnce() {
   uint8_t expected = 0;
   if (afterState_.compare_exchange_strong(expected, 1)) {
-    if (afterShutdown_) afterShutdown_();
+    if (afterShutdown_) {
+      armRestartDeadline(ESPRACK_RESTART_DEADLINE_MS);  // its own allowance
+      afterShutdown_();
+    }
     afterState_ = 2;
     return;
   }
@@ -723,7 +764,11 @@ void App::finishAndRestart() {
 }
 
 void App::onEspShutdown() {
-  if (s_app) s_app->runShutdownOnce("idf");  // esp_restart() outside restartDevice()
+  // esp_restart() outside restartDevice(): the hooks run here, in that task.
+  if (s_app && !s_app->shutdownDone_.load()) {
+    armRestartDeadline(s_app->restartDeadlineMs());
+    s_app->runShutdownOnce("idf");
+  }
 }
 
 const char* restartReason() {
@@ -748,8 +793,8 @@ void restartDevice(const char* reason, std::function<void()> afterShutdown) {
       a->loopTask_ && xTaskGetCurrentTaskHandle() == static_cast<TaskHandle_t>(a->loopTask_);
   // Off the loop task this caller parks for seconds (handoff + hook budget).
   // async_tcp — where the restart/factory-reset/restore handlers run — is
-  // subscribed to the task watchdog (5 s, panic): unsubscribe, the device
-  // reboots anyway. Harmless (ESP_ERR_NOT_FOUND) for unsubscribed tasks.
+  // subscribed to the task watchdog (panic): unsubscribe, the device reboots
+  // anyway (the restart deadline below guarantees it). Harmless (ESP_ERR_NOT_FOUND) for unsubscribed tasks.
   if (!onLoop) (void)esp_task_wdt_delete(nullptr);
 
   // First caller wins. A later caller (any task) just waits for the reset
@@ -764,6 +809,7 @@ void restartDevice(const char* reason, std::function<void()> afterShutdown) {
   // Survives the reset: lastRestartReason() of the next boot (SES-LIB-007).
   // Written before the hooks, so a hook that hangs doesn't lose it.
   storeRestartRecord(a->restartReason_);
+  armRestartDeadline(a->restartDeadlineMs());
 
   if (!a->begun_ || onLoop) a->finishAndRestart();
 
