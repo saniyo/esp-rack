@@ -626,6 +626,7 @@ void HistoryService::registerManifest(WebManager* web) {
           .component(WebComponent::DynamicSettings)
           .authenticated()
           .menu(WebMenu("History").icon("History").order(150).expandTabs(false))
+          .tab(WebTab("view", "View").icon("ShowChart").component("HistoryViewer"))
           .tab(WebTab("status", "Status").icon("Assessment"))
           .tab(WebTab("settings", "Settings").icon("Settings").postable().adminWrite())
           .build(),
