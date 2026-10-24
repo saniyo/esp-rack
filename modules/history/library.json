@@ -1,0 +1,21 @@
+{
+  "name": "HistoryModule",
+  "version": "0.1.0",
+  "description": "ESPRack module: history — time series on flash without wearing it out. IHistoryProvider (App::history()): series of columns (sum/avg/min/max/last, arrays per cell) with rollup tiers and retention, or put-series of exact records; buffered in RAM (PSRAM when present), written in batches by its own task while PowerGuard allows, served at /api/v1/history/series. History page: storage, writes against a daily budget, wear estimate, series.",
+  "license": "MIT",
+  "frameworks": [
+    "arduino"
+  ],
+  "platforms": [
+    "espressif32"
+  ],
+  "dependencies": [
+    {
+      "name": "ESPRack"
+    }
+  ],
+  "build": {
+    "srcDir": "src",
+    "includeDir": "include"
+  }
+}
