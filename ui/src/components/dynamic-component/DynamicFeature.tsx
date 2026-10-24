@@ -43,6 +43,8 @@ interface DynamicTabPanelProps {
     // Counter that bumps on every inbound WS frame. Drives the
     // LiveIndicator's per-message pulse animation — see TabActionsBar.
     messageTick: number;
+    // Keys whose arrays are full sets, for coalescing (useWsChannel).
+    registerReplaceKeys: (keys: string[]) => () => void;
   };
 }
 
@@ -170,6 +172,19 @@ const DynamicTabPanel: FC<DynamicTabPanelProps> = ({ tab, ws, statePath }) => {
     [update, save]
   );
 
+  // A field committed on a live, postable tab goes through the same REST
+  // write as a Settings save: the device answers, a refusal shows up as a
+  // snackbar and the form is read again so the field shows the device's
+  // value. (Over the socket a write had no answer: a refused or lost one
+  // left the field showing a value the device didn't take.)
+  const handleSaveLiveField = useCallback(
+    async (patch: Record<string, any>) => {
+      if (!update) return;
+      if (!(await save(patch))) void loadData({ silent: true });
+    },
+    [update, save, loadData]
+  );
+
   if (!formData || !Array.isArray((formData as any).fields)) {
     return <FormLoader message={`Loading ${tab.title ?? tab.key}…`} errorMessage={errorMessage} />;
   }
@@ -187,6 +202,8 @@ const DynamicTabPanel: FC<DynamicTabPanelProps> = ({ tab, ws, statePath }) => {
           setData={handleUpdateData}
           disconnect={ws.disconnect}
           updateWsData={ws.updateWsData}
+          saveField={tab.postable ? handleSaveLiveField : undefined}
+          registerReplaceKeys={ws.registerReplaceKeys}
           messageTick={ws.messageTick}
         />
       </DynamicFormContext.Provider>
@@ -244,7 +261,7 @@ const DynamicFeature: FC<DynamicFeatureProps> = ({ featureId, fallback }) => {
     return undefined;
   }, [entry?.ch, entry?.ws]);
 
-  const { connected, wsData, updateData: updateWsData, disconnect, messageTick } =
+  const { connected, wsData, updateData: updateWsData, disconnect, messageTick, registerReplaceKeys } =
     useWsChannel<any>(channel);
 
   const [originId, setOriginId] = useState<string>('');
@@ -253,7 +270,7 @@ const DynamicFeature: FC<DynamicFeatureProps> = ({ featureId, fallback }) => {
   }, [wsData]);
 
   const wsBundle = channel
-    ? { connected, wsData, originId, updateWsData, disconnect, messageTick }
+    ? { connected, wsData, originId, updateWsData, disconnect, messageTick, registerReplaceKeys }
     : undefined;
 
   if (!entry) return <FormLoader message="Loading feature…" />;

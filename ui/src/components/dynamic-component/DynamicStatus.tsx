@@ -2,7 +2,7 @@
 import { HeadingContext } from './HeadingContext';
 import { visibleHeading } from './utils/formLayout';
 import { markerFromRaw } from './utils/formLayout';
-import React, { FC, useEffect, useState, useCallback, useRef, useContext } from 'react';
+import React, { FC, useEffect, useMemo, useState, useCallback, useRef, useContext } from 'react';
 import DynamicContentHandler from './DynamicContentHandler';
 import TabActionsBar from './TabActionsBar';
 import { SectionContent } from '../../components';
@@ -25,11 +25,17 @@ interface DynamicStatusProps {
   // frame. Forwarded to LiveIndicator so its dot pulses once per
   // received message instead of pulsing constantly while connected.
   messageTick?: number;
+  // A postable tab writes a committed field through REST (the device answers;
+  // see DynamicFeature). Without it the field goes over the socket.
+  saveField?: (patch: Record<string, any>) => void | Promise<void>;
+  // Tells the channel which arrays are full sets (category trends,
+  // replace-mode tables), so coalesced frames don't concatenate them.
+  registerReplaceKeys?: (keys: string[]) => () => void;
 }
 
 const DynamicStatus: FC<DynamicStatusProps> = ({
   formName, data, wsData, connected,
-  originId, updateWsData, messageTick
+  originId, updateWsData, messageTick, saveField, registerReplaceKeys
 }) => {
   const seenHeadings = useContext(HeadingContext);  // SES-LIB-029c: no repeated titles
 
@@ -108,6 +114,23 @@ const DynamicStatus: FC<DynamicStatusProps> = ({
 
     setFormState({ title: formName, description: data.description, fields });
   }, [data, formName]);
+
+  // Arrays that every push sends whole: category trends and replace-mode
+  // tables (the default mode). Registered for this form's lifetime.
+  const fullSetKeys = useMemo(() => {
+    const keys: string[] = [];
+    formState.fields.forEach((f: any) => {
+      const o: string = f.o || '';
+      const base = f.baseLabel || f.label;
+      if (f.type === 'trend' && /(?:^|;)cat(?:;|$)/.test(o)) keys.push(base);
+      if (f.type === 'table' && (o.match(/mode=([^;]+)/)?.[1] || 'replace').trim() === 'replace') keys.push(base);
+    });
+    return keys.sort().join('|');
+  }, [formState.fields]);
+  useEffect(() => {
+    if (!registerReplaceKeys || !fullSetKeys) return;
+    return registerReplaceKeys(fullSetKeys.split('|'));
+  }, [registerReplaceKeys, fullSetKeys]);
 
   // WS apply (очікуємо boolean для двійкових)
   const applyWs = useCallback((ws: any) => {
@@ -216,7 +239,8 @@ const DynamicStatus: FC<DynamicStatusProps> = ({
     const uiVal = isBinary ? Boolean(val) : val;
 
     // по дроту відправляємо та ж boolean-семантика
-    updateWsData({ type: 'p', origin_id: originId, p: { [lbl]: uiVal } }, true);
+    if (saveField) void saveField({ [lbl]: uiVal });
+    else updateWsData({ type: 'p', origin_id: originId, p: { [lbl]: uiVal } }, true);
 
     // live кеш — boolean для двійкових
     setLiveValue(lbl, uiVal, 'ws');

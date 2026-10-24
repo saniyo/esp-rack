@@ -43,9 +43,10 @@ export const useRest = <D>({ read, update, refetchOnSave = false }: RestRequestO
     }
   }, [read, enqueueSnackbar]);
 
-  const save = useCallback(async (toSave: D) => {
+  // true when the device accepted the values.
+  const save = useCallback(async (toSave: D): Promise<boolean> => {
     if (!update) {
-      return;
+      return false;
     }
     setSaving(true);
     setErrorMessage(undefined);
@@ -57,10 +58,12 @@ export const useRest = <D>({ read, update, refetchOnSave = false }: RestRequestO
         setData(res.data);
       }
       enqueueSnackbar("Update successful", { variant: 'success' });
+      return true;
     } catch (error: any) {
       const message = extractErrorMessage(error, 'Problem saving data');
       enqueueSnackbar(message, { variant: 'error' });
       setErrorMessage(message);
+      return false;
     } finally {
       setSaving(false);
     }

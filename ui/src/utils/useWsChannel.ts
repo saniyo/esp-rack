@@ -15,10 +15,16 @@
 // from data rate — buffer frames in a ref and flush them on requestAnimationFrame.
 // React then re-renders at most once per paint and self-throttles when the
 // machine can't keep up (frames coalesce into fewer, fuller renders) instead of
-// falling behind. Array payloads (trend point batches, table row batches) are
-// CONCATENATED across coalesced frames so no live data is dropped; scalar fields
-// are last-write-wins (the newest snapshot is the truth). rAF also pauses while
+// falling behind. Array payloads that are increments (trend point batches,
+// appended or upserted table rows) are CONCATENATED across coalesced frames so
+// no live data is dropped; arrays a consumer registered as full sets (category
+// trends, replace-mode tables: registerReplaceKeys) and scalar fields are
+// last-write-wins (the newest snapshot is the truth). rAF also pauses while
 // the tab is hidden — no wasted renders in the background.
+//
+// Outbound writes are merged per key and sent at most every wsThrottle ms, so
+// fields edited in quick succession all go out; while the socket is down they
+// wait and go out when it is back.
 
 import { useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { throttle } from 'lodash';
@@ -34,8 +40,8 @@ const COALESCE_ARRAY_CAP = 300;
 
 // Merge a freshly-arrived payload `next` into the pending accumulator `acc`.
 // Arrays concat (keep newest within the cap) so coalesced frames lose no live
-// data; everything else is replaced by the newest value.
-const coalescePayload = (acc: any, next: any): any => {
+// data, unless `isFullSet(key)`: then, like everything else, the newest wins.
+export const coalescePayload = (acc: any, next: any, isFullSet: (key: string) => boolean = () => false): any => {
   if (next === undefined || next === null) return acc;
   if (typeof next !== 'object') return next;
   if (acc === undefined || acc === null || typeof acc !== 'object') {
@@ -46,7 +52,7 @@ const coalescePayload = (acc: any, next: any): any => {
   for (const k of Object.keys(next)) {
     const nv = (next as any)[k];
     const av = (out as any)[k];
-    if (Array.isArray(nv) && Array.isArray(av)) {
+    if (Array.isArray(nv) && Array.isArray(av) && !isFullSet(k)) {
       const merged = av.concat(nv);
       out[k] =
         merged.length > COALESCE_ARRAY_CAP
@@ -57,6 +63,15 @@ const coalescePayload = (acc: any, next: any): any => {
     }
   }
   return out;
+};
+
+// Merge an outbound write into the one waiting: the {p: {...}} dicts merge
+// per key, the rest of the envelope is the newest.
+export const mergeOutbound = (acc: any, next: any): any => {
+  if (acc && next && acc.p && next.p && typeof acc.p === 'object' && typeof next.p === 'object') {
+    return { ...next, p: { ...acc.p, ...next.p } };
+  }
+  return next;
 };
 
 export const useWsChannel = <D>(channel?: string, wsThrottle: number = 500) => {
@@ -80,12 +95,34 @@ export const useWsChannel = <D>(channel?: string, wsThrottle: number = 500) => {
   const ctxRef = useRef(ctx);
   ctxRef.current = ctx;
 
-  const doSend = useCallback((data: any) => {
+  // Writes waiting to go out, merged per key (mergeOutbound).
+  const outRef = useRef<any>(undefined);
+  const flushOut = useCallback(() => {
     const ch = chRef.current;
     const c = ctxRef.current;
-    if (ch && c) c.send(ch, data);
+    if (!ch || !c || outRef.current === undefined) return;
+    if (!c.connected) return;  // kept: sent when the socket is back
+    const data = outRef.current;
+    outRef.current = undefined;
+    c.send(ch, data);
   }, []);
-  const saveData = useRef(throttle(doSend, wsThrottle));
+  const saveData = useRef(throttle(flushOut, wsThrottle));
+
+  // Keys whose arrays are full sets on every push (see coalescePayload), with
+  // a count per registration so several consumers of a channel can share it.
+  const fullSetKeys = useRef<Map<string, number>>(new Map());
+  const isFullSet = useCallback((key: string) => fullSetKeys.current.has(key), []);
+  const registerReplaceKeys = useCallback((keys: string[]) => {
+    const m = fullSetKeys.current;
+    keys.forEach((k) => m.set(k, (m.get(k) || 0) + 1));
+    return () => {
+      keys.forEach((k) => {
+        const n = (m.get(k) || 0) - 1;
+        if (n > 0) m.set(k, n);
+        else m.delete(k);
+      });
+    };
+  }, []);
 
   // ── Inbound coalescing buffer + rAF flush ───────────────────────────────────
   const pendingRef = useRef<any>(undefined); // accumulated payload between paints
@@ -111,7 +148,7 @@ export const useWsChannel = <D>(channel?: string, wsThrottle: number = 500) => {
   useEffect(() => {
     if (!channel || !ctx) return;
     const onFrame = (msg: WsChannelMessage) => {
-      pendingRef.current = coalescePayload(pendingRef.current, msg.p);
+      pendingRef.current = coalescePayload(pendingRef.current, msg.p, isFullSet);
       if (msg.origin_id) pendingOriginRef.current = msg.origin_id;
       if (rafRef.current === null) {
         rafRef.current = window.requestAnimationFrame(flush);
@@ -127,11 +164,12 @@ export const useWsChannel = <D>(channel?: string, wsThrottle: number = 500) => {
       pendingRef.current = undefined;
       pendingOriginRef.current = undefined;
     };
-  }, [channel, ctx, flush]);
+  }, [channel, ctx, flush, isFullSet]);
 
-  // Mirror provider connection state.
+  // Mirror provider connection state; writes that waited go out on reconnect.
   useEffect(() => {
     setConnected(!!ctx?.connected);
+    if (ctx?.connected && outRef.current !== undefined) saveData.current();
   }, [ctx?.connected]);
 
   const updateData = (
@@ -146,7 +184,10 @@ export const useWsChannel = <D>(channel?: string, wsThrottle: number = 500) => {
 
   useEffect(() => {
     if (!transmit) return;
-    if (wsData) saveData.current(wsData);
+    if (wsData) {
+      outRef.current = mergeOutbound(outRef.current, wsData);
+      saveData.current();
+    }
     if (clear) setWsData(undefined);
     setTransmit(false);
     setClear(false);
@@ -163,6 +204,7 @@ export const useWsChannel = <D>(channel?: string, wsThrottle: number = 500) => {
     updateData,
     disconnect,
     messageTick,
+    registerReplaceKeys,
   } as const;
 };
 
