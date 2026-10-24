@@ -170,7 +170,9 @@ This is an audit snapshot of `feature/ses-light-support`, dated 2026-10-13:
   - Scan table: `ESPRACK_BLE_SCAN_ROWS` = 24 fixed rows. NimBLE keeps no results (`setMaxResults(0)`).
   - REST buffer 7168 B, because the scan rows are baked into GET `/form`; WS buffer 2048 B.
   - esp-rack-rd-neey, S3 N8, full module set: static RAM 76,088 B with the module and its static stack, against 69,528 B without it (still on its own NimBLE use). Flash +53 KB.
-  - The NimBLE host's own heap is not measured.
+  - The NimBLE host's own heap is not measured. The controller's internal
+    RAM is the binding cost on a busy S3 (consumer-guide §2.2, Bluetooth LE):
+    keep the radio off on such a device and switch it on when needed.
 - **Lifecycle:**
   - BootGuard safe mode keeps the radio off.
   - A settings save hands the new values to the task. Everything applies live:

@@ -154,6 +154,21 @@ Useful build flags for a consumer's `[env]`:
 - Without PSRAM, Wi-Fi, BLE and the web server don't fit together in an S3's
   internal RAM: the first page load failed with `WebResponses.cpp _ack():
   Failed to allocate`. Ship such a board with `-D FACTORY_BLE_ENABLED=false`.
+- **The radio takes internal RAM even with PSRAM.**
+  - `MEM_ALLOC_MODE_EXTERNAL` moves only the NimBLE host. The BT controller
+    allocates in internal RAM.
+  - On an S3 N16R8 running a full application (TLS for MQTT and Telegram,
+    two CAN tasks, live pages), the internal heap ran out with the radio on.
+    The pages answered "No contiguous heap for the response right now",
+    then the web server hung and the board restarted.
+  - The build's static RAM (+12 KB) says nothing about this. Measure
+    `heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)` with the radio
+    up and the busiest pages open.
+- **On such a device, keep the radio off and switch it on only while you
+  need it.**
+  - Ship with `-D FACTORY_BLE_ENABLED=false`, then use the Bluetooth page.
+  - Switching the radio off deinitialises the stack and gives the
+    controller's memory back.
 
 **Native USB console** (`ARDUINO_USB_CDC_ON_BOOT=1`): after a reset the port
 enumerates again, and the first boot lines are lost before the monitor
