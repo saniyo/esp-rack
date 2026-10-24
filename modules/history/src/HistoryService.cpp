@@ -16,6 +16,9 @@
 #include <string.h>
 #include <time.h>
 
+#include <memory>
+#include <new>
+
 #include "HistSeriesImpl.h"
 
 using ESPRack::HistSeriesDef;
@@ -134,6 +137,196 @@ bool onRow(void* ctx, uint32_t t, const double* v) {
   if (r->ds) r->ds->feed(t, v);
   else emitRow(r->page, t, v, 0);
   return !r->page->full;
+}
+
+// cols=a,b[5],c[min]: the picks, or every column when absent. false: an
+// unknown column (the 400 is sent).
+bool parseCols(AsyncWebServerRequest* r, const HistSeriesDef& def, std::vector<Pick>& picks) {
+  if (!r->hasParam("cols")) {
+    for (uint8_t i = 0; i < def.nCols; ++i) picks.push_back({i, -1});
+    return true;
+  }
+  const String spec = r->getParam("cols")->value();
+  int start = 0;
+  while (start <= int(spec.length())) {
+    int comma = spec.indexOf(',', start);
+    if (comma < 0) comma = spec.length();
+    Pick p;
+    if (comma > start && ESPRack::hist::findColumn(def, spec.c_str() + start, size_t(comma - start), p.col, p.element)) {
+      picks.push_back(p);
+    } else if (comma > start) {
+      sendProblem(r, 400, "bad_request", "Unknown column in cols");
+      return false;
+    }
+    start = comma + 1;
+  }
+  return true;
+}
+
+// GET .../<id>?format=csv: the same rows as CSV, streamed in chunks (no page
+// limit). Each chunk reads on from where the last one stopped; a row that
+// doesn't fit waits in `pending`. A whole width-N column becomes N columns
+// key[0]...key[N-1]; an unknown value is an empty field.
+struct CsvJob {
+  Series* s = nullptr;
+  const HistSeriesDef* def = nullptr;
+  uint8_t tier = 0;
+  uint32_t cursor = 0, to = 0, res = 0;
+  bool downsample = false;
+  std::vector<Pick> picks;
+  std::vector<uint16_t> offsets;
+  std::vector<double> v, acc, out;
+  std::vector<uint32_t> cnt;
+  std::vector<uint8_t> rec;
+  std::unique_ptr<ESPRack::hist::Downsampler> ds;
+  String pending;
+  size_t pos = 0;
+  size_t room = 0;        // what the current chunk can still take
+  bool stop = false;
+  bool finished = false;  // every row is in `pending` or sent
+
+  void header() {
+    pending = "t,time";
+    for (const Pick& p : picks) {
+      const ESPRack::HistColumn& c = def->cols[p.col];
+      char k[48];
+      if (p.element >= 0) {
+        snprintf(k, sizeof k, ",%s[%d]", c.key, p.element);
+        pending += k;
+      } else if (p.element <= ESPRack::hist::kRowMin) {
+        snprintf(k, sizeof k, ",%s[%s]", c.key,
+                 p.element == ESPRack::hist::kRowMin ? "min" : p.element == ESPRack::hist::kRowAvg ? "avg" : "max");
+        pending += k;
+      } else if (c.width == 1) {
+        pending += ',';
+        pending += c.key;
+      } else {
+        for (uint16_t e = 0; e < c.width; ++e) {
+          snprintf(k, sizeof k, ",%s[%u]", c.key, unsigned(e));
+          pending += k;
+        }
+      }
+    }
+    pending += "\r\n";
+  }
+
+  static void num(String& line, double x) {
+    line += ',';
+    if (isnan(x)) return;
+    char b[24];
+    snprintf(b, sizeof b, "%.7g", x);
+    line += b;
+  }
+
+  void row(uint32_t t, const double* vals) {
+    char b[32];
+    snprintf(b, sizeof b, "%lu,", (unsigned long)t);
+    pending += b;
+    const time_t tt = time_t(t);
+    struct tm lt;
+    localtime_r(&tt, &lt);
+    strftime(b, sizeof b, "%Y-%m-%d %H:%M:%S", &lt);
+    pending += b;
+    for (const Pick& p : picks) {
+      const ESPRack::HistColumn& c = def->cols[p.col];
+      const double* cv = vals + offsets[p.col];
+      if (p.element >= 0) {
+        num(pending, cv[p.element]);
+      } else if (p.element <= ESPRack::hist::kRowMin) {
+        num(pending, ESPRack::hist::rowDerived(cv, c.width, p.element));
+      } else {
+        for (uint16_t e = 0; e < c.width; ++e) num(pending, cv[e]);
+      }
+    }
+    pending += "\r\n";
+    // The next chunk reads on after this row (a group: after its bucket;
+    // res 0 is one group for the whole period).
+    cursor = !downsample ? t + 1 : res ? t + res : 0xFFFFFFFF;
+    if (pending.length() - pos >= room) stop = true;
+  }
+
+  static void onGroup(void* ctx, uint32_t t, const double* vals, uint16_t) {
+    CsvJob* j = static_cast<CsvJob*>(ctx);
+    if (!j->stop) j->row(t, vals);
+  }
+  static bool onRow(void* ctx, uint32_t t, const double* vals) {
+    CsvJob* j = static_cast<CsvJob*>(ctx);
+    if (j->ds) j->ds->feed(t, vals);
+    else j->row(t, vals);
+    return !j->stop;
+  }
+
+  size_t fill(uint8_t* buf, size_t maxLen) {
+    size_t n = 0;
+    auto drain = [&]() {
+      const size_t left = pending.length() - pos;
+      const size_t k = maxLen - n < left ? maxLen - n : left;
+      memcpy(buf + n, pending.c_str() + pos, k);
+      n += k;
+      pos += k;
+      if (pos == pending.length()) {
+        pending = "";
+        pos = 0;
+      }
+    };
+    drain();
+    while (n < maxLen && !finished) {
+      room = maxLen - n;
+      stop = false;
+      if (cursor > to) {
+        finished = true;
+      } else {
+        if (downsample) {
+          ds.reset(new (std::nothrow) ESPRack::hist::Downsampler());
+          if (!ds) return n;  // no memory: end the file here
+          ds->attach(*def, res, acc.data(), cnt.data(), out.data(), s->nValues(tier), onGroup, this);
+        }
+        s->read(ESPFS, tier, cursor, to, v.data(), rec.data(), onRow, this);
+        if (!stop) {
+          if (ds) ds->finish();
+          finished = true;
+        }
+        ds.reset();
+      }
+      drain();
+    }
+    return n;
+  }
+};
+
+void sendCsv(AsyncWebServerRequest* r, Series* s, uint32_t from, uint32_t to, bool hasRes, uint32_t res,
+             uint8_t tier) {
+  std::shared_ptr<CsvJob> j(new (std::nothrow) CsvJob());
+  if (!j) {
+    sendProblem(r, 503, "heap_pressure", "No memory for the export", 1);
+    return;
+  }
+  const HistSeriesDef& def = s->def();
+  if (!parseCols(r, def, j->picks)) return;
+  j->s = s;
+  j->def = &def;
+  j->tier = tier;
+  j->cursor = from;
+  j->to = to;
+  j->res = res;
+  j->downsample = hasRes && (res == 0 || res > def.tiers[tier].bucketS);
+  j->offsets.resize(def.nCols);
+  for (uint8_t i = 0, at = 0; i < def.nCols; at += def.cols[i].width, ++i) j->offsets[i] = at;
+  const uint16_t n = s->nValues(tier);
+  j->v.resize(n);
+  j->rec.resize(4 + 8 * n + 2);
+  if (j->downsample) {
+    j->acc.resize(n);
+    j->out.resize(n);
+    j->cnt.resize(n);
+  }
+  j->header();
+  AsyncWebServerResponse* resp = r->beginChunkedResponse(
+      "text/csv", [j](uint8_t* buf, size_t maxLen, size_t) -> size_t { return j->fill(buf, maxLen); });
+  char cd[96];
+  snprintf(cd, sizeof cd, "attachment; filename=\"%s.csv\"", def.id);
+  resp->addHeader("Content-Disposition", cd);
+  r->send(resp);
 }
 
 }  // namespace
@@ -457,30 +650,18 @@ void HistoryService::sendRows(AsyncWebServerRequest* r, Series* s) {
   const bool hasRes = r->hasParam("res");
   const uint32_t res = param("res", 0);
 
+  const uint8_t tier = s->pickTier(from, now);
+  if (r->hasParam("format") && r->getParam("format")->value() == "csv") {
+    sendCsv(r, s, from, to, hasRes, res, tier);
+    return;
+  }
+
   // Columns: all, or the listed ones ("a,b[5]").
   std::vector<Pick> picks;
-  if (r->hasParam("cols")) {
-    const String spec = r->getParam("cols")->value();
-    int start = 0;
-    while (start <= int(spec.length())) {
-      int comma = spec.indexOf(',', start);
-      if (comma < 0) comma = spec.length();
-      Pick p;
-      if (comma > start && ESPRack::hist::findColumn(def, spec.c_str() + start, size_t(comma - start), p.col, p.element)) {
-        picks.push_back(p);
-      } else if (comma > start) {
-        sendProblem(r, 400, "bad_request", "Unknown column in cols");
-        return;
-      }
-      start = comma + 1;
-    }
-  } else {
-    for (uint8_t i = 0; i < def.nCols; ++i) picks.push_back({i, -1});
-  }
+  if (!parseCols(r, def, picks)) return;
   std::vector<uint16_t> offsets(def.nCols);
   for (uint8_t i = 0, at = 0; i < def.nCols; at += def.cols[i].width, ++i) offsets[i] = at;
 
-  const uint8_t tier = s->pickTier(from, now);
   const uint16_t n = s->nValues(tier);
   const size_t capacity = _psram ? kDocLarge : kDocSmall;
   AsyncJsonResponse* resp = new AsyncJsonResponse(false, capacity);

@@ -151,7 +151,9 @@ class IHistoryProvider {
     cell.
   - A page stays within the DataApi pool (4096 B). The async_tcp stack is
     6 KB, so nothing large goes on the stack.
-- `GET /api/v1/history/<id>.csv?from&to&res` is streamed.
+- `GET /api/v1/history/series/<id>?format=csv&from&to&res&cols` streams the
+  same rows as CSV (`t`, local `time`, then the columns; a width-N column
+  as N columns; unknown = an empty field), without the page limit.
 
 ## Form DSL and UI
 
