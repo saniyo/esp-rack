@@ -29,7 +29,21 @@
 #include <ESPAsyncWebServer.h>
 #include <AsyncJson.h>
 #include <ProblemJson.h>
+#include <esp_heap_caps.h>
 #include <functional>
+
+// The largest doc of `size` bytes the heap can give right now. With PSRAM
+// and the malloc policy that sends blocks above ALWAYSINTERNAL there, a big
+// doc is limited by the PSRAM block, not the internal one (gating on the
+// internal block 503'd S3 pages that PSRAM could serve).
+inline size_t adaptiveJsonCeiling(size_t size) {
+#if defined(CONFIG_SPIRAM_USE_MALLOC) && defined(CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL)
+  if (size > CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL && ESP.getPsramSize() > 0) {
+    return heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  }
+#endif
+  return ESP.getMaxAllocHeap();
+}
 
 inline bool sendAdaptiveJson(AsyncWebServerRequest* request,
                              const std::function<void(JsonObject&)>& fill,
@@ -44,7 +58,7 @@ inline bool sendAdaptiveJson(AsyncWebServerRequest* request,
 
   size_t want = startBytes < kMinDoc ? kMinDoc : startBytes;
   for (int attempt = 0; attempt < kAttempts; ++attempt) {
-    const size_t ceiling = ESP.getMaxAllocHeap();
+    const size_t ceiling = adaptiveJsonCeiling(want);
     if (ceiling < kMinDoc + kSlack) break;  // genuinely too tight — shed
     size_t size = want;
     // Under pressure clamp DOWN to what fits; the check above guarantees
