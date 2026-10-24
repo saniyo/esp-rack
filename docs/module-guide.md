@@ -534,9 +534,14 @@ Rules worth knowing:
   (`WebFeatureDelegate.h:112-118`, `174`); any non-empty string works.
 - Envelope (`WsManager.h:11-17`):
   - client → server: `sub`, `unsub`, `p` (write)
-  - server → client: `id`, `p` (push and snapshot)
+  - server → client: `id`, `p` (push and snapshot), `hb`
   - The server sends a snapshot to a client when it subscribes. There is no
     replay buffer.
+  - Every 5 s (`WS_HEARTBEAT_MS`) each client gets `{"type":"hb"}`. After 15 s
+    without any frame the UI reconnects and subscribes again.
+  - A client whose queue stays full for 20 s (`WS_STUCK_MS`) is stuck. Its
+    connection is aborted. System → Sockets shows the count as
+    `stuck_evictions`, and `slow_s` per client.
 - **What gets pushed** is your state reader's output: a flat object.
   - **Trend:** emit an array under the trend's key with one point
     `{timestamp, <lineKey>: value}` per push (template `readState`;

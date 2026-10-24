@@ -80,6 +80,19 @@
 #define WS_BACKPRESSURE_THRESHOLD (WS_MAX_QUEUED_MESSAGES / 2)
 #endif
 
+// App-level heartbeat: every WS_HEARTBEAT_MS each client gets {"type":"hb"},
+// so the UI can tell a quiet channel from a dead socket (it reconnects after
+// a few missed beats). A client whose queue stays at the back-pressure
+// threshold for WS_STUCK_MS is stuck — the browser would keep showing Live
+// with no data until a reload — and its connection is aborted, so the UI
+// reconnects and subscribes again.
+#ifndef WS_HEARTBEAT_MS
+#define WS_HEARTBEAT_MS 5000
+#endif
+#ifndef WS_STUCK_MS
+#define WS_STUCK_MS 20000
+#endif
+
 // ---- Queue items ----
 // Tx: cid==0 means "fan out to every client SUBSCRIBED to `channel`";
 //     cid!=0 means "unicast to that client" (snapshot-on-subscribe).
@@ -334,6 +347,7 @@ class WsManager {
         c["last_rx_s"] = sinceSec(kv.second.lastRxMs);
         c["last_tx_s"] = kv.second.lastTxMs == 0 ? (uint32_t)0 : sinceSec(kv.second.lastTxMs);
         c["drops"]     = kv.second.droppedFrames;
+        c["slow_s"]    = sinceSec(kv.second.slowSinceMs);
       }
       j["count"] = cnt;
     }
@@ -349,6 +363,7 @@ class WsManager {
     root["total_broadcasts_dropped"] = totalBroadcastsDropped;
     root["total_overflow_frames"]    = totalOverflow;
     root["backpressure_threshold"]   = (uint32_t)WS_BACKPRESSURE_THRESHOLD;
+    root["stuck_evictions"]          = _stuckEvictions;
     root["backpressure_max"]         = (uint32_t)WS_MAX_QUEUED_MESSAGES;
   }
 
@@ -375,6 +390,10 @@ class WsManager {
         (millis() - _lastPingTs >= (unsigned long)_pingIntervalSec * 1000UL)) {
       pingAll();          // updates _lastPingTs
       checkInactive();
+    }
+    if (millis() - _lastHeartbeatMs >= WS_HEARTBEAT_MS) {
+      _lastHeartbeatMs = millis();
+      heartbeat();
     }
   }
 
@@ -459,6 +478,7 @@ class WsManager {
     uint32_t lastRxMs{0};
     uint32_t lastTxMs{0};
     uint32_t droppedFrames{0};   // frames skipped due to per-client back-pressure
+    uint32_t slowSinceMs{0};     // since when this client's queue is full (0 = it moves)
     std::set<String> subs;       // channels this client subscribed to
     // Resolved once at connect (see setSecurityManager).
     WebAuthLevel level{WebAuthLevel::Admin};
@@ -634,6 +654,8 @@ class WsManager {
   unsigned long _pongTimeoutMs;
   unsigned long _lastPingTs;
   std::map<uint32_t, unsigned long> _lastPong;
+  uint32_t _lastHeartbeatMs{0};
+  uint32_t _stuckEvictions{0};
 
   SemaphoreHandle_t _clientsMx = nullptr;
   struct ClientsLock {
@@ -762,10 +784,15 @@ class WsManager {
           AsyncWebSocketClient* c = _ws->client(kv.first);
           if (!c || c->status() != WS_CONNECTED) continue;
           const bool slow = !c->canSend() || c->queueLen() >= WS_BACKPRESSURE_THRESHOLD;
-          if (slow) { kv.second.droppedFrames++; continue; }
+          if (slow) {
+            kv.second.droppedFrames++;
+            if (!kv.second.slowSinceMs) kv.second.slowSinceMs = nowMs ? nowMs : 1;
+            continue;
+          }
           if (it->text) c->text(it->payload);
           else c->binary(reinterpret_cast<const uint8_t*>(it->payload.c_str()), it->payload.length());
           kv.second.lastTxMs = nowMs;
+          kv.second.slowSinceMs = 0;
         }
       } else {
         // Unicast (snapshot-on-subscribe).
@@ -774,11 +801,17 @@ class WsManager {
           auto cit = _clients.find(it->cid);
           const bool slow = !c->canSend() || c->queueLen() >= WS_BACKPRESSURE_THRESHOLD;
           if (slow) {
-            if (cit != _clients.end()) cit->second.droppedFrames++;
+            if (cit != _clients.end()) {
+              cit->second.droppedFrames++;
+              if (!cit->second.slowSinceMs) cit->second.slowSinceMs = nowMs ? nowMs : 1;
+            }
           } else {
             if (it->text) c->text(it->payload);
             else c->binary(reinterpret_cast<const uint8_t*>(it->payload.c_str()), it->payload.length());
-            if (cit != _clients.end()) cit->second.lastTxMs = nowMs;
+            if (cit != _clients.end()) {
+              cit->second.lastTxMs = nowMs;
+              cit->second.slowSinceMs = 0;
+            }
           }
         }
       }
@@ -945,6 +978,40 @@ class WsManager {
       }
     }
     for (uint32_t cid : expired) closeClient(cid);
+  }
+
+  // See WS_HEARTBEAT_MS. A beat is skipped for a client whose queue is full;
+  // one that stays full for WS_STUCK_MS is aborted (a close frame would only
+  // queue behind the stuck data), outside the lock: the disconnect event
+  // takes it again.
+  void heartbeat() {
+    if (!_ws) return;
+    const uint32_t now = millis();
+    std::vector<uint32_t> stuck;
+    {
+      ClientsLock g(_clientsMx);
+      for (auto& kv : _clients) {
+        AsyncWebSocketClient* c = _ws->client(kv.first);
+        if (!c || c->status() != WS_CONNECTED) continue;
+        WsClientInfo& ci = kv.second;
+        if (!c->canSend() || c->queueLen() >= WS_BACKPRESSURE_THRESHOLD) {
+          if (!ci.slowSinceMs) ci.slowSinceMs = now ? now : 1;
+          else if (now - ci.slowSinceMs >= WS_STUCK_MS) stuck.push_back(kv.first);
+          continue;
+        }
+        ci.slowSinceMs = 0;
+        c->text("{\"type\":\"hb\"}");
+      }
+    }
+    for (uint32_t cid : stuck) {
+      ++_stuckEvictions;
+      log_w("[ws] client %u: queue stuck for %u s, dropping the connection", (unsigned)cid,
+            (unsigned)(WS_STUCK_MS / 1000));
+      AsyncWebSocketClient* c = _ws->client(cid);
+      if (!c) continue;
+      if (AsyncClient* tcp = c->client()) tcp->abort();
+      else c->close();
+    }
   }
 
   void closeClient(uint32_t cid) {
