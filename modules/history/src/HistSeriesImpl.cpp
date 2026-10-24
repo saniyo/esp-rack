@@ -265,7 +265,11 @@ HistSeriesStats Series::stats() const {
   s.newestT = tier_[0].queuedNewest;
   for (uint8_t k = 0; k < def_.nTiers; ++k) {
     const Tier& z = tier_[k];
-    if (z.oldestT && (!s.oldestT || z.oldestT < s.oldestT)) s.oldestT = z.oldestT;
+    uint32_t oldest = z.oldestT;
+    // Nothing on file yet (a fresh device, before the first flush): the
+    // oldest record still queued in RAM.
+    if (!oldest && z.qLen >= z.lay.recSize) (void)hist::recordTime(z.q + z.qHead, z.lay.recSize, oldest);
+    if (oldest && (!s.oldestT || oldest < s.oldestT)) s.oldestT = oldest;
     s.records += z.records;
     s.bytes += z.bytes;
     s.oldBytes += z.oldBytes;

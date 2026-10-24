@@ -33,6 +33,7 @@ constexpr const char* kRestBase = "/api/v1/history/series";  // /form, /state: t
 constexpr size_t kDocSmall = 4096;      // one page without PSRAM, like DataApi
 constexpr size_t kDocLarge = 16384;     // with PSRAM (the malloc policy puts it there)
 constexpr size_t kSlot = 16;            // an ArduinoJson value on the ESP32
+constexpr size_t kPageOverhead = 768;   // a rows page's keys, cols and arrays
 constexpr size_t kScratch = 4096;       // the task's flush buffer
 constexpr uint32_t kRetentionMs = 3600UL * 1000UL;
 constexpr uint32_t kMinValidT = 1577836800;
@@ -599,8 +600,15 @@ void HistoryService::handleRest(AsyncWebServerRequest* r) {
 }
 
 void HistoryService::sendList(AsyncWebServerRequest* r) {
-  AsyncJsonResponse* resp = new AsyncJsonResponse(false, _psram ? kDocLarge : kDocSmall);
+  const size_t capacity = _psram ? kDocLarge : kDocSmall;
+  AsyncJsonResponse* resp = new AsyncJsonResponse(false, capacity);
   JsonObject root = resp->getRoot().to<JsonObject>();
+  // The device's clock (the UI plans periods on it, not on the browser's),
+  // and how many values one page of rows can hold (a request packs its
+  // columns to it).
+  const time_t nowT = time(nullptr);
+  if (nowT > kMinValidT) root["now"] = uint32_t(nowT);
+  root["maxv"] = uint32_t((capacity - kPageOverhead) / kSlot);
   JsonArray arr = root.createNestedArray("series");
   Lock l(_mx);
   for (const auto& sp : _series) {
@@ -610,6 +618,7 @@ void HistoryService::sendList(AsyncWebServerRequest* r) {
     JsonObject o = arr.createNestedObject();
     o["id"] = d.id;
     o["title"] = d.title ? d.title : "";
+    if (d.localDays) o["local_days"] = true;
     JsonArray cols = o.createNestedArray("cols");
     for (uint8_t i = 0; i < d.nCols; ++i) {
       JsonObject c = cols.createNestedObject();
@@ -644,15 +653,20 @@ void HistoryService::sendRows(AsyncWebServerRequest* r, Series* s) {
   auto param = [r](const char* k, uint32_t dflt) -> uint32_t {
     return r->hasParam(k) ? uint32_t(strtoul(r->getParam(k)->value().c_str(), nullptr, 10)) : dflt;
   };
-  uint32_t from = param("from", now > 86400 ? now - 86400 : 0);
+  const uint32_t from = param("from", now > 86400 ? now - 86400 : 0);
   const uint32_t to = param("to", 0xFFFFFFFF);
-  if (r->hasParam("cursor")) from = param("cursor", from);
   const bool hasRes = r->hasParam("res");
   const uint32_t res = param("res", 0);
+  // The tier: tier=<index> when valid (the UI picks one for both periods of
+  // a comparison), else from the period's start. Always from `from`, not the
+  // cursor, so every page of one answer reads the same tier.
+  const uint32_t tierArg = param("tier", 0xFF);
+  const uint8_t tier = tierArg < def.nTiers ? uint8_t(tierArg) : s->pickTier(from, now);
+  const uint32_t cursor = param("cursor", from);
+  const uint32_t start = cursor > from ? cursor : from;
 
-  const uint8_t tier = s->pickTier(from, now);
   if (r->hasParam("format") && r->getParam("format")->value() == "csv") {
-    sendCsv(r, s, from, to, hasRes, res, tier);
+    sendCsv(r, s, start, to, hasRes, res, tier);
     return;
   }
 
@@ -705,7 +719,7 @@ void HistoryService::sendRows(AsyncWebServerRequest* r, Series* s) {
     ds.attach(def, res, acc.data(), cnt.data(), out.data(), n, emitRow, &page);
     reader.ds = &ds;
   }
-  s->read(ESPFS, tier, from, to, v.data(), rec.data(), onRow, &reader);
+  s->read(ESPFS, tier, start, to, v.data(), rec.data(), onRow, &reader);
   if (reader.ds) ds.finish();
   if (page.full) root["next"] = page.next;
   resp->setLength();
@@ -817,7 +831,6 @@ void HistoryService::registerManifest(WebManager* web) {
           .component(WebComponent::DynamicSettings)
           .authenticated()
           .menu(WebMenu("History").icon("History").order(150).expandTabs(false))
-          .tab(WebTab("view", "View").icon("ShowChart").component("HistoryViewer"))
           .tab(WebTab("status", "Status").icon("Assessment"))
           .tab(WebTab("settings", "Settings").icon("Settings").postable().adminWrite())
           .build(),

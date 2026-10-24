@@ -16,13 +16,17 @@
 //   * Writes are counted per day against budget_kb_day; past it the flush
 //     interval doubles (up to 16x) and the page says so, with a rough flash
 //     wear estimate.
-//   * GET /api/v1/history/series                the series
-//     GET /api/v1/history/series/<id>?from&to&res&cols&cursor
+//   * GET /api/v1/history/series                the series, the device's
+//                                              "now" and "maxv" (values one
+//                                              page of rows can hold)
+//     GET /api/v1/history/series/<id>?from&to&res&cols&tier&cursor
 //                                              rows, ascending, one page (4 KB,
 //                                              16 KB with PSRAM); res 0 = the
 //                                              whole period in one row;
-//                                              &format=csv: all of it as a
-//                                              streamed CSV file
+//                                              tier=<index> reads that tier
+//                                              (else the finest covering
+//                                              from); &format=csv: all of it
+//                                              as a streamed CSV file
 //     DELETE /api/v1/history/series/<id>       erase a series' files (admin)
 //     (/api/v1/history/form and /state are the page's.)
 
