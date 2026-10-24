@@ -13,6 +13,7 @@
 // Wire envelope (matches WsManager.h):
 //   client->server: {type:'sub',ch} / {type:'unsub',ch} / {type:'p',ch,origin_id,p}
 //   server->client: {type:'id',id} (once) / {type:'p',ch,origin_id,p}
+//                   {type:'hb'} every WS_HEARTBEAT_MS (5 s) on newer firmware
 
 import { createContext, FC, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Sockette from 'sockette';
@@ -48,6 +49,10 @@ const WS_APP_URL = WEB_SOCKET_ROOT + 'app';
 
 // See useWs.ts for the rationale behind these values.
 const STALE_WATCHDOG_MS = 600_000;
+// Once the device has sent a heartbeat on this connection, silence this long
+// means the socket is dead or stuck (Live shown, nothing arriving): reconnect.
+// Firmware without the heartbeat keeps the long watchdog above.
+const HEARTBEAT_STALE_MS = 15_000;
 const RECONNECT_MAX_ATTEMPTS = 10_000;
 // Stagger resubscribes on reconnect so N channels don't fire N synchronous
 // state snapshots on the device's single async_tcp task in one burst.
@@ -57,6 +62,7 @@ export const WsProvider: FC<{ children: ReactNode }> = ({ children }) => {
   const ws = useRef<Sockette>();
   const subs = useRef<Map<string, Set<ChannelHandler>>>(new Map());
   const lastMessageAt = useRef<number>(0);
+  const heartbeatSeen = useRef<boolean>(false);
   const [connected, setConnected] = useState<boolean>(false);
 
   const sendRaw = useCallback((obj: Record<string, any>) => {
@@ -113,6 +119,10 @@ export const WsProvider: FC<{ children: ReactNode }> = ({ children }) => {
       console.error('[ws] bad frame', e);
       return;
     }
+    if (msg && msg.type === 'hb') {
+      heartbeatSeen.current = true;
+      return;
+    }
     // {type:'id',...} connection-identity frame has no channel — ignore.
     if (!msg || !msg.ch) return;
     const set = subs.current.get(msg.ch);
@@ -136,6 +146,7 @@ export const WsProvider: FC<{ children: ReactNode }> = ({ children }) => {
       onopen: () => {
         setConnected(true);
         lastMessageAt.current = Date.now();
+        heartbeatSeen.current = false;
         // Resubscribe every active channel, staggered.
         let i = 0;
         subs.current.forEach((_set, channel) => {
@@ -168,7 +179,7 @@ export const WsProvider: FC<{ children: ReactNode }> = ({ children }) => {
       if (!connected) return;
       if (lastMessageAt.current === 0) return;
       const stale = Date.now() - lastMessageAt.current;
-      if (stale > STALE_WATCHDOG_MS) {
+      if (stale > (heartbeatSeen.current ? HEARTBEAT_STALE_MS : STALE_WATCHDOG_MS)) {
         console.warn(`[ws] stale (${stale} ms) — forcing reconnect`);
         lastMessageAt.current = 0;
         forceReconnect();
