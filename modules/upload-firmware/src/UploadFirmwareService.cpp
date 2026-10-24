@@ -125,18 +125,29 @@ void UploadFirmwareService::handleUpload(AsyncWebServerRequest* request,
       if (!Update.end(true)) {
         Update.printError(Serial);
         handleError(request, 500);
+      } else {
+        _finished = request;
       }
     }
   }
 }
 
 void UploadFirmwareService::uploadComplete(AsyncWebServerRequest* request) {
-  // if no error, send the success response
-  if (!request->_tempObject) {
-    request->onDisconnect([]() { ESPRack::restartDevice(ESPRack::kRestartUpload); });
-    AsyncWebServerResponse* response = request->beginResponse(200);
-    request->send(response);
+  // handleUpload already answered with its error
+  if (request->_tempObject) return;
+  // Only a finished, authorised upload restarts the device. A POST without a
+  // file part never reaches handleUpload, so it is refused here: 403 for a
+  // caller who may not upload, 400 for an admin who sent no firmware.
+  const bool done = _finished == request;
+  _finished = nullptr;
+  if (!done) {
+    Authentication authentication = _securityManager->authenticateRequest(request);
+    handleError(request, AuthenticationPredicates::IS_ADMIN(authentication) ? 400 : 403);
+    return;
   }
+  request->onDisconnect([]() { ESPRack::restartDevice(ESPRack::kRestartUpload); });
+  AsyncWebServerResponse* response = request->beginResponse(200);
+  request->send(response);
 }
 
 void UploadFirmwareService::handleError(AsyncWebServerRequest* request, int code) {

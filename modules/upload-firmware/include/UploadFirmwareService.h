@@ -34,6 +34,9 @@ class UploadFirmwareService {
 
  private:
   SecurityManager* _securityManager;
+  // The request whose authorised upload ended with a valid image. Only that
+  // one restarts the device (one firmware update at a time: Update is global).
+  AsyncWebServerRequest* _finished = nullptr;
   void handleUpload(AsyncWebServerRequest* request,
                     const String& filename,
                     size_t index,
