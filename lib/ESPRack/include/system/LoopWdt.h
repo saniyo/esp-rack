@@ -2,7 +2,7 @@
 #ifndef ESPRACK_SYSTEM_LOOP_WDT_H
 #define ESPRACK_SYSTEM_LOOP_WDT_H
 
-// LoopWdt (SES-LIB-014): the Arduino loop task on the task watchdog
+// LoopWdt: the Arduino loop task on the task watchdog
 // (TWDT, panic). Arduino feeds it once per loop(); a loop() iteration that
 // blocks longer than the timeout resets the chip.
 //

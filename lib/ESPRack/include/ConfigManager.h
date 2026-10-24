@@ -45,7 +45,7 @@ class ConfigManager {
     uint32_t loads{0};
     uint32_t saves{0};
     uint32_t skipped{0};
-    uint32_t deferred{0};          // saves PowerGuard paused (SES-LIB-008)
+    uint32_t deferred{0};          // saves PowerGuard paused
     uint32_t restores{0};
     uint32_t resets{0};
     uint32_t lastCrc{0};
@@ -236,7 +236,7 @@ class ConfigManager {
   bool ensureLoaded(const char* id);
   bool saveIfChanged(const char* id, const String& origin = "");
 
-  // SES-LIB-008: saves PowerGuard paused. flushDeferred() (App::loop) saves
+  // saves PowerGuard paused. flushDeferred() (App::loop) saves
   // them once writes are allowed again; a latch keeps them until restart.
   void markDeferred() { _anyDeferred = true; }
   bool hasDeferred() const { return _anyDeferred; }
@@ -379,8 +379,7 @@ class ConfigManager {
     EntryStats& stats() override { return _stats; }
     const EntryStats& stats() const override { return _stats; }
     bool deferred() const override { return _deferred; }
-    bool _deferred = false;  // SES-LIB-008
-
+    bool _deferred = false;
     bool ensureLoaded(ConfigManager& mgr) override {
       if (_loaded) return true;
       if (!_d.service) return false;
@@ -515,7 +514,7 @@ class ConfigManager {
         return true;  // skip flash write
       }
 
-      // SES-LIB-008: no flash writes while PowerGuard pauses them; the save
+      // no flash writes while PowerGuard pauses them; the save
       // waits for ConfigManager::flushDeferred().
       if (!ESPRack::PowerGuard::writesAllowed()) {
         if (!_deferred) _stats.deferred++;

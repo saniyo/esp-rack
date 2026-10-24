@@ -803,7 +803,7 @@ bool ConfigManager::atomicWrite(const char* primary,
                                 JsonObjectConst data,
                                 size_t bufferSize,
                                 uint32_t* outCrc) {
-  if (!ESPRack::PowerGuard::writesAllowed()) {  // SES-LIB-008: any other writer
+  if (!ESPRack::PowerGuard::writesAllowed()) {  // any other writer
     log_w("[CFG] write %s skipped: writes paused (PowerGuard)", primary ? primary : "?");
     return false;
   }

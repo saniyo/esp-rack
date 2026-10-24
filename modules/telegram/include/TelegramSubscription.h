@@ -55,7 +55,7 @@ class TelegramSubscription {
   // boot.
   bool enabled() const;
 
-  // SES-LIB-019: answer "/<cmd> [args]" from the allowed chats. The handler
+  // answer "/<cmd> [args]" from the allowed chats. The handler
   // runs on the loop task; its text is the reply ("" = none). adminOnly:
   // only users in admin_user_ids. false: invalid handle, table full, or the
   // name is taken.

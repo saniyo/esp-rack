@@ -90,7 +90,7 @@ class ExtHwModule : public Module {
   // long as the registration that points at it.
   const char* actionId(const char* verb, char* buf, size_t len) const;
 
-  // SES-LIB-028. The module that uses this instance (Builder::owner()), or
+  // The module that uses this instance (Builder::owner()), or
   // nullptr. Its pages then sit in an "External Hardware" group under the
   // owner's menu entry and say "Used by <owner>". hwOwned(): hide manual
   // controls the owner drives itself.
@@ -110,9 +110,9 @@ class ExtHwModule : public Module {
   HwRegistry* hw() const { return _hw; }  // set before onInstall
   HwState hwState() const;                // Ok / NotConfigured / Conflict / Disabled
   // After switching the hardware off the resources it gave up (from loop):
-  // they stop blocking other instances (SES-LIB-024).
+  // they stop blocking other instances.
   void hwReleased();
-  // Runtime state for System -> Hardware (SES-LIB-025); nullptr clears.
+  // Runtime state for System -> Hardware; nullptr clears.
   void hwNote(const char* note, HwNoteLevel level = HwNoteLevel::Warn);
 
  private:

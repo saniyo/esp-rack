@@ -11,7 +11,7 @@ export interface ManifestContextValue {
   // the JWT lands so the stub manifest (anonymous response containing
   // brand only) gets swapped for the full authenticated map.
   reload: () => Promise<void>;
-  // SES-LIB-030: fetch a feature's own actions once; true once they're in.
+  // fetch a feature's own actions once; true once they're in.
   ensureActions: (featureId: string) => void;
   actionsLoaded: (featureId: string) => boolean;
 }

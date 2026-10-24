@@ -1,4 +1,4 @@
-// SES-LIB-019 [host]: bot command parsing and who may run what.
+// [host]: bot command parsing and who may run what.
 #include <unity.h>
 
 #include "../../../modules/telegram/include/TelegramCommand.h"

@@ -28,7 +28,7 @@ This is an audit snapshot of `feature/ses-light-support`, dated 2026-10-13:
 > - tab-level write auth is enforced on the server (011);
 > - the root bundle and versions are fixed (010).
 >
-> SES-LIB-002 then moved clock ownership into the core: `TimeSync` decides
+> Clock ownership then moved into the core: `TimeSync` decides
 > which time may set the clock, owns the TZ, and replaces the hard-coded
 > clock checks in security, cert-manager and the TLS client (see `ntp`).
 >
@@ -400,7 +400,7 @@ This is an audit snapshot of `feature/ses-light-support`, dated 2026-10-13:
   - Only single-frame inbound messages reach subscription handlers (`:473`).
 
 ### `ntp` — NTPModule
-- **Purpose:** Runs the SNTP client once STA has an IP and shows a live status tab with local time, UTC time and uptime. Since SES-LIB-002 (version 1.1.0): SNTP results go through core `TimeSync`, which decides whether they may step the clock; the timezone is handed to `TimeSync::setTimezone()`; the SNTP interval is 1 h; the status tab adds a clock line ("Valid, ntp, ±1 s"), a sync line ("last step … ms, N rejected") and an admin "Set time" control (`system.setTime`).
+- **Purpose:** Runs the SNTP client once STA has an IP and shows a live status tab with local time, UTC time and uptime. Since version 1.1.0: SNTP results go through core `TimeSync`, which decides whether they may step the clock; the timezone is handed to `TimeSync::setTimezone()`; the SNTP interval is 1 h; the status tab adds a clock line ("Valid, ntp, ±1 s"), a sync line ("last step … ms, N rejected") and an admin "Set time" control (`system.setTime`).
 - **Install:** `.install<NTPModule>()`. Preset: listed for `.networking()`, stub.
 - **Module identity:** id `"ntp"`, version `"1.0.0"`, priority 30, requires `{"wifi"}` (`modules/ntp/include/NTPModule.h:11-14`). Hooks: `onInstall`, `onBegin`, `onLoop`.
 - **Public API:** None (no accessor).
@@ -476,7 +476,7 @@ This is an audit snapshot of `feature/ses-light-support`, dated 2026-10-13:
 - **Public API:**
   - `SecuritySettingsService`, which implements `SecurityManager`: `authenticate`, `authenticateRequest`, `generateJWT`, `filterRequest`, `wrapRequest`, `wrapCallback`, `mintMachineToken`, `revokeMachineToken` (`modules/security/include/SecuritySettingsService.h:126-146`).
   - `SecurityModule::service()` (`modules/security/include/SecurityModule.h:76`).
-  - `usesFactoryCredentials()` (SES-LIB-022, on every `SecurityManager`): true while a
+  - `usesFactoryCredentials()` (on every `SecurityManager`): true while a
     factory login (`FACTORY_ADMIN_*` / `FACTORY_GUEST_*`) still works. It's a cached
     atomic, set by the updater when a password changes (compared before hashing) and
     persisted per user as `"factory"`, so it costs no PBKDF2 and no lock. It reads
@@ -503,7 +503,7 @@ This is an audit snapshot of `feature/ses-light-support`, dated 2026-10-13:
   - The default `guest` account and the `IS_OPERATOR` rule are listed as bugs at the end.
 
 ### `system-status` — SystemStatusModule
-> Since SES-LIB-007/014 the Resources tab also shows "Last restart"
+> The Resources tab also shows "Last restart"
 > (`lastRestartReason()`) and "Boot" (boot count, crash run, safe mode, loop
 > WDT state; "Clear safe mode" in safe mode). The legacy status JSON carries
 > `last_restart`, `boot_count` and `safe_mode`.

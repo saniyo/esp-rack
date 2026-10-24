@@ -380,7 +380,7 @@ static void test_tables_consistent(void) {
 }
 
 
-// SES-LIB-023: non-GPIO reservations
+// non-GPIO reservations
 static void test_reserved_non_gpio(void) {
   HwClaims c = claims(HwChip::Esp32S3);
   TEST_ASSERT_TRUE(c.reserve(HwResource{HwKind::Uart, 2, -1, 0, "port"}, "modbus bridge"));
@@ -399,7 +399,7 @@ static void test_reserved_non_gpio(void) {
   ASSERT_ERR("RMT TX channels exhausted", c3.check("a", two));
 }
 
-// SES-LIB-024: a claim lives until the hardware is released
+// a claim lives until the hardware is released
 static void test_releasing(void) {
   HwClaims c = claims(HwChip::Esp32C3);
   HwDescriptor a;
@@ -444,7 +444,7 @@ static void test_releasing(void) {
   ASSERT_ERR("RMT TX channels exhausted", c3.check("y", one(HwKind::RmtTx, kHwAnyChannel, "led")));
 }
 
-// SES-LIB-024: only an owner that set the hardware up (was Ok) holds it
+// only an owner that set the hardware up (was Ok) holds it
 // while releasing; one that never did gives it up at once.
 static void test_releasing_needs_applied(void) {
   HwClaims c = claims(HwChip::Esp32C3);
@@ -471,7 +471,7 @@ static void test_releasing_needs_applied(void) {
   ASSERT_OK(c.check("meter2", one(HwKind::Gpio, 4, "rx")));
 }
 
-// SES-LIB-024: releasing too long without released() is a warning in the
+// releasing too long without released() is a warning in the
 // tab; the claim stays.
 static void test_releasing_overdue(void) {
   HwClaims c = claims(HwChip::Esp32C3);
@@ -495,7 +495,7 @@ static void test_releasing_overdue(void) {
   TEST_ASSERT_EQUAL_STRING("releasing 1 for 14 s, no released()", note);
 }
 
-// SES-LIB-025: the instance's runtime note in System -> Hardware
+// the instance's runtime note in System -> Hardware
 static void test_runtime_note_text(void) {
   char state[32], note[160];
   HwInstStatus s;

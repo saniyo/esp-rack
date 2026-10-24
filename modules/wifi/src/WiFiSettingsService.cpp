@@ -489,7 +489,7 @@ void WiFiSettingsService::registerManifest(WebManager* web) {
   // would silently drop. 6144 = base tree (~3 KB pool) + a realistic
   // scan result set. (Was 16 KB once — exceeded the C3 max-contiguous
   // window entirely and produced literal "null" bodies.)
-  // SES-LIB-033: the form never depends on the state (the scan rows and the
+  // the form never depends on the state (the scan rows and the
   // live connection are values), so the UI caches its schema and reads the
   // values from GET /state (readState).
   spec.staticSchema = true;

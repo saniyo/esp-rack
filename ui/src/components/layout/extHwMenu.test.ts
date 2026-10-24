@@ -1,4 +1,4 @@
-// SES-LIB-028 [host]: where external HW pages go, from manifest.extHw only.
+// [host]: where external HW pages go, from manifest.extHw only.
 import { describe, expect, it } from '@jest/globals';
 
 import { ExtHwEntry, FeatureEntry } from '../../types/manifest';

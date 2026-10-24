@@ -336,7 +336,7 @@ const TrendChart: React.FC<TrendChartProps> = ({ field, value = [], getSibling }
   );
   const readableLabel = parsedOptions.readableLabel;
 
-  // SES-LIB-015 options. Without xFmt the x axis shows the raw numbers, as
+  // options. Without xFmt the x axis shows the raw numbers, as
   // before (millis() stamps must not turn into 1970 dates).
   const om = parsedOptions.optionMap as any;
   const xFmt: XFormat | undefined = isXFormat(om.xFmt?.value) ? om.xFmt.value : undefined;

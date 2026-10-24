@@ -37,7 +37,7 @@ interface DynamicSettingsProps {
 }
 
 const DynamicSettings: FC<DynamicSettingsProps> = ({ formName, data, saveData, saving, readOnly = false }) => {
-  const seenHeadings = useContext(HeadingContext);  // SES-LIB-029c: no repeated titles
+  const seenHeadings = useContext(HeadingContext);  // no repeated titles
   const [formState, setFormState] = useState<Form>({
     title: formName,
     description: data.description || '',
@@ -90,7 +90,7 @@ const DynamicSettings: FC<DynamicSettingsProps> = ({ formName, data, saveData, s
     if (!data || !Array.isArray(data.fields)) return;
 
     const fields: Field[] = data.fields.map((raw, idx) => {
-      const marker = markerFromRaw(raw, idx);  // web::Cols / web::Break (SES-LIB-029)
+      const marker = markerFromRaw(raw, idx);  // web::Cols / web::Break
       if (marker) return marker as unknown as Field;
       const o = (raw as any).o || '';
       const fieldName = Object.keys(raw).find((k) => k !== 'o') || '';

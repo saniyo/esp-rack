@@ -153,7 +153,7 @@ void TemplateExtHwService::registerManifest(WebManager* web) {
       TemplateExtHwState::readState, checked,
       WEBFEATURE_BUFFER_AUTO, 512);
 
-  // An owner drives the output itself: no manual toggle then (SES-LIB-028).
+  // An owner drives the output itself: no manual toggle then.
   if (_owner.hwOwned()) return;
   web->registerAction(
       WebAction(_toggleId, "Toggle")
@@ -239,7 +239,7 @@ void TemplateExtHwService::applyPins() {
 
   // Let go of what we no longer own. The registry keeps those pins claimed
   // ("releasing") until we say released() below, so no other instance can
-  // have started driving them yet (SES-LIB-024). Never touch a pin in Conflict.
+  // have started driving them yet. Never touch a pin in Conflict.
   if (_drivenOut >= 0 && _drivenOut != out) pinMode(_drivenOut, INPUT);
   if (_drivenButton >= 0 && _drivenButton != button) pinMode(_drivenButton, INPUT);
   if (_hw) _hw->released(_owner);
@@ -253,7 +253,7 @@ void TemplateExtHwService::applyPins() {
     _lastButton = digitalRead(button);
   }
   // Ok only says the pins are free. What the hardware does is the module's
-  // to report (SES-LIB-025): a button that reads low with its pull-up on is
+  // to report: a button that reads low with its pull-up on is
   // probably stuck or shorted.
   if (_hw) {
     const bool stuck = button >= 0 && !digitalRead(button);

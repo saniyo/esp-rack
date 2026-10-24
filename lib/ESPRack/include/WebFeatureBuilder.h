@@ -115,7 +115,7 @@ class WebTab {
 
   WebTab& icon(const char* i)     { _t.icon = i; return *this; }
   WebTab& rest(const char* path)  { _t.restPath = path; return *this; }
-  // SES-LIB-033: this bespoke page tab's form never depends on the state; the
+  // this bespoke page tab's form never depends on the state; the
   // UI caches <rest>?schema=1 and reads the values from `statePath` (flat).
   WebTab& staticSchema(const char* statePath) { _t.statePath = statePath; return *this; }
   // A framework renderer instead of a form (the UI's CUSTOM_TABS).
@@ -231,7 +231,7 @@ class WebFeature {
   WebFeature& readOnly(const char* read) { _spec.restRead = read; return *this; }
 
   WebFeature& ws(const char* path) { _spec.wsPath = path; return *this; }
-  // The form's fields never depend on the state (SES-LIB-033): the UI caches
+  // The form's fields never depend on the state: the UI caches
   // the schema and takes the values from /state. See module-guide.
   WebFeature& staticSchema(bool v = true) { _spec.staticSchema = v; return *this; }
 

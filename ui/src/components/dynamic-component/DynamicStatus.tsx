@@ -37,7 +37,7 @@ const DynamicStatus: FC<DynamicStatusProps> = ({
   formName, data, wsData, connected,
   originId, updateWsData, messageTick, saveField, registerReplaceKeys
 }) => {
-  const seenHeadings = useContext(HeadingContext);  // SES-LIB-029c: no repeated titles
+  const seenHeadings = useContext(HeadingContext);  // no repeated titles
 
   const [formState, setFormState] = useState<Form>({
     title: formName, description: '', fields: []
@@ -81,7 +81,7 @@ const DynamicStatus: FC<DynamicStatusProps> = ({
 
     const fields: (Field & { baseLabel: string })[] =
       data.fields.map((obj, idx) => {
-        // Layout markers (web::Cols / web::Break) apply here too (SES-LIB-029).
+        // Layout markers (web::Cols / web::Break) apply here too.
         const marker = markerFromRaw(obj, idx);
         if (marker) return { ...marker, baseLabel: marker.label } as unknown as Field & { baseLabel: string };
         const o = obj.o ?? '';

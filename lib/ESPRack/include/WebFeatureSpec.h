@@ -44,7 +44,7 @@ struct WebMenuMeta {
   // source of truth for menu placement — "drop X onto Y" == set X's
   // menu.parent = "Y". Arbitrary depth (the parent can have its own parent).
   const char* parent = nullptr;
-  // hw: this page belongs to external HW instance <hw> (SES-LIB-028). The UI
+  // hw: this page belongs to external HW instance <hw>. The UI
   // places it from the manifest's extHw[] (under the instance's owner, else
   // under System), so such a page never sets parent. Set by
   // ExtHwModule::hwMenu().
@@ -80,7 +80,7 @@ struct WebTabSpec {
   // so a feature-id rename can never silently desync a contributed tab.
   // Takes precedence over restPath when both are set.
   const char* formOf = nullptr;
-  // SES-LIB-033: a bespoke page tab whose form never depends on the state.
+  // a bespoke page tab whose form never depends on the state.
   // The UI caches <restPath>?schema=1 (the page answers it with
   // sendFormSchema) and takes the values from this flat GET path. Typed
   // features opt in with WebFeature::staticSchema() instead.
@@ -208,7 +208,7 @@ struct WebFeatureSpec {
   const char* restRead = nullptr;
   const char* restUpdate = nullptr;
   const char* wsPath = nullptr;
-  // SES-LIB-033: the form's fields don't depend on the state, so the UI can
+  // the form's fields don't depend on the state, so the UI can
   // cache GET <form>?schema=1 (ETag) and fill the values from /state. The
   // state reader must carry every form field under the same key.
   bool staticSchema = false;
@@ -230,6 +230,6 @@ struct WebPageSpec {
 
 #endif
 
-// SES-LIB-033: the manifest signature (firmware + registrations), 0 before
+// the manifest signature (firmware + registrations), 0 before
 // the first bake; ETag base for static per-firmware responses.
 uint32_t manifestSignature();

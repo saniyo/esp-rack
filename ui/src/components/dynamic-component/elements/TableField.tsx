@@ -90,7 +90,7 @@ function parseCols(raw: string): ColumnSpec[] {
 function formatCell(val: any, col: ColumnSpec, zone: ResolvedZone): string {
   if (val === undefined || val === null) return '';
   if (col.type === 'boolean') return val ? '✓' : '✗';
-  // dated cells in the device timezone (SES-LIB-016)
+  // dated cells in the device timezone
   if (isCellTimeType(col.type)) return formatCellTime(val, col.type, col.fmt, zone);
   if (col.type === 'number') {
     const n = typeof val === 'number' ? val : parseFloat(val);

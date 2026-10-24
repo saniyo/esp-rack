@@ -123,7 +123,7 @@ std::unique_ptr<App> Builder::build() {
     }
   }
 
-  // SES-LIB-028: an owner must be an installed module; otherwise the
+  // an owner must be an installed module; otherwise the
   // instance is shown as unowned (under System).
   for (size_t i = 0; i < modules_.size(); ++i) {
     ExtHwModule* x = modules_[i] ? modules_[i]->asExtHw() : nullptr;

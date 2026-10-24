@@ -87,8 +87,7 @@ const DynamicContentHandler: FC<DynamicContentHandlerProps> = ({
   liveValues,
 }) => {
   const [formState, setFormState] = useState<Record<string, any>>({});
-  const seenHeadings = useContext(HeadingContext);  // SES-LIB-029c
-
+  const seenHeadings = useContext(HeadingContext);
   // Track the field.value we last applied per label. On every fields-prop
   // update we adopt the server's new value ONLY for labels whose
   // field.value actually changed since the previous render — that way
@@ -266,7 +265,7 @@ const DynamicContentHandler: FC<DynamicContentHandlerProps> = ({
         const ref = (om as any).ref?.value as string | undefined;
         const url = (om as any).url?.value as string | undefined;
         if (ref && !findAction(manifest, ref)) {
-          // A feature's own action may still be on its way (SES-LIB-030).
+          // A feature's own action may still be on its way.
           const owner = ownerOfAction(ref);
           if (owner && manifest.features.some((x) => x.id === owner) && !actionsLoaded(owner)) {
             ensureActions(owner);
@@ -312,7 +311,7 @@ const DynamicContentHandler: FC<DynamicContentHandlerProps> = ({
   // Between card groups, consecutive non-card fields get wrapped in a single
   // <List> — each field renders as a <ListItem> internally, so without a
   // parent <ul> inset Dividers (component="li") would be stray.
-  // SES-LIB-029: fields between layout markers form one CSS grid.
+  // fields between layout markers form one CSS grid.
   const renderGrid = (entries: { f: Field; i: number }[], keyBase: string): React.ReactNode[] =>
     segmentFields(entries, (e) => e.f).map((seg, s) => (
       <Box

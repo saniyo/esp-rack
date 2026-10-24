@@ -118,7 +118,7 @@ void HwRegistry::evaluate(Inst& x, const HwDescriptor& d) {
   const char* id = x.m->instanceId();
   // Hardware the instance gave up stays claimed ("releasing") until it says
   // released(): it may still be driving it until its next loop. Only if it
-  // was Ok, though; an instance that never was set nothing up (SES-LIB-024).
+  // was Ok, though; an instance that never was set nothing up.
   const bool applied = x.state == HwState::Ok;
   const uint32_t now = millis();
   x.desc = d;
@@ -314,7 +314,7 @@ void HwRegistry::manifestItem(size_t i, JsonObject o, const WebManager& web) con
 void HwRegistry::registerManifest(WebManager* web) {
   if (!web) return;
 
-  // extHw[] (SES-LIB-028): the instances' static facts, the UI's only source
+  // extHw[]: the instances' static facts, the UI's only source
   // for their menu placement. Live state stays in the System tab below: the
   // manifest is cached in flash.
   WebManager::ManifestArray xa;
@@ -335,7 +335,7 @@ void HwRegistry::registerManifest(WebManager* web) {
   e.role = "hardwareForm";
   e.auth = WebAuthLevel::Authenticated;
   e.handler = [this](AsyncWebServerRequest* r) {
-    // SES-LIB-033: the schema (static per firmware, ETag/304); the values
+    // the schema (static per firmware, ETag/304); the values
     // come from HW_STATE_PATH.
     if (r->hasParam("schema")) {
       sendFormSchema(r, "systemHardware", 1024, [this](JsonObject& o) { buildForm(o, false); });
@@ -369,7 +369,7 @@ void HwRegistry::registerManifest(WebManager* web) {
   tab.key = "hardware";
   tab.title = kLabel;
   tab.restPath = HW_FORM_PATH;
-  tab.statePath = HW_STATE_PATH;  // SES-LIB-033: cached schema + these values
+  tab.statePath = HW_STATE_PATH;  // cached schema + these values
   tab.postable = false;
   tab.auth = WebAuthLevel::Authenticated;
   tab.order = 14;  // after Identity (10) and Resources (12)
@@ -442,8 +442,8 @@ void HwRegistry::fillInstanceRows(JsonArray rows) const {
     r["owner"] = x.m->hwOwner() ? x.m->hwOwner() : "";
     describeText(x.desc, line, sizeof(line));
     r["hw"] = line;
-    // State + runtime level (SES-LIB-025); note = registry reason, runtime
-    // note, hardware still being released (SES-LIB-024).
+    // State + runtime level; note = registry reason, runtime
+    // note, hardware still being released.
     HwInstStatus st;
     st.state = x.state;
     st.reason = x.reason;
@@ -477,7 +477,7 @@ void HwRegistry::fillPinRows(JsonArray pins) const {
     r["level"] = b.notes[i].level == PinLevel::Reserved ? "reserved" : "caution";
     r["reason"] = b.notes[i].reason;
   }
-  for (size_t i = 0; i < _claims.reservedCount(); ++i) {  // SES-LIB-023
+  for (size_t i = 0; i < _claims.reservedCount(); ++i) {
     const HwClaim& rc = _claims.reservedAt(i);
     JsonObject r = pins.createNestedObject();
     hwResourceText(rc.res, line, sizeof(line));
@@ -487,7 +487,7 @@ void HwRegistry::fillPinRows(JsonArray pins) const {
   }
 }
 
-// values = false: the schema (SES-LIB-033) without rows; sendFormSchema nulls
+// values = false: the schema without rows; sendFormSchema nulls
 // the values anyway, and they come from buildState().
 void HwRegistry::buildForm(JsonObject& root, bool values) const {
   web::Form f(root, "hardware", kLabel);

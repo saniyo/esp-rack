@@ -2,7 +2,7 @@
 #ifndef ESPRACK_PERSIST_RTC_SCRATCH_H
 #define ESPRACK_PERSIST_RTC_SCRATCH_H
 
-// RtcScratch<T> (SES-LIB-008): a CRC-checked copy of T in RTC memory (LP RAM
+// RtcScratch<T>: a CRC-checked copy of T in RTC memory (LP RAM
 // on the C6). It survives a soft reset (software, panic, watchdog, deep
 // sleep), not a power cycle, brownout or reset pin. Two slots: commit()
 // writes the older one, so a reset halfway through keeps the newer. RAM

@@ -561,7 +561,7 @@ class FormBuilder {
     return false;
   }
 
-  // long / unsigned long / long long / unsigned long long (SES-LIB-016).
+  // long / unsigned long / long long / unsigned long long.
   // On ESP32 these are int32_t / uint32_t / int64_t / uint64_t, which the
   // strict template above used to take: it dropped numeric strings and
   // doubles silently. Same rules as int& now, clamped to the type's range

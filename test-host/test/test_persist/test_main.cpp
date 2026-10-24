@@ -1,4 +1,4 @@
-// SES-LIB-008 [host]: CheckpointPolicy, PowerGuard, NvsRecord (over a fake
+// [host]: CheckpointPolicy, PowerGuard, NvsRecord (over a fake
 // NVS) and RtcScratch's A/B slots.
 #include <unity.h>
 

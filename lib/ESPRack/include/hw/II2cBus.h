@@ -2,7 +2,7 @@
 #ifndef ESPRACK_HW_II2C_BUS_H
 #define ESPRACK_HW_II2C_BUS_H
 
-// II2cBus — one I2C bus shared by the devices on it (SES-LIB-034).
+// II2cBus — one I2C bus shared by the devices on it.
 //
 // The BUS is an external HW instance of its own ("i2c-bus": one I2C
 // controller and its SDA/SCL pins). It claims HwKind::I2cBus (index = the

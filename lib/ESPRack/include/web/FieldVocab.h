@@ -76,8 +76,8 @@ constexpr const char* Icon          = "icon";         // all
 constexpr const char* Color         = "color";        // all
 constexpr const char* ShowIf        = "showIf";       // all  — "field:value"
 constexpr const char* Card          = "card";         // all  — group id
-constexpr const char* Span = "sp";     // SES-LIB-029: grid columns this field spans
-constexpr const char* FullRow = "fr";  // SES-LIB-029: the whole row
+constexpr const char* Span = "sp";     // grid columns this field spans
+constexpr const char* FullRow = "fr";  // the whole row
 constexpr const char* CardTitle     = "cardTitle";    // all
 constexpr const char* CardDeletable = "cardDeletable";// all  — "=1"
 constexpr const char* HideAvatar    = "hideAvatar";   // all  — "=1"

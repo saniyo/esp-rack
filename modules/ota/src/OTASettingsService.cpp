@@ -1,6 +1,6 @@
 #include <OTASettingsService.h>
 
-#include <App.h>  // ESPRack::restartDevice (SES-LIB-007)
+#include <App.h>  // ESPRack::restartDevice
 #include <system/FirmwareUpdate.h>
 #include <system/LoopWdt.h>
 #include <web/Form.h>
@@ -117,13 +117,13 @@ void OTASettingsService::configureArduinoOTA() {
     _arduinoOTA->setPort(_state.port);
     _arduinoOTA->setPassword(_state.password.c_str());
     // The transfer blocks the loop for the whole upload: pause the loop
-    // watchdog (SES-LIB-014) until it ends or fails.
+    // watchdog until it ends or fails.
     _arduinoOTA->onStart([]() {
       Serial.println(F("Starting"));
       ESPRack::LoopWdt::pause();
       ESPRack::FirmwareUpdate::begin("ota");
     });
-    // Reboot through the framework (SES-LIB-007): the modules' onShutdown()
+    // Reboot through the framework: the modules' onShutdown()
     // runs on the loop task and the next boot reports lastRestartReason()
     // "ota". ArduinoOTA has already answered OK when onEnd runs.
     _arduinoOTA->setRebootOnSuccess(false);

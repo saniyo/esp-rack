@@ -226,7 +226,7 @@ const LayoutMenu: FC = () => {
     // Link children to parents; an orphan parent (id not registered)
     // gracefully falls back to top-level so nothing is ever lost.
     const rootNodes: MenuNode[] = [];
-    // External HW pages (SES-LIB-028) go into one "External Hardware" group
+    // External HW pages go into one "External Hardware" group
     // under their owner, else under System; placement comes only from
     // manifest.extHw.
     const hw = extHwModules(manifest);

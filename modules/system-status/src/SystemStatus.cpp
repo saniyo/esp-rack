@@ -172,11 +172,11 @@ void SystemStatus::buildForm(JsonObject& root,
   String cpuFreq = String(ESP.getCpuFreqMHz()) + " MHz";
   sta.add(web::Text("cpu_frequency", cpuFreq.c_str()).readOnly()
               .label("CPU frequency").icon("ShowChart"));
-  // Why this boot happened (SES-LIB-007): restartDevice() reason or the
+  // Why this boot happened: restartDevice() reason or the
   // hardware reset reason.
   sta.add(web::Text("last_restart", ESPRack::lastRestartReason()).readOnly()
               .label("Last restart").icon("History"));
-  // Boot-loop guard + loop watchdog (SES-LIB-014).
+  // Boot-loop guard + loop watchdog.
   {
     const ESPRack::BootInfo& bi = ESPRack::BootGuard::info();
     const String wdt = ESPRack::LoopWdt::armed()
@@ -330,7 +330,7 @@ void SystemStatus::buildForm(JsonObject& root,
   sta.add(web::Text("file_system_used_total", fs.c_str()).readOnly()
               .label("File system (used / total)").icon("Folder"));
 
-  // Storage (SES-LIB-008): the supply as PowerGuard knows it, NVS use, and
+  // Storage: the supply as PowerGuard knows it, NVS use, and
   // config saves waiting for writes to be allowed.
   {
     using ESPRack::PowerGuard;
@@ -348,7 +348,7 @@ void SystemStatus::buildForm(JsonObject& root,
       sta.add(web::Text("storage_nvs", nv.c_str()).readOnly()
                   .label("Storage: NVS (used / total)").icon("Storage"));
     }
-    // SES-LIB-030: the cached UI manifest per tier against its budget.
+    // the cached UI manifest per tier against its budget.
     if (_app) {
       const uint32_t ma = _app->webManager()->manifestBytes(true);
       const uint32_t mn = _app->webManager()->manifestBytes(false);

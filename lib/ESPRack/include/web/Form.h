@@ -19,7 +19,7 @@
 //      form.add(web::Table("rows").col("ts", "Time", "number").mode("append").maxRows(50));
 //      form.add(web::Trend("chart").line("sin", "#f00", "line").legend().maxPoints(100));
 //
-//  Layout (SES-LIB-029): fields flow in a grid by themselves. web::Cols(n)
+//  Layout: fields flow in a grid by themselves. web::Cols(n)
 //  puts the following fields n per row (fewer on narrow screens) until the
 //  next Cols() or a Break(); .span(k) / .fullRow() on a field override its
 //  type's default width:
@@ -55,7 +55,7 @@ class FieldSpec {
   D& icon(const char* n)        { return putStr(Opt::Icon, n); }
   D& color(const char* c)       { return putStr(Opt::Color, c); }
   D& card(const char* groupId)  { return putStr(Opt::Card, groupId); }
-  // Layout (SES-LIB-029): k grid columns, or the whole row. Defaults come
+  // Layout: k grid columns, or the whole row. Defaults come
   // from the type (numbers, switches, selects: one column; text, tables,
   // trends, messages, actions: the whole row).
   D& span(int k)                { return k > 1 ? putInt(Opt::Span, k) : self(); }
@@ -557,7 +557,7 @@ class Message : public FieldSpec<Message> {
 // ── The form ──────────────────────────────────────────────────────────────
 // Wraps the old createForm: creates root[name] = { description, fields:[] }.
 // add() materializes a field builder into the fields array.
-// ── Layout markers (SES-LIB-029) ─────────────────────────────────────────
+// ── Layout markers ─────────────────────────────────────────
 // Placed between fields: form.add(web::Cols(2)) puts the following fields two
 // per row on a wide screen (fewer on narrow ones) until the next Cols() or a
 // Break(), which goes back to the default flow (fields as wide as they need,

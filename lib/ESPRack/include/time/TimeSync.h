@@ -2,7 +2,7 @@
 #ifndef ESPRACK_TIME_SYNC_H
 #define ESPRACK_TIME_SYNC_H
 
-// TimeSync — owns the wall clock (SES-LIB-002).
+// TimeSync — owns the wall clock.
 //
 // Every time source (NTP, GPS, an external RTC, the operator) offers
 // samples; TimeArbiter (time/TimeArbiter.h) decides whether one may step the clock
@@ -51,7 +51,7 @@ namespace ESPRack {
 
 enum class TimeEvent : uint8_t { BecameValid, BecameInvalid, Stepped, SourceChanged, Stale, Disputed, TzChanged };
 
-// A clock step in ms, as listeners get it (SES-LIB-027). 64-bit: a wrong
+// A clock step in ms, as listeners get it. 64-bit: a wrong
 // date a month or a year off is corrected in one step. A struct, so a
 // listener still declared with `int32_t stepMs` fails to compile instead of
 // silently wrapping a step longer than 24.8 days.

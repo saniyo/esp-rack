@@ -38,7 +38,7 @@ const toSavePath = (formPath: string) => formPath.replace(/\/form$/, '/state');
 // /api/v1/system/status/form + /api/v1/ota/form + /api/v1/system/upload/form).
 interface DynamicTabPanelProps {
   tab: TabSpec;
-  // SES-LIB-033: a static-schema tab: cached <restPath>?schema=1 + the values
+  // a static-schema tab: cached <restPath>?schema=1 + the values
   // from this state path instead of the full form.
   statePath?: string;
   ws?: {
@@ -247,9 +247,9 @@ const DynamicFeature: FC<DynamicFeatureProps> = ({ featureId, fallback }) => {
   const { findFeature, manifest, ensureActions } = useManifest();
   const entry = findFeature(featureId) ?? fallback;
   useEffect(() => {
-    ensureActions(featureId);  // its own actions (SES-LIB-030)
+    ensureActions(featureId);  // its own actions
   }, [featureId, ensureActions]);
-  // A page of an owned external HW instance says who uses it (SES-LIB-028).
+  // A page of an owned external HW instance says who uses it.
   const usedBy = useMemo(
     () => (entry ? usedByLabel(extHwModules(manifest), entry, manifest.features) : undefined),
     [entry, manifest],
@@ -286,7 +286,7 @@ const DynamicFeature: FC<DynamicFeatureProps> = ({ featureId, fallback }) => {
   if (tabs.length === 0) return <FormLoader message="Feature has no tabs" />;
   const firstTabKey = tabs[0].key;
 
-  // SES-LIB-033: static-schema tabs read the cached schema + their state.
+  // static-schema tabs read the cached schema + their state.
   const statePathOf = (t: TabSpec) => staticStatePath(entry, t);
   const panelOf = (t: TabSpec) => {
     const Custom = t.component ? CUSTOM_TABS[t.component] : undefined;

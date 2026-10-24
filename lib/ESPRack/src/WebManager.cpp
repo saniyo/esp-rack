@@ -7,7 +7,7 @@
 #include <esp_rom_crc.h>
 #include <time/TimeSync.h>
 
-// ── Compact entries (SES-LIB-030) ──────────────────────────────────
+// ── Compact entries ──────────────────────────────────
 // The streamed (browser / flash-cached) manifest, schemaVersion 4, leaves out
 // what follows from an entry's id or is the default; the UI puts it back
 // (ui/src/contexts/manifest/normalizeManifest.ts). The in-process copy for
@@ -343,7 +343,7 @@ void WebManager::begin() {
       [this](AsyncWebServerRequest* request) { this->serveManifest(request); };
   _server->on(UI_MANIFEST_PATH, HTTP_GET, handler);
 
-  // SES-LIB-032: the time zone (runtime), not part of the cached manifest.
+  // the time zone (runtime), not part of the cached manifest.
   _server->on(UI_DEVICE_PATH, HTTP_GET, [this](AsyncWebServerRequest* request) {
     if (_sm && !_sm->authenticateRequest(request).authenticated) {
       request->send(401);
@@ -352,7 +352,7 @@ void WebManager::begin() {
     sendAdaptiveJson(request, [](JsonObject& root) { addDeviceTz(root); }, 256);
   });
 
-  // SES-LIB-030: a feature's own actions, left out of the cached manifest;
+  // a feature's own actions, left out of the cached manifest;
   // the UI asks for them when it opens the feature or meets one in a form.
   _server->on(UI_ACTIONS_OF_PATH, HTTP_GET, [this](AsyncWebServerRequest* request) {
     if (_sm && !_sm->authenticateRequest(request).authenticated) {
@@ -361,7 +361,7 @@ void WebManager::begin() {
     }
     const String of = request->hasParam("of") ? request->getParam("of")->value() : String();
     // Static per firmware like the manifest, so it revalidates the same way
-    // (SES-LIB-029c): ETag = manifest signature + feature id.
+    //: ETag = manifest signature + feature id.
     String etag;
     if (_manifestSig) {
       etag = "\"";
@@ -424,9 +424,9 @@ void WebManager::begin() {
 // alternative that fills a pre-allocated JsonObject so Mothership can
 // snapshot the device's UI schema without an HTTPS round trip on each
 // poll.
-// device.tz = {iana, posix} (SES-LIB-015): the UI formats device-local
+// device.tz = {iana, posix}: the UI formats device-local
 // times with it. Omitted while no timezone is set. Served by UI_DEVICE_PATH
-// and in Mothership's copy, not in the cached manifest (SES-LIB-032).
+// and in Mothership's copy, not in the cached manifest.
 void WebManager::addDeviceTz(JsonObject device) {
   char posix[64], iana[64];
   ESPRack::TimeSync::instance().getTimezone(posix, sizeof(posix), iana, sizeof(iana));
@@ -458,7 +458,7 @@ uint32_t s_manifestSig = 0;
 
 uint32_t manifestSignature() { return s_manifestSig; }
 
-// SES-LIB-033: every field's value becomes null, except action and message
+// every field's value becomes null, except action and message
 // labels, which belong to the schema; layout markers stay as they are.
 void stripFormValues(JsonObject root) {
   for (JsonPair form : root) {
@@ -611,7 +611,7 @@ uint32_t WebManager::computeManifestSig(ManifestBuilder& builder) const {
   // even in the (impossible-in-practice) event the new content CRCs to the
   // same value as the old. Bump on any cross-cutting manifest format change.
   // 0x0A_01_00_03 = api-v1 (C1), manifest schemaVersion 3.
-  static constexpr uint32_t kManifestSigSalt = 0x0A010004u;  // 4: compact entries (SES-LIB-030)
+  static constexpr uint32_t kManifestSigSalt = 0x0A010004u;  // 4: compact entries
   uint32_t crc = 0xFFFFFFFF;
   crc = esp_rom_crc32_le(crc, reinterpret_cast<const uint8_t*>(&kManifestSigSalt),
                          sizeof(kManifestSigSalt));
@@ -643,7 +643,7 @@ void WebManager::writeManifestCacheToFs() {
   // revalidation). Set unconditionally — both the cache-hit early-return
   // and the rebuild path below need it live for the process lifetime.
   _manifestSig = sig;
-  s_manifestSig = sig;  // manifestSignature() (SES-LIB-033)
+  s_manifestSig = sig;  // manifestSignature()
 
   // Read sidecar signature file. If it matches AND both manifest
   // files exist, we're already current — skip the rewrite.
@@ -672,7 +672,7 @@ void WebManager::writeManifestCacheToFs() {
     }
     return;
   }
-  // PowerGuard (SES-LIB-008): no flash writes now. Serve the manifest built
+  // PowerGuard: no flash writes now. Serve the manifest built
   // on the fly until the next re-bake, never the stale files.
   if (!ESPRack::PowerGuard::writesAllowed()) {
     _manifestLive = true;

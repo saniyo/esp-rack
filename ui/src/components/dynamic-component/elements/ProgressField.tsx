@@ -7,7 +7,7 @@ import { useFieldParser } from '../utils/useFieldParser';
 import { FieldAvatar } from '../utils/iconRegistry';
 import { ThresholdStep } from '../utils/fieldParser';
 
-// Read-only progress bar (SES-LIB-015): value against mn..mx, where the max
+// Read-only progress bar: value against mn..mx, where the max
 // may come live from a sibling state key (maxKey) and a thin marker shows a
 // sibling value such as a plan (markerKey). thr picks the bar colour by the
 // percentage reached.

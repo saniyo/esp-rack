@@ -2,7 +2,7 @@
 #ifndef WEB_INT_COERCE_H
 #define WEB_INT_COERCE_H
 
-// Integer parse-back rules for FormBuilder::updateValue (SES-LIB-016).
+// Integer parse-back rules for FormBuilder::updateValue.
 // Arduino-free (host-tested in test-host/test/test_int_coerce).
 //
 // A form writes a number field back as a JSON integer, a JSON double, or a

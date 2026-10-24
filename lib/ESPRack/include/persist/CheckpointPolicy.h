@@ -2,7 +2,7 @@
 #ifndef ESPRACK_PERSIST_CHECKPOINT_POLICY_H
 #define ESPRACK_PERSIST_CHECKPOINT_POLICY_H
 
-// CheckpointPolicy (SES-LIB-008): when a running value (a counter, an energy
+// CheckpointPolicy: when a running value (a counter, an energy
 // total) is worth a flash write. Never sooner than minIntervalMs after the
 // last checkpoint; then as soon as it moved by minDelta, and at the latest
 // after maxIntervalOnMs (load on) or maxIntervalOffMs (off). Arduino-free.

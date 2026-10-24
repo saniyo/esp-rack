@@ -1,4 +1,4 @@
-// SES-LIB-030: the cached manifest (schemaVersion >= 4) leaves out what follows
+// the cached manifest (schemaVersion >= 4) leaves out what follows
 // from an entry's id or is the default. normalizeManifest() puts it back once,
 // at load, so the rest of the UI reads full entries. A schemaVersion 3
 // manifest (older firmware) passes through unchanged.
@@ -57,7 +57,7 @@ export function normalizeManifest(m: UiManifest): UiManifest {
   return { ...m, features: (m.features ?? []).map(normalizeEntry) };
 }
 
-// SES-LIB-030: a feature's own actions, fetched when needed, join the manifest
+// a feature's own actions, fetched when needed, join the manifest
 // list, so every lookup finds them like any other entry.
 export function mergeActions(m: UiManifest, actions: FeatureEntry[]): UiManifest {
   const have = new Set(m.features.map((f) => f.id));
@@ -68,7 +68,7 @@ export function mergeActions(m: UiManifest, actions: FeatureEntry[]): UiManifest
 // "meter.reset" -> "meter": the feature an action belongs to by its id.
 export const ownerOfAction = (id: string): string => (id.indexOf('.') > 0 ? id.slice(0, id.indexOf('.')) : '');
 
-// SES-LIB-032: the device's time zone comes from GET ui/device and joins
+// the device's time zone comes from GET ui/device and joins
 // manifest.device.tz, where the picker, trends and tables read it.
 export function mergeDevice(m: UiManifest, d?: { tz?: { iana?: string; posix?: string } }): UiManifest {
   if (!d?.tz) return m;

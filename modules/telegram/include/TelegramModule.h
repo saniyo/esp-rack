@@ -24,7 +24,7 @@ class TelegramModule : public ESPRack::Module {
     svc_->registerManifest(ctx.web);
   }
   void onBegin() override { if (svc_) svc_->begin(); }
-  void onLoop() override { if (svc_) svc_->loop(); }  // command handlers (SES-LIB-019)
+  void onLoop() override { if (svc_) svc_->loop(); }  // command handlers
 
   // Service accessor — useful for App-level integration tests / direct
   // legacy enqueue.

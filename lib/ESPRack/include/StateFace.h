@@ -2,7 +2,7 @@
 #ifndef ESPRACK_STATE_FACE_H
 #define ESPRACK_STATE_FACE_H
 
-// StateFace — why a state reader runs (SES-LIB-033).
+// StateFace — why a state reader runs.
 //
 //   Rest        GET /state, the POST /state echo, rest.proxy: one reply,
 //               sized by sendAdaptiveJson. A static-schema page reads ALL its

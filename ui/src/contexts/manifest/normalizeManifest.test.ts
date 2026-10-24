@@ -1,4 +1,4 @@
-// SES-LIB-030 [host]: compact (schemaVersion 4) entries normalise back to the
+// [host]: compact (schemaVersion 4) entries normalise back to the
 // full ones; compact() mirrors the firmware's compactManifestEntry().
 import { describe, expect, it } from '@jest/globals';
 
@@ -100,12 +100,12 @@ describe('lazy feature actions', () => {
   });
 });
 
-describe('device time zone (SES-LIB-032)', () => {
+describe('device time zone', () => {
   it('comes from ui/device into manifest.device.tz, where the picker and trends read it', () => {
-    const m = normalizeManifest({ schemaVersion: 4, device: { name: 'SES' }, features: [] } as any);
+    const m = normalizeManifest({ schemaVersion: 4, device: { name: 'Demo' }, features: [] } as any);
     expect(m.device?.tz).toBeUndefined();
     const m2 = mergeDevice(m, { tz: { iana: 'Europe/Kyiv', posix: 'EET-2EEST,M3.5.0/3,M10.5.0/4' } });
-    expect(m2.device?.name).toBe('SES');
+    expect(m2.device?.name).toBe('Demo');
     expect(resolveZone(m2.device?.tz).timeZone).toBe('Europe/Kyiv');
     expect(mergeDevice(m2, {})).toBe(m2);  // nothing to merge
   });

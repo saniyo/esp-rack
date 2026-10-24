@@ -1,6 +1,6 @@
 // Minimal, self-contained Unity-compatible shim for host tests built by any
 // C++17 compiler (MSVC included) — no esp-rack or Unity dependency. Drop-in
-// for the subset of the Unity API the ESPRack/SES suites use, so the same
+// for the subset of the Unity API the ESPRack suites use, so the same
 // test_main.cpp compiles against real Unity (`pio test -e native`, GCC hosts)
 // and against this header (test-host/CMakeLists.txt).
 //

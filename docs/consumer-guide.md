@@ -49,7 +49,7 @@ checkout anywhere on disk (`lib_extra_dirs`), or the esp-rack git URL in
 | `build/` | no | A CMake cache an IDE produced by configuring the root `CMakeLists.txt`. Junk. |
 | `.pio/` | no | PlatformIO output. |
 
-**Placement is free** (SES-LIB-003). `sync_ui.py` takes the library root
+**Placement is free**. `sync_ui.py` takes the library root
 from the `lib_extra_dirs` entry that holds `ESPRack/library.json`
 (`<esp-rack>/lib`), so the checkout can have any name and live anywhere,
 with a relative or absolute path. Without such an entry it uses the
@@ -253,7 +253,7 @@ demo sets `-D FT_PROJECT=1`, which enables the app module body
      `interface_overrides/` over it.
    - **Seeding.** It seeds missing branding files into `interface_overrides/`
      (it never overwrites) and derives `favicon.ico` from `icon.png`.
-   - **Output location** (SES-LIB-003). The UI build writes `WWWData.h` into
+   - **Output location**. The UI build writes `WWWData.h` into
      the consumer's `<project>/.pio/www/`. `sync_ui.py` exports
      `ESPRACK_WWW_DIR` and prepends that dir to the include path, so
      `App.cpp`'s `#include <WWWData.h>` finds it. There is one bundle per
@@ -290,7 +290,7 @@ build must exist): `$env:ESPRACK_SKIP_UI=1; pio run -t upload`.
   "ESP8266 React") and `favicon.ico`.
 - `WWWData.h` is the consumer's own (`<project>/.pio/www/WWWData.h`).
   Consumers that share one esp-rack checkout no longer overwrite each
-  other's bundle and branding (SES-LIB-003; before that, the last one built
+  other's bundle and branding (before that, the last one built
   won).
 - `App::begin()` serves the bundle with three cache tiers
   (`esp-rack/lib/ESPRack/src/App.cpp:283-344`):
@@ -310,7 +310,7 @@ build must exist): `$env:ESPRACK_SKIP_UI=1; pio run -t upload`.
 
 ---
 
-### 5.1 Migrating a consumer to per-consumer UI bundles (SES-LIB-003)
+### 5.1 Migrating a consumer to per-consumer UI bundles
 
 For consumers whose scripts predate esp-rack `wip/ses-lib-003`
 (`feature/ses-light-support` after `ff69bca`):
@@ -463,7 +463,7 @@ consumer's `src/`, like the demo's, or as a module library.
 - Before trusting `time(nullptr)` for anything that matters (schedules,
   expiry), check `TimeSync::instance().isValid()` (or `clockSane()`), and
   `subscribe()` to clock events if the app must react to steps. The step is
-  a `TimeStep` (`step.ms`, int64, SES-LIB-027), so a correction of months
+  a `TimeStep` (`step.ms`, int64), so a correction of months
   arrives whole:
   `subscribe([](TimeEvent e, const TimeStatus& st, TimeStep step) { ... })`.
 - Without network time an admin can set the clock on the NTP status tab

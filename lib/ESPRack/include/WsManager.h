@@ -717,7 +717,7 @@ class WsManager {
   bool buildStateFrame(ChannelBase* base, const String& origin, String& out, ESPRack::StateFace face) {
     if (!base) return false;
     ClientsLock g(_txDocMx);
-    // SES-LIB-033: readers can tell this frame (fixed buffer) from a REST read.
+    // readers can tell this frame (fixed buffer) from a REST read.
     ESPRack::StateFaceScope faceScope(face);
     const size_t want = _maxWsCap + 256;
     if (!_txDoc || _txDoc->capacity() < want) {
@@ -732,7 +732,7 @@ class WsManager {
     JsonObject p = root.createNestedObject("p");
     base->readInto(p);
     // A reader that outgrew the doc leaves a silently truncated tree: drop
-    // the frame instead of sending half a state (SES-LIB-018, as DataApi).
+    // the frame instead of sending half a state (as DataApi).
     if (_txDoc->overflowed()) {
       const uint32_t n = ++base->overflowFrames;
       if ((n & (n - 1)) == 0) {  // 1st, 2nd, 4th, 8th...: no log flood at 10 Hz

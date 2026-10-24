@@ -123,7 +123,7 @@ class Module {
 | `onInstall(ctx)` | `Builder::build()` step 5, once, in sorted order (`Builder.cpp:161-178`) | **Filesystem not mounted, WiFi not initialized.** Construct services, `registerFeature/Action/Page`, `addTabToFeature`. Don't load config here. |
 | `onBegin()` | `App::begin()` step 4, in install order (`App.cpp:250-260`) | LittleFS mounted (step 1), `ConfigManager::begin()` done (step 2), `WiFi.mode(WIFI_AP_STA)` done (step 3). **HTTP endpoints and WS channels are not mounted yet.** That happens after all `onBegin`s in `WebManager::begin()` (step 5, `App.cpp:265`), and `server.begin()` is the last step (`App.cpp:408`). Load config, open peripherals, subscribe to providers here. |
 | `onLoop()` | `App::loop()`, every iteration, in install order, followed by `WsManager::processAllQueues()` (`App.cpp:461-465`) | Cooperative and single-threaded on `loopTask`. **Never block** (no `delay()`, no unbounded reads). |
-| `onShutdown()` | `ESPRack::restartDevice(reason)`, which every built-in reboot path uses, or the `esp_restart()` shutdown hook (`App.cpp`, LIB-FIX-006) | Runs **once**, in reverse install order, on the loop task when possible, with a budget of `ESPRACK_SHUTDOWN_BUDGET_MS` (500 ms) per module, then the chip resets. Persist counters and put outputs (relays, SSRs) into a safe state here. `ESPRack::restartReason()` says why: for example, on `kRestartFactoryReset` the `/config` wipe happens *after* your hook, so don't bother saving. Never block on the network. **Task context:** normally the loop task. In the 3 s fallback (the loop didn't take the hand-off), or from the IDF safety net (an `esp_restart()` outside `restartDevice`, reason `"idf"`), it runs on **another task**. Don't touch loop-owned state there without the service lock. After the reboot, `ESPRack::lastRestartReason()` returns the reason (SES-LIB-007). |
+| `onShutdown()` | `ESPRack::restartDevice(reason)`, which every built-in reboot path uses, or the `esp_restart()` shutdown hook (`App.cpp`, LIB-FIX-006) | Runs **once**, in reverse install order, on the loop task when possible, with a budget of `ESPRACK_SHUTDOWN_BUDGET_MS` (500 ms) per module, then the chip resets. Persist counters and put outputs (relays, SSRs) into a safe state here. `ESPRack::restartReason()` says why: for example, on `kRestartFactoryReset` the `/config` wipe happens *after* your hook, so don't bother saving. Never block on the network. **Task context:** normally the loop task. In the 3 s fallback (the loop didn't take the hand-off), or from the IDF safety net (an `esp_restart()` outside `restartDevice`, reason `"idf"`), it runs on **another task**. Don't touch loop-owned state there without the service lock. After the reboot, `ESPRack::lastRestartReason()` returns the reason. |
 
 ### 3.2 `ModuleDescriptor` (`Module.h:81-106`)
 
@@ -308,7 +308,7 @@ Machine clients use the same POST.
 - `uint8_t`, `uint16_t`, `int`, `float` and `double` coerce from numbers
   **and numeric strings**, with clamping or rounding.
 - `long`, `unsigned long`, `long long` and `unsigned long long` follow the same
-  rules (SES-LIB-016, `web/IntCoerce.h`): integers clamped to the type, doubles
+  rules (`web/IntCoerce.h`): integers clamped to the type, doubles
   rounded and clamped, decimal strings parsed and clamped, negatives clamped to 0
   for unsigned. A non-numeric string is ignored, with a `log_d` naming the key. On
   ESP32 (esp-14.2.0) these are `int32_t`, `uint32_t`, `int64_t` and `uint64_t`.
@@ -697,7 +697,7 @@ if (_tg.active()) _tg.send("line rate high");  // active() = valid && unmuted &&
 `send` returns `InvalidMessagingSendId` when the quota is used up, the queue
 is full or the subscription is muted.
 
-Commands (SES-LIB-019): the bot answers `/<cmd> [args]` from the chats in
+Commands: the bot answers `/<cmd> [args]` from the chats in
 Telegram → Settings → "Command chats" (an id, a `-group` or `group:topic`;
 empty = the default chat). The handler runs on the loop task and returns the
 reply; `adminOnly` commands need the sender in "Admin user ids". Polling
@@ -722,7 +722,7 @@ if (_mq.active()) _mq.publish("rate", "12.5");          // -> home/uart/rate
 _mq.onMessage("cmd/#", [this](const String& topic, const String& payload) { /*...*/ });
 ```
 
-Device availability (SES-LIB-020) belongs to the provider, not to a
+Device availability belongs to the provider, not to a
 subscription. With MQTT → Settings → Availability on, the device publishes a
 retained `online` after every connect, and the broker publishes the retained
 `offline` will when the device drops off. Reference the topic with
@@ -877,7 +877,7 @@ Start from `modules/template-ext-hw/`. Its pieces:
    then switch pins in `loop()`.
 5. **`hwState()` other than `Ok` means: hands off.** Don't drive the pins
    of an instance in `Conflict`.
-   - **Release, then say so** (SES-LIB-024). Hardware an instance gives up
+   - **Release, then say so**. Hardware an instance gives up
      (new pins, Disabled, Conflict, NotConfigured) stays claimed as
      "releasing". Other instances get "GPIO18 being released by meter".
    - Once the loop has let it go (pins back to input, `Serial2.end()`),
@@ -887,7 +887,7 @@ Start from `modules/template-ext-hw/`. Its pieces:
      note "releasing N for 14 s, no released()". The claim stays.
    - Only hardware the instance set up waits for `released()`. An instance
      that never was `Ok` (a conflict since boot) gives its claims up at once.
-   - **Report what the hardware does** (SES-LIB-025). `Ok` only means the
+   - **Report what the hardware does**. `Ok` only means the
      resources are free. Use `hwNote("no answer from the meter",
      HwNoteLevel::Fault)` (or `hw()->setRuntimeNote(...)`) and
      `hwNote(nullptr)` once it works. System → Hardware shows
@@ -903,9 +903,8 @@ Start from `modules/template-ext-hw/`. Its pieces:
    `ctx.app->hw()->reserveGpio(pin, "reason")` in `onInstall`, as the
    filesystem module does for the SD card. For a UART, an RMT/LEDC channel
    or an I2C address use `ctx.app->hw()->reserve(HwKind::Uart, 2, "reason")`.
-   Consumers use `Builder::reserve(...)` / `reserveUart(port, reason)`
-   (SES-LIB-023).
-9. **Strings the form uses exist before the `ConfigDelegate`** (SES-LIB-026).
+   Consumers use `Builder::reserve(...)` / `reserveUart(port, reason)`.
+9. **Strings the form uses exist before the `ConfigDelegate`**.
    `ConfigDelegate`'s constructor registers the config, and that runs the
    form reader once (the secret-key probe). Any instance string the form
    reader reads (an action id, a title) must already be filled in by then.
@@ -917,14 +916,14 @@ Start from `modules/template-ext-hw/`. Its pieces:
     good. A `HardwareSerial` you create and delete leaves it dangling. Take a
     `HardwareSerial&`, or map the configured port number to
     `Serial0`/`Serial1`/`Serial2` and only call `begin()`/`end()` on it.
-11. **Persistence and power** (SES-LIB-008).
+11. **Persistence and power**.
     - Counters and checkpoints go to an `NvsRecord<T>` (with a
       `CheckpointPolicy`), not to a JSON config; state that must survive a
       soft reset goes to `ESPRACK_RTC_SCRATCH`.
     - Use `ESPRack::SupplyState` for supply states; a module that senses
       the supply reports it with `PowerGuard::setSupply()`.
     - Before any flash write of your own, ask `PowerGuard::writesAllowed()`.
-12. **Owner and menu** (SES-LIB-028).
+12. **Owner and menu**.
     - The composition root says which module uses an instance:
       `.installExtHw<MeterModule>("meter", Serial1).owner("sesLight")`. The
       owner is a module id, and its menu entry has the same id.
@@ -935,7 +934,7 @@ Start from `modules/template-ext-hw/`. Its pieces:
     - The page says "Used by <owner>". Hide manual controls the owner drives
       (`hwOwned()`), and add your own note where it helps.
     - `hwTitle()` and `interfaceIds()` fill `extHw[]`.
-13. **Static form schema** (SES-LIB-033), opt-in: `WebFeature(...).staticSchema()`.
+13. **Static form schema**, opt-in: `WebFeature(...).staticSchema()`.
     The UI then caches `GET <form>?schema=1` (values nulled, ETag/304) and
     takes the values from `/state`. Only for a form whose fields never depend
     on the state:

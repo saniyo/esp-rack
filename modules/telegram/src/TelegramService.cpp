@@ -24,7 +24,7 @@ TelegramService::TelegramService(ConfigManager* cfgMgr)
     _bot("", _cli),
     _botTokenInBot("") {
   _cmdMx = xSemaphoreCreateMutex();
-  _inQ = xQueueCreate(4, sizeof(TelegramInbound*));  // SES-LIB-019
+  _inQ = xQueueCreate(4, sizeof(TelegramInbound*));
   // Queue holds POINTERS to heap-allocated TelegramQueuedMessage. We
   // can't memcpy the struct by value because it carries Arduino String
   // members — the FreeRTOS queue's bitwise copy duplicates the
@@ -105,7 +105,7 @@ void TelegramService::registerManifest(WebManager* web) {
   settingsTab.auth     = WebAuthLevel::Admin;
   settingsTab.order    = 20;
   spec.tabs.push_back(settingsTab);
-  spec.staticSchema = true;  // the form never depends on the state (SES-LIB-033)
+  spec.staticSchema = true;  // the form never depends on the state
 
   // Wrap the static form reader in a lambda that appends the
   // Subscriptions sub-form. Static buildForm doesn't know about
@@ -153,7 +153,7 @@ void TelegramService::registerManifest(WebManager* web) {
   // form and the WS pushes. 8192 covers the saturated-log worst case
   // (~5-6 KB) with margin.
   // /state and WS: the settings echo, the log and the subscription rows, so
-  // the static schema (SES-LIB-033) gets every value from here.
+  // the static schema gets every value from here.
   auto stateReader = [this](TelegramSettings& s, JsonObject& root) {
     TelegramSettings::staRead(s, root);
     fillSubscriptionRows(root.createNestedArray("subscriptions"));
@@ -192,7 +192,7 @@ void TelegramService::begin() {
   //      send. ensureBotToken catches token edits so the UTB
   //      fallback uses the new value next time.
   addUpdateHandler([this](const String& origin) {
-    if (_state.enabled && !_task) startTask();  // enabled at runtime: no reboot (SES-LIB-019)
+    if (_state.enabled && !_task) startTask();  // enabled at runtime: no reboot
     ensureBotToken(_state.botToken);
     updateStatusLabel();
     _cfg.saveIfChanged(origin);
@@ -635,7 +635,7 @@ void TelegramService::runWorker() {
   constexpr uint32_t kRetryPauseMs = 5000;
   TelegramQueuedMessage* m = nullptr;
   for (;;) {
-    // SES-LIB-019: ask for commands every cmd_poll_s while any is registered.
+    // ask for commands every cmd_poll_s while any is registered.
     if (_state.enabled && !_state.botToken.isEmpty() && WiFi.isConnected() && !_cmds.empty() &&
         static_cast<uint32_t>(millis() - _lastPollMs) >= static_cast<uint32_t>(_state.cmdPollS) * 1000u) {
       _lastPollMs = millis();
@@ -700,7 +700,7 @@ void TelegramService::runWorker() {
   }
 }
 
-// ── Commands (SES-LIB-019) ─────────────────────────────────────────────────
+// ── Commands ─────────────────────────────────────────────────
 
 namespace {
 // Command replies go out as plain text: with the bot's default Markdown a

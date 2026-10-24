@@ -2,7 +2,7 @@
 #ifndef ESPRACK_SYSTEM_BOOT_GUARD_H
 #define ESPRACK_SYSTEM_BOOT_GUARD_H
 
-// BootGuard (SES-LIB-014): boot-loop detection with an advisory safe mode.
+// BootGuard: boot-loop detection with an advisory safe mode.
 //
 // Only CRASH boots count: panic, int-wdt, task-wdt, wdt, an unexplained
 // esp_restart ("idf") and unknown. Power cuts, brownouts and intended
@@ -18,7 +18,7 @@
 // factory reset — never by a stable run (the code that crashed may be off).
 //
 // windowMs: kept from the spec's signature, not used — only a stable run
-// ends a crash run (SES decision); each crash boot lasts < stableAfterMs, so
+// ends a crash run (by design); each crash boot lasts < stableAfterMs, so
 // `limit` of them in a row fit limit × stableAfterMs anyway.
 //
 // Persisted in NVS namespace "esprack", key "boot": two writes per boot at

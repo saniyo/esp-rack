@@ -33,7 +33,7 @@ export const fieldConfigurations = {
   message: { options: ['r', 'rw', 'level', 'levelKey', 'icon', 'color', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const },
   timezones: { options: ['r', 'rw', 'icon', 'color', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const },
   ip: { options: ['r', 'rw', 'pl', 'icon', 'color', 'colorMap', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const },
-  // Read-only bar (SES-LIB-015): value against mn..mx, or a live max from
+  // Read-only bar: value against mn..mx, or a live max from
   // maxKey; a marker at markerKey; thr = % -> colour steps.
   progress: { options: ['r', 'rw', 'mn', 'mx', 'f', 'unit', 'maxKey', 'markerKey', 'thr', 'icon', 'color', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const }
 };
@@ -315,7 +315,7 @@ const optionParsers: Record<string, (option: string) => ParsedFieldOption> = {
     return { key: 'withFields', value: pairs };
   },
 
-  // ── SES-LIB-016 ──
+  // ── sibling values: message, action ──
   // message: severity from a sibling state value.
   levelKey: (opt) => ({ key: 'levelKey', value: getAfter(opt, 'levelKey').trim() }),
   // action: "secParam[,msParam]" -> the browser clock appended on fire.
@@ -324,7 +324,7 @@ const optionParsers: Record<string, (option: string) => ParsedFieldOption> = {
     value: getAfter(opt, 'clientTime').split(',').map((s) => s.trim()).filter(Boolean),
   }),
 
-  // ── SES-LIB-015 ──
+  // ── sibling values: progress ──
   // progress: sibling state keys for a live max / a marker.
   maxKey: (opt) => ({ key: 'maxKey', value: getAfter(opt, 'maxKey').trim() }),
   markerKey: (opt) => ({ key: 'markerKey', value: getAfter(opt, 'markerKey').trim() }),

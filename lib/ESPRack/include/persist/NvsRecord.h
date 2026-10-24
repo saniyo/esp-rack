@@ -2,7 +2,7 @@
 #ifndef ESPRACK_PERSIST_NVS_RECORD_H
 #define ESPRACK_PERSIST_NVS_RECORD_H
 
-// NvsRecord<T> (SES-LIB-008): one struct in one NVS blob, CRC-checked and
+// NvsRecord<T>: one struct in one NVS blob, CRC-checked and
 // versioned. For checkpoints and counters, which JSON config files don't
 // suit (a ConfigManager save is three flash operations).
 //

@@ -80,7 +80,7 @@ inline bool hwIsPin(HwKind k) { return k == HwKind::Gpio || k == HwKind::Adc || 
 
 enum class HwState : uint8_t { Ok, NotConfigured, Conflict, Disabled };
 
-// A runtime note an instance attaches to itself (SES-LIB-025): the registry's
+// A runtime note an instance attaches to itself: the registry's
 // Ok only says the resources are free — not that the UART answered.
 enum class HwNoteLevel : uint8_t { Info, Warn, Fault };
 

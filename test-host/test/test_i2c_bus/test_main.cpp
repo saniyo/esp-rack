@@ -1,4 +1,4 @@
-// Shared I2C bus (SES-LIB-034): the bus instance holds the controller and
+// Shared I2C bus: the bus instance holds the controller and
 // its pins, devices claim only their address on it (i2cAddrClaim), an
 // old-style device next to a bus instance is a Conflict; I2cBusGuard and
 // the result names.
@@ -71,7 +71,7 @@ static HwDescriptor busOn(int16_t controller, int16_t sda, int16_t scl) {
   return d;
 }
 
-// A driver that opens Wire itself (before SES-LIB-034).
+// A driver that opens Wire itself (before II2cBus).
 static HwDescriptor oldDevice(uint8_t addr, int8_t bus, int16_t sda, int16_t scl) {
   HwDescriptor d;
   d.add(HwKind::I2cBus, bus, "bus", kHwShared);

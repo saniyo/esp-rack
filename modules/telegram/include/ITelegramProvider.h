@@ -41,7 +41,7 @@ class ITelegramProvider : public ESPRack::IMessagingProvider {
   virtual void setSubscriptionEnabled(uint32_t subId, bool on) = 0;
   virtual void releaseSubscription(uint32_t subId) = 0;
   virtual const char* subscriptionName(uint32_t subId) const = 0;
-  // SES-LIB-019 (handle API: TelegramSubscription::onCommand).
+  // (handle API: TelegramSubscription::onCommand).
   virtual bool doOnCommand(uint32_t subId, const char* cmd, const char* help, TelegramCommandHandler h,
                            bool adminOnly) {
     (void)subId; (void)cmd; (void)help; (void)h; (void)adminOnly;

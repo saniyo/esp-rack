@@ -102,7 +102,7 @@ MqttSettingsService::MqttSettingsService(ConfigManager* cfgMgr)
   _mqttClient.onConnect(std::bind(&MqttSettingsService::onMqttConnect, this, std::placeholders::_1));
   _mqttClient.onDisconnect(std::bind(&MqttSettingsService::onMqttDisconnect, this, std::placeholders::_1));
   // PUBACK of our retained "offline" (async_tcp task): the clean
-  // DISCONNECT may go now (SES-LIB-020).
+  // DISCONNECT may go now.
   _mqttClient.onPublish([this](uint16_t packetId) {
     if (packetId != 0 && packetId == _offlineId.load()) _offlineAcked = true;
   });
@@ -297,7 +297,7 @@ void MqttSettingsService::registerManifest(WebManager* web) {
   // 503 this form whenever C3's ~9 KB maxAlloc had any neighbour in
   // flight). Runtime topic VALUES beyond the probed size ride the WS
   // delta channel (staRead), so the REST tree stays schema-bounded.
-  // SES-LIB-033: GET /state (the REST face) carries every field of the
+  // GET /state (the REST face) carries every field of the
   // three tabs, so the UI caches the form's schema; WS frames keep carrying
   // only what changed (their buffer is fixed).
   auto stateReader = [this](MqttSettings& s, JsonObject& root) {
@@ -402,7 +402,7 @@ void MqttSettingsService::onMqttConnect(bool sessionPresent) {
 
   refreshRuntime();
 
-  // Device availability (SES-LIB-020): the will says "offline", this says
+  // Device availability: the will says "offline", this says
   // "online". Before the listeners, so whatever they publish follows it.
   if (_willActive && _retainedWillTopic) {
     _mqttClient.publish(_retainedWillTopic, 1, true, "online");
@@ -744,7 +744,7 @@ void MqttSettingsService::onStationModeDisconnected(const WiFiEventStationModeDi
 }
 #endif
 
-/* ---------- availability (SES-LIB-020) ---------- */
+/* ---------- availability ---------- */
 void MqttSettingsService::refreshAvailabilityTopic() {
   if (!_state.availability) {
     _state.availabilityNow = "";

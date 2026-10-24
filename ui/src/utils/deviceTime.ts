@@ -1,4 +1,4 @@
-// Device-local time formatting (SES-LIB-015).
+// Device-local time formatting.
 //
 // The device's timezone comes from the manifest (`device.tz = {iana, posix}`,
 // see WebManager::addDeviceTz). Times are shown in THAT zone, not the
@@ -82,7 +82,7 @@ const OPTS: Record<FmtKey, Intl.DateTimeFormatOptions> = {
     year: 'numeric', month: '2-digit', day: '2-digit',
     hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
   },
-  // table cells (SES-LIB-016)
+  // table cells
   dateFull: { year: 'numeric', month: '2-digit', day: '2-digit' },
   datetimeFull: { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' },
   monthYear: { month: 'short', year: 'numeric' },
@@ -149,7 +149,7 @@ export function hhmmToSecOfDay(v: string): number | undefined {
   return h * 3600 + min * 60 + s;
 }
 
-// ── Table cells (SES-LIB-016) ──────────────────────────────────────────────
+// ── Table cells ──────────────────────────────────────────────
 
 // Duration -> the two largest units: "3d 4h", "2h 05m", "45m 10s", "12s", "0s".
 // unit: what the value counts — seconds (default), ms or minutes.

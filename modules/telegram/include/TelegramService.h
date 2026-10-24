@@ -64,7 +64,7 @@ class TelegramService : public StatefulService<TelegramSettings>,
 
   void registerManifest(WebManager* web);
   void begin();
-  // Runs command handlers on the loop task (SES-LIB-019).
+  // Runs command handlers on the loop task.
   void loop();
 
   bool doOnCommand(uint32_t subId, const char* cmd, const char* help, TelegramCommandHandler h,
@@ -129,7 +129,7 @@ class TelegramService : public StatefulService<TelegramSettings>,
   void startTask();
   void fillSubscriptionRows(JsonArray rows) const;  // the Subscriptions table, form and state
 
-  // SES-LIB-019 commands.
+  // commands.
   struct TgCommand {
     uint32_t subId;
     String cmd;

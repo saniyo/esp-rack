@@ -1,4 +1,4 @@
-// IntCoerce (SES-LIB-016): the integer rules FormBuilder::updateValue uses
+// IntCoerce: the integer rules FormBuilder::updateValue uses
 // for long / unsigned long / long long / unsigned long long — i.e. int32_t,
 // uint32_t, int64_t, uint64_t on ESP32.
 #include <unity.h>

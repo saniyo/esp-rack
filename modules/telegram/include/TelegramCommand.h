@@ -2,7 +2,7 @@
 #ifndef ESPRACK_TELEGRAM_COMMAND_H
 #define ESPRACK_TELEGRAM_COMMAND_H
 
-// SES-LIB-019: parsing and gating of bot commands. Arduino-free and
+// parsing and gating of bot commands. Arduino-free and
 // header-only, so the rules are host-tested.
 
 #include <stdint.h>

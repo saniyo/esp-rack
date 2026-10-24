@@ -1,4 +1,4 @@
-// SES-LIB-028: the UI's model of the external HW instances, built only from
+// the UI's model of the external HW instances, built only from
 // manifest.extHw (the backend HwRegistry is the one source). It says where an
 // instance page goes: into an "External Hardware" group under its owner's
 // menu entry, or under System when it has no owner (or the owner has no menu

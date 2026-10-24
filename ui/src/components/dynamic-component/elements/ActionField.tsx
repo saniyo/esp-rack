@@ -103,7 +103,7 @@ const ActionField: FC<ActionFieldProps> = ({ field, value }) => {
   const refEntry = refId ? findFeature(refId) : undefined;
   const usingRef = refEntry && refEntry.kind === 'action';
   useEffect(() => {
-    if (refId && !refEntry) ensureActions(ownerOfAction(refId));  // a feature's own action (SES-LIB-030)
+    if (refId && !refEntry) ensureActions(ownerOfAction(refId));  // a feature's own action
   }, [refId, refEntry, ensureActions]);
 
   const resolved = useMemo(() => {
@@ -171,7 +171,7 @@ const ActionField: FC<ActionFieldProps> = ({ field, value }) => {
         url = url + (url.includes('?') ? '&' : '?') + qs;
       }
 
-      // clientTime (SES-LIB-016): the browser's clock at click time, e.g.
+      // clientTime: the browser's clock at click time, e.g.
       // ?epoch=<s>&ms=<0..999> for system.setTime ("set clock from browser").
       const clientTime = ((optionMap as any).clientTime?.value ?? []) as string[];
       if (clientTime.length > 0) {

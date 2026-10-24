@@ -51,7 +51,7 @@ class IMqttProvider : public ESPRack::IMessagingProvider {
   // LightStateService.cpp's "Attached values" table.
   virtual const std::vector<String>& attachedTopics() const = 0;
 
-  // Device availability (SES-LIB-020): the topic carrying the retained
+  // Device availability: the topic carrying the retained
   // "online" / "offline" (last will), "" when it's off. Subscriptions only
   // reference it (e.g. an availability_topic in discovery payloads); the
   // provider alone publishes there.

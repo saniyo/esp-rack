@@ -72,7 +72,7 @@ class HwRegistry {
   }
   // fn(const char* instanceId, const HwResource& r, HwState state) for every
   // resource of `kind` in every instance's last describeHw(), in install
-  // order (SES-LIB-034). Instances that don't hold it are listed too, with
+  // order. Instances that don't hold it are listed too, with
   // their state: Conflict, Disabled, NotConfigured (r.index -1). An I2C bus
   // page lists its devices with HwKind::I2cAddr: the rows for which
   // i2cAddrOn(r, controller()) holds (II2cBus.h). Any task: the rows are copied under the
@@ -84,17 +84,17 @@ class HwRegistry {
     for (const ClaimRow& c : rows) fn(c.id, c.res, c.state);
   }
 
-  // SES-LIB-024: `who` has let go of the hardware it gave up (pins switched
+  // `who` has let go of the hardware it gave up (pins switched
   // back to input, UART ended). Until then that hardware stays claimed as
   // "releasing" and other instances can't take it. Call it from the loop
   // that switches the hardware (ExtHwModule::hwReleased()).
   void released(const ExtHwModule& who);
 
-  // SES-LIB-025: a runtime note on `who` — Ok only means the resources are
+  // a runtime note on `who` — Ok only means the resources are
   // free, not that the device answered. nullptr clears it. Any task.
   void setRuntimeNote(const ExtHwModule& who, const char* note, HwNoteLevel level = HwNoteLevel::Warn);
 
-  // SES-LIB-023: keep any resource away from every instance — a UART, an
+  // keep any resource away from every instance — a UART, an
   // RMT/LEDC channel ... that the consumer or a framework module drives
   // itself. GPIO kinds go to reserveGpio(). Before the boot pass; `reason`
   // is a static literal.
@@ -128,7 +128,7 @@ class HwRegistry {
     HwState state;
     HwDescriptor desc;    // as last described
     char reason[sizeof(HwCheck::reason)];
-    char note[48];        // SES-LIB-025 runtime note ("" = none)
+    char note[48];        // runtime note ("" = none)
     HwNoteLevel noteLevel;
   };
   void manifestItem(size_t i, JsonObject o, const WebManager& web) const;  // extHw[i]
@@ -145,7 +145,7 @@ class HwRegistry {
   void registerManifest(WebManager* web);
 
   // The UI label of the external HW instances: the System tab and the menu
-  // groups (the UI reads it from that tab's title). SES-LIB-028.
+  // groups (the UI reads it from that tab's title).
   static constexpr const char* kLabel = "External Hardware";
   void loop();                       // App::loop: a pending "restore factory pins"
 
@@ -159,7 +159,7 @@ class HwRegistry {
   Inst* instOf(const ExtHwModule& who);
   const Inst* instOf(const ExtHwModule& who) const;
   void evaluate(Inst& x, const HwDescriptor& d);  // under _mx
-  // System -> Hardware (SES-LIB-033): the form (values = false: the schema,
+  // System -> Hardware: the form (values = false: the schema,
   // no rows) and its flat values for GET .../state.
   void buildForm(JsonObject& root, bool values) const;
   void buildState(JsonObject& root) const;

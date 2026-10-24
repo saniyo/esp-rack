@@ -98,7 +98,7 @@ class WiFiSettings {
   // feature id (C1, api-v1).
   static void buildForm(WiFiSettings& s, JsonObject& root);
 
-  // --- GET /api/v1/wifi/state (SES-LIB-033): every field of the three tabs,
+  // --- GET /api/v1/wifi/state: every field of the three tabs,
   // flat under the form's keys (the live connection as sta_*, the scan rows,
   // the settings); never the passwords: the cached schema shows them as set.
   static void readState(WiFiSettings& s, JsonObject& root);

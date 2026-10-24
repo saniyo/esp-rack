@@ -64,7 +64,7 @@ class SecuritySettings {
   std::list<ApiToken> apiTokens;
 
   // Does the factory password of the factory admin / guest still work
-  // (SES-LIB-022)? Only those two usernames can be "factory". Decided when a
+  //? Only those two usernames can be "factory". Decided when a
   // password is set (before hashing) and persisted per row as "factory", so
   // a boot never re-hashes. See SecuritySettingsService::usesFactoryCredentials.
   bool factoryAdmin = false;

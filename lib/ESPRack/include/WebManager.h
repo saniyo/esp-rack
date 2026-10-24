@@ -3,7 +3,7 @@
 
 #include <cstring>
 
-// SES-LIB-030: soft budget of one cached manifest tier (raw bytes). Over it:
+// soft budget of one cached manifest tier (raw bytes). Over it:
 // a warning at boot and in System -> Status.
 #ifndef ESPRACK_MANIFEST_BUDGET
 #define ESPRACK_MANIFEST_BUDGET 16384
@@ -29,10 +29,10 @@
 #include <WebInfoEntry.h>
 
 #define UI_MANIFEST_PATH "/api/v1/ui/manifest"
-// SES-LIB-030: GET ?of=<featureId> -> {"actions":[...]}, a feature's own
+// GET ?of=<featureId> -> {"actions":[...]}, a feature's own
 // actions, which the cached manifest leaves out.
 #define UI_ACTIONS_OF_PATH "/api/v1/ui/actions"
-// SES-LIB-032: GET -> {"tz":{"iana","posix"}}, the device's runtime facts,
+// GET -> {"tz":{"iana","posix"}}, the device's runtime facts,
 // kept out of the cached manifest so it changes only with the firmware.
 #define UI_DEVICE_PATH "/api/v1/ui/device"
 // Manifest assembly streams JSON on the fly via ManifestBuilder (a
@@ -253,11 +253,11 @@ class WebManager {
   void setFrameworkVersion(const char* v) { _frameworkVersion = v ? v : ""; }
 
   // Re-bake the flash manifest cache (and its ETag) after a runtime change
-  // the manifest shows — the device timezone (SES-LIB-015). No-op before
+  // the manifest shows — the device timezone. No-op before
   // begin(). Loop task; rewrites only when the content signature changed.
   void refreshManifestCache();
 
-  // SES-LIB-030: bytes of the cached manifest per tier (0 = not cached).
+  // bytes of the cached manifest per tier (0 = not cached).
   uint32_t manifestBytes(bool authed) const { return _manifestBytes[authed ? 1 : 0]; }
   // A "<feature>.<verb>" action of a registered feature (not system.* /
   // config.*): served by UI_ACTIONS_OF_PATH instead of the cached manifest.
@@ -265,7 +265,7 @@ class WebManager {
 
   // A root-level manifest array that another core object fills, streamed
   // one item at a time like the features: the hardware registry's "extHw"
-  // (SES-LIB-028). One source; a later call replaces it.
+  //. One source; a later call replaces it.
   struct ManifestArray {
     const char* key = nullptr;
     std::function<size_t()> count;

@@ -67,7 +67,7 @@ BoardInfo boardInfoFor(HwChip chip, const BoardFlags& flags);
 struct HwClaim {
   const char* owner;  // instance id (stable storage, the module's); a reason for reserved ones
   HwResource res;
-  // SES-LIB-024: the owner gave it up in its settings but hasn't confirmed
+  // the owner gave it up in its settings but hasn't confirmed
   // yet that the hardware is let go (HwClaims::released). Still blocks others.
   bool releasing = false;
   uint32_t releasingSince = 0;  // ms on the caller's clock
@@ -75,10 +75,10 @@ struct HwClaim {
 
 // Releasing this long without released() shows as a warning: the module
 // probably never says so. The claims stay, since only the module knows the
-// hardware is let go (SES-LIB-024).
+// hardware is let go.
 constexpr uint32_t kHwReleasingWarnMs = 10000;
 
-// One instance's columns in System -> Hardware (SES-LIB-024/025). Pure, so
+// One instance's columns in System -> Hardware. Pure, so
 // the wording is unit-tested.
 struct HwInstStatus {
   HwState state = HwState::NotConfigured;
@@ -112,7 +112,7 @@ class HwClaims {
   void set(const char* owner, const HwDescriptor& d);  // replaces owner's claims outright
   void remove(const char* owner);
 
-  // SES-LIB-024. replace(): like set(), but the owner's claims that `d` no
+  // replace(): like set(), but the owner's claims that `d` no
   // longer holds become `releasing` (they keep blocking others) instead of
   // vanishing. releaseAll(): every active claim of the owner becomes
   // releasing. released(): drops the owner's releasing claims — the owner
@@ -128,7 +128,7 @@ class HwClaims {
   // Age of the owner's oldest releasing claim (0 = none).
   uint32_t releasingAgeMs(const char* owner, uint32_t nowMs) const;
 
-  // SES-LIB-023: a non-GPIO resource nobody may claim (a UART, an RMT
+  // a non-GPIO resource nobody may claim (a UART, an RMT
   // channel ... the consumer or a framework module uses itself). GPIOs are
   // reserved through the board notes (BoardInfo::addNote). `reason` is a
   // static literal. false for pin kinds.

@@ -1,4 +1,4 @@
-// SES-LIB-015 [host]: the option strings the C++ builders emit (web/Form.h),
+// [host]: the option strings the C++ builders emit (web/Form.h),
 // parsed back by the frontend. The strings are exactly what Form.h writes for
 // the calls in the comments (Arduino String(double) prints two decimals);
 // keep them in step with Form.h / FieldVocab.h.
@@ -167,7 +167,7 @@ describe('device timezone', () => {
   });
 });
 
-// ── SES-LIB-016 ──
+// ── message levelKey, action clientTime ──
 describe('Message levelKey / Action clientTime', () => {
   it('parses levelKey', () => {
     // web::Message("m_state", "…").level("info").levelKey("state_level")

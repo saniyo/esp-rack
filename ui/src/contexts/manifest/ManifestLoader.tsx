@@ -79,7 +79,7 @@ const ManifestLoader: FC<RequiredChildrenProps> = (props) => {
         setManifest(next);
         applyManifest(next);
         if (next.authenticated) {
-          // The time zone isn't in the cached manifest (SES-LIB-032).
+          // The time zone isn't in the cached manifest.
           ManifestApi.readDeviceInfo()
             .then((r) => setManifest((m) => mergeDevice(m, r.data)))
             .catch(() => undefined);
@@ -125,7 +125,7 @@ const ManifestLoader: FC<RequiredChildrenProps> = (props) => {
     [manifest]
   );
 
-  // SES-LIB-030: a feature's own actions arrive on demand and join the list.
+  // a feature's own actions arrive on demand and join the list.
   const requestedActions = useRef(new Set<string>());
   const [actionsDone, setActionsDone] = useState<Set<string>>(() => new Set());
   const ensureActions = useCallback((featureId: string) => {

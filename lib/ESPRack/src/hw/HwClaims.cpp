@@ -369,7 +369,7 @@ HwCheck HwClaims::check(const char* owner, const HwDescriptor& d) const {
       if (sameThing(r, o, sharedRmt) && !sharable(r, o)) fail(c, "%s used twice (%s, %s)", what, roleOf(o), roleOf(r));
     }
 
-    // --- reserved for the consumer / framework (SES-LIB-023)
+    // --- reserved for the consumer / framework
     if (r.index == kHwAnyChannel) continue;
     for (const HwClaim& o : _reserved) {
       if (sameThing(r, o.res, sharedRmt)) {
@@ -379,7 +379,7 @@ HwCheck HwClaims::check(const char* owner, const HwDescriptor& d) const {
     }
     if (!c.ok) break;
 
-    // --- other owners (a releasing claim still holds the hardware, SES-LIB-024)
+    // --- other owners (a releasing claim still holds the hardware)
     const bool busPin = isPinKind(r.kind) && (r.flags & kHwShared) && r.bus >= 0;
     for (const HwClaim& o : _claims) {
       if (sameOwner(o.owner, owner) || o.res.index == kHwNotConfigured || o.res.index == kHwAnyChannel) continue;

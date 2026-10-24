@@ -60,7 +60,7 @@ NullSecurityManager& nullSecurity() {
 // The running App, for restartDevice() / the esp shutdown hook (LIB-FIX-006).
 App* s_app = nullptr;
 
-// SES-LIB-007: the reason restartDevice() was given, kept across the reset in
+// the reason restartDevice() was given, kept across the reset in
 // RTC memory (not power loss). 32 bytes.
 struct RestartRecord {
   uint32_t magic;
@@ -231,7 +231,7 @@ App::App(AsyncWebServer* server, const char* deviceName, const char* deviceVersi
   sys.routeTemplate = "/system/*";
   webManager_.registerCompoundFeature(std::move(sys));
 
-  // Why this boot happened (SES-LIB-007): read the RTC record now, before
+  // Why this boot happened: read the RTC record now, before
   // anything can restart again.
   resolveLastRestartReason();
   log_i("[boot] last restart: %s", s_lastReason);
@@ -284,12 +284,12 @@ void App::begin() {
     }
   }
 
-  // Time first (SES-LIB-002): restores a soft-reset hold and owns the TZ
+  // Time first: restores a soft-reset hold and owns the TZ
   // before any module looks at the clock. system.setTime is registered here,
   // i.e. before webManager_.begin() mounts the endpoints.
   TimeSync::instance().begin();
   TimeSync::instance().registerManifest(&webManager_);
-  // Boot-loop guard (SES-LIB-014): before any module starts, so onBegin()
+  // Boot-loop guard: before any module starts, so onBegin()
   // can read BootGuard::info().safeMode. A consumer may call begin() with
   // other limits before app->begin(); the first call wins.
   BootGuard::begin();
@@ -425,7 +425,7 @@ void App::begin() {
   // /api/v1/ui/manifest. Must come AFTER all modules have registered.
   webManager_.begin();
   // The time zone is served by UI_DEVICE_PATH, so the manifest no longer
-  // changes with it (SES-LIB-032): one flash write per firmware.
+  // changes with it: one flash write per firmware.
   HeapMonitor::logSnapshot("boot:webmanager-begun");
 
   // 6. WS keepalive — phantom-client eviction, defaults match the
@@ -595,10 +595,10 @@ void App::begin() {
 void App::loop() {
   if (!begun_) return;
 
-  // Time first: SNTP / operator samples, clock events (SES-LIB-002).
+  // Time first: SNTP / operator samples, clock events.
   TimeSync::instance().loop();
 
-  // Config saves PowerGuard paused, once writes are allowed again (SES-LIB-008).
+  // Config saves PowerGuard paused, once writes are allowed again.
   configManager_.flushDeferred();
 
   // A restart requested from another task is performed HERE, on the loop
@@ -808,7 +808,7 @@ void restartDevice(const char* reason, std::function<void()> afterShutdown) {
 
   a->restartReason_ = reason ? reason : "unknown";
   a->afterShutdown_ = std::move(afterShutdown);
-  // Survives the reset: lastRestartReason() of the next boot (SES-LIB-007).
+  // Survives the reset: lastRestartReason() of the next boot.
   // Written before the hooks, so a hook that hangs doesn't lose it.
   storeRestartRecord(a->restartReason_);
   armRestartDeadline(a->restartDeadlineMs());

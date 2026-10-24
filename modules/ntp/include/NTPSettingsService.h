@@ -102,7 +102,7 @@ class NTPSettings {
     root["tz_format"] = s.tzFormat;
   }
 
-  /* ----- clock validity (core TimeSync, SES-LIB-002) ----- */
+  /* ----- clock validity (core TimeSync) ----- */
   // Two compact lines:
   //   clock      "Valid, ntp, ±1 s" (+ ", sources disagree")
   //   clock_diag "last step 12 ms, 0 rejected"

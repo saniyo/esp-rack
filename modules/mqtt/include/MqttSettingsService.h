@@ -53,7 +53,7 @@
 #ifndef FACTORY_MQTT_MAX_TOPIC_LENGTH
 #define FACTORY_MQTT_MAX_TOPIC_LENGTH 128
 #endif
-// Device availability (SES-LIB-020): a retained "online" after connect and
+// Device availability: a retained "online" after connect and
 // a retained "offline" last will. Off by default: a generic device
 // shouldn't leave retained topics on a broker unasked.
 #ifndef FACTORY_MQTT_AVAILABILITY
@@ -191,7 +191,7 @@ class MqttSettings {
   }
 
   /* ----- state reader (runtime + config echo): WS frames and GET /state -----
-   * rest (SES-LIB-033): a REST snapshot (the static-schema page reads all its
+   * rest: a REST snapshot (the static-schema page reads all its
    * values from it) carries the newest seen topics; the WS faces carry the
    * ones that changed since the last push. */
   static void staRead(MqttSettings& s, JsonObject& root, bool rest = false) {
@@ -572,7 +572,7 @@ class MqttSettingsService : public StatefulService<MqttSettings>,
   char* _retainedPassword{nullptr};
   char* _retainedWillTopic{nullptr};
 
-  // Availability (SES-LIB-020). A clean DISCONNECT cancels the will, so
+  // Availability. A clean DISCONNECT cancels the will, so
   // going offline on purpose publishes a retained "offline" (QoS 1) and
   // sends DISCONNECT only once the broker has acked it. Without the ack
   // the TCP connection is just dropped and the broker publishes the will.

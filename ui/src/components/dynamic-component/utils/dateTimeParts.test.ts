@@ -1,4 +1,4 @@
-// SES-LIB-029 [host]: the picker's zone math and 24-hour formatting.
+// [host]: the picker's zone math and 24-hour formatting.
 import { describe, expect, it } from '@jest/globals';
 
 import { fmtDate, fmtTime, monthGrid, wallParts, wallToEpoch, zoneLabel } from './dateTimeParts';

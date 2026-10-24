@@ -1,4 +1,4 @@
-// SES-LIB-029: form layout from the backend. Layout markers in the field
+// form layout from the backend. Layout markers in the field
 // stream (web::Cols(n) / web::Break(), parsed into the pseudo types below)
 // cut a form into segments; each segment is one CSS grid. A field's own
 // "sp=<k>" / "fr" options span columns or the whole row; without them the
@@ -56,7 +56,7 @@ export type Responsive = string | { xs: string; sm: string; md: string };
 
 // grid-template-columns of a segment: one column unless the page asks for
 // more with Cols(n) (2 on small, 1 on phone screens). Grouping is the page
-// author's call, never automatic (SES-LIB-029c).
+// author's call, never automatic.
 export function gridTemplateFor(cols?: number): Responsive {
   if (!cols) return '1fr';
   return { xs: '1fr', sm: `repeat(${Math.min(cols, 2)}, 1fr)`, md: `repeat(${cols}, 1fr)` };
@@ -99,7 +99,7 @@ export const numberStep = (o: string | undefined): number | undefined => {
 };
 
 
-// Every grid cell: elements keep their own sizes (SES-LIB-029d); long values
+// Every grid cell: elements keep their own sizes; long values
 // wrap inside their cell instead of pushing neighbours; the grid separates
 // rows, so no dividers.
 export const CELL_SX = {

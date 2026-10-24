@@ -11,7 +11,7 @@
 // whatever the subscription was configured with (subscription's
 // defaultChatId / defaultTopicId), and from there to the bot's
 // global defaults (TelegramSettings.chatId / topicId).
-// SES-LIB-019: one command an allowed chat sent to the bot.
+// one command an allowed chat sent to the bot.
 struct TelegramInbound {
   String chatId;
   int32_t topicId = 0;  // message_thread_id, 0 = none

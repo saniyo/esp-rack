@@ -34,7 +34,7 @@ static const HistColumn kAggCols[] = {
 static const HistTier kAggTiers[] = {{300, 86400}};
 static const HistSeriesDef kAgg{"agg", "", kAggCols, 5, kAggTiers, 1};
 
-// SES months: a put-series of exact integers.
+// Monthly records: a put-series of exact integers.
 static const HistColumn kMonthCols[] = {
     {"cnt_mwh", "mWh", HistAgg::Last, 1, HistType::I64, 1},
     {"adj_mwh", "mWh", HistAgg::Last, 1, HistType::I64, 1},

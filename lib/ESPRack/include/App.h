@@ -76,7 +76,7 @@ class HwRegistry;          // hw/HwRegistry.h — owned by App
 // onShutdown() skip work that makes no sense for that reason.
 const char* restartReason();
 
-// Why THIS boot happened (SES-LIB-007), stable for the whole boot:
+// Why THIS boot happened, stable for the whole boot:
 //   * a software reset through restartDevice() -> the reason it was given
 //     (restartDevice stores it in RTC memory before the hooks run);
 //   * a software reset that bypassed it (esp_restart, a library) -> "idf";

@@ -24,7 +24,7 @@ class MqttModule : public ESPRack::Module {
   }
   void onBegin() override { if (svc_) svc_->begin(); }
   void onLoop()  override { if (svc_) svc_->loop();  }
-  // Retained "offline" before a restart (SES-LIB-020), then disconnect.
+  // Retained "offline" before a restart, then disconnect.
   void onShutdown() override { if (svc_) svc_->end(); }
 
   // Service accessor — useful for App-level integration tests / direct

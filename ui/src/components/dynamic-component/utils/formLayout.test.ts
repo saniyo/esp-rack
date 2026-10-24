@@ -1,4 +1,4 @@
-// SES-LIB-029 [host]: layout segments, grid columns, the 0 value.
+// [host]: layout segments, grid columns, the 0 value.
 import { describe, expect, it } from '@jest/globals';
 
 import {
@@ -20,7 +20,7 @@ describe('read-only tiles (Status tabs)', () => {
     expect(gridTemplateFor()).toBe('1fr');
     expect(gridTemplateFor(2)).toEqual({ xs: '1fr', sm: 'repeat(2, 1fr)', md: 'repeat(2, 1fr)' });
     expect(CELL_SX['& .MuiDivider-root']).toEqual({ display: 'none' });
-    expect((CELL_SX as any)['& .MuiAvatar-root']).toBeUndefined();  // no shrunken icons (SES-LIB-029d)
+    expect((CELL_SX as any)['& .MuiAvatar-root']).toBeUndefined();  // no shrunken icons
   });
   it('draws a heading once', () => {
     expect(visibleHeading('Status', ['Meter', 'Status'])).toBe('');

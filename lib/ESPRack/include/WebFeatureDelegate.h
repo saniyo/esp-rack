@@ -19,7 +19,7 @@
 // WebManager::registerFeature) and uses broadcastWs() to push state over WS.
 // WebManager owns the lifetime through std::unique_ptr<IWebFeatureEntry>.
 
-// SES-LIB-033 (WebManager.cpp, once for all features): a form without its
+// (WebManager.cpp, once for all features): a form without its
 // values, and the GET <form>?schema=1 response built from it with ETag/304.
 void stripFormValues(JsonObject root);
 void sendFormSchema(AsyncWebServerRequest* r, const char* id, size_t bufSize,
@@ -218,8 +218,7 @@ class WebFeatureEntry : public IWebFeatureEntry {
     // Live features advertise a CHANNEL id (multiplexed over the single /ws),
     // not a per-feature socket path. The frontend subscribes by `ch`.
     if (_spec.wsPath) obj["ch"] = _spec.id;
-    if (_spec.staticSchema) obj["ss"] = 1;  // SES-LIB-033
-
+    if (_spec.staticSchema) obj["ss"] = 1;
     JsonArray tabs = obj.createNestedArray("tabs");
     for (const auto& t : _spec.tabs) {
       JsonObject jt = tabs.createNestedObject();
@@ -243,7 +242,7 @@ class WebFeatureEntry : public IWebFeatureEntry {
       jt["postable"] = t.postable;
       jt["live"] = t.live;
       jt["auth"] = webAuthLevelToStr(t.auth);
-      if (t.statePath) jt["statePath"] = t.statePath;  // SES-LIB-033
+      if (t.statePath) jt["statePath"] = t.statePath;
       if (t.component) jt["component"] = t.component;
     }
 
@@ -407,7 +406,7 @@ class WebFeatureEntry : public IWebFeatureEntry {
     return _hasDistinctStateReader ? _wsReader : _restReader;
   }
 
-  // SES-LIB-033: the form without its values, static per firmware, so it
+  // the form without its values, static per firmware, so it
   // revalidates like the manifest (ETag = signature + id, 304).
   void sendSchema(AsyncWebServerRequest* r) {
     sendFormSchema(r, _spec.id, _restBufferSize ? _restBufferSize : DEFAULT_BUFFER_SIZE,

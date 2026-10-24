@@ -8,7 +8,7 @@ import { resolveIcon } from '../utils/iconRegistry';
 interface MessageFieldProps {
   field: Field;
   value: string | undefined;  // body text
-  // levelKey (SES-LIB-016): live severity from a sibling state value.
+  // levelKey: live severity from a sibling state value.
   getSibling?: (key: string) => any;
 }
 

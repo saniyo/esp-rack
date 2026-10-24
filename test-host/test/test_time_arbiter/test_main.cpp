@@ -1,4 +1,4 @@
-// TimeArbiter matrix (SES-LIB-002) — rank × freshness × plausibility
+// TimeArbiter matrix — rank × freshness × plausibility
 // × step threshold × big jump × dispute × operator flag; externalSync, restoreHold.
 #include <unity.h>
 
@@ -72,7 +72,7 @@ static void test_first_sample_mono_compensated(void) {
   TEST_ASSERT_TRUE(v.stepClock);
   TEST_ASSERT_EQUAL_INT64(T0 + 1250, v.setUtcMs);
   TEST_ASSERT_FALSE(v.wasValid);
-  TEST_ASSERT_EQUAL_INT64(T0 + 1250, v.offsetMs);  // from 1970: exact (SES-LIB-027), no clamp
+  TEST_ASSERT_EQUAL_INT64(T0 + 1250, v.offsetMs);  // from 1970: exact, no clamp
   TEST_ASSERT_TRUE(a.valid(now(1250)));
   TEST_ASSERT_EQUAL_UINT32(80, a.uncertaintyMs(now(1250)));
   ASSERT_SRC(Gps, a.authority(now(1250)));
@@ -361,7 +361,7 @@ static void test_dispute_requires_gps_rtc_agreement(void) {
   TEST_ASSERT_FALSE(b.disputed());
 }
 
-// SES-LIB-027: steps beyond int32 ms (24.8 days) come through exactly.
+// steps beyond int32 ms (24.8 days) come through exactly.
 static constexpr int64_t kDay = 86400000LL;
 
 static void test_step_int64(void) {

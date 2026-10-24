@@ -165,7 +165,7 @@ void TelegramSettings::buildForm(TelegramSettings& s, JsonObject& root) {
               .option("MarkdownV2", 2).option("HTML", 3)
               .label("Default parse mode").icon("FormatPaint"));
 
-  // SES-LIB-019: bot commands.
+  // bot commands.
 
   set.add(web::Text("allowed_chat_ids", s.allowedChatIds.c_str())
 
@@ -195,7 +195,7 @@ void TelegramSettings::staRead(TelegramSettings& s, JsonObject& root) {
   root["qsize"]      = s.qSize;
   root["manualText"] = s.manualText;
 
-  // Settings echo (SES-LIB-033): the static schema takes each field's value
+  // Settings echo: the static schema takes each field's value
   // from here. The bot token never: it stays masked in the schema.
   root["chat"]             = s.chatId;
   root["topic"]            = s.topicId;

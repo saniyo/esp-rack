@@ -88,7 +88,7 @@ import Download from '@mui/icons-material/Download';
 import Key from '@mui/icons-material/Key';
 import Public from '@mui/icons-material/Public';
 import VpnLock from '@mui/icons-material/VpnLock';
-// SES-LIB-016: sun/night, location, energy, calendar, status
+// sun/night, location, energy, calendar, status
 import WbSunny from '@mui/icons-material/WbSunny';
 import NightsStay from '@mui/icons-material/NightsStay';
 import WbTwilight from '@mui/icons-material/WbTwilight';

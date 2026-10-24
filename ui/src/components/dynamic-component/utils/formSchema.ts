@@ -1,4 +1,4 @@
-// SES-LIB-033: a static-schema feature's form = its schema (cached by the
+// a static-schema feature's form = its schema (cached by the
 // browser, ETag/304) + its flat /state. Each field takes its value from the
 // state under the field's key; layout markers and labels stay as sent.
 
@@ -22,7 +22,7 @@ export function mergeSchemaState(form: Record<string, any>, state: Record<string
   return out;
 }
 
-// Where a static-schema tab reads its values (SES-LIB-033), or undefined for
+// Where a static-schema tab reads its values, or undefined for
 // a tab that reads its full form: a bespoke page tab names its state path; a
 // static-schema feature's own tabs read /api/v1/<id>/state.
 export function staticStatePath(

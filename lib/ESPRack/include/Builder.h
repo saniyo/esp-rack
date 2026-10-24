@@ -63,7 +63,7 @@ class Builder {
     return *this;
   }
 
-  // SES-LIB-028: the instance installed just before is used by module
+  // the instance installed just before is used by module
   // `moduleId`, whose menu entry has the same id:
   //   .installExtHw<MeterModule>("meter", Serial1).owner("sesLight")
   // Its pages then sit under that module's menu, in "External Hardware".
@@ -76,7 +76,7 @@ class Builder {
     return reserve(HwKind::Gpio, pin, reason);
   }
 
-  // Any resource (SES-LIB-023): reserve(HwKind::Uart, 2, "modbus bridge"),
+  // Any resource: reserve(HwKind::Uart, 2, "modbus bridge"),
   // an RMT/LEDC channel, an I2C address (bus) ... the consumer drives itself.
   Builder& reserve(HwKind kind, int16_t index, const char* reason, int8_t bus = -1) {
     reserved_.push_back(Reservation{kind, index, bus, reason});

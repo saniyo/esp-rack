@@ -1,4 +1,4 @@
-// SES-LIB-033 [host]: schema + state = the form.
+// [host]: schema + state = the form.
 import { describe, expect, it } from '@jest/globals';
 
 import { mergeSchemaState, staticStatePath } from './formSchema';

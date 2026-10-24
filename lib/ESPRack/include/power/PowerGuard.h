@@ -2,7 +2,7 @@
 #ifndef ESPRACK_POWER_GUARD_H
 #define ESPRACK_POWER_GUARD_H
 
-// PowerGuard (SES-LIB-008): the device's supply state and whether flash
+// PowerGuard: the device's supply state and whether flash
 // writes are allowed. The consumer sets the state from its own sensing
 // (setSupply). Nobody setting it leaves Unknown, and writes stay allowed:
 // a device without supply sensing works as before.

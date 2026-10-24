@@ -1,4 +1,4 @@
-// SES-LIB-029: wall-clock parts of an instant in the device's zone and back,
+// wall-clock parts of an instant in the device's zone and back,
 // for the date/time picker. 24-hour, no library: Intl does the zone rules.
 import { ResolvedZone } from '../../../utils/deviceTime';
 

@@ -15,7 +15,7 @@
 // Token iat/exp need a trustworthy wall clock: ESPRack::TimeSync::clockSane()
 // (a time source made the clock valid). Before that exp math is meaningless.
 
-// SES-LIB-022: any user still on its factory password. Written by the updater
+// any user still on its factory password. Written by the updater
 // (synchronously, with the password change), read lock-free from any task.
 // true until the config is loaded: fail-safe for an early reader.
 static std::atomic<bool> s_factoryCreds{true};
@@ -431,7 +431,7 @@ void SecuritySettingsService::begin() {
     _cfg.saveIfChanged("hash-migration");
   }
   // A legacy file had no per-user "factory" flag and was checked by hashing:
-  // save it now so the next boot reads the flag instead (SES-LIB-022).
+  // save it now so the next boot reads the flag instead.
   if (s_factoryVerified) {
     s_factoryVerified = false;
     _cfg.saveIfChanged("factory-flag");

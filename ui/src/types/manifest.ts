@@ -10,7 +10,7 @@ export interface MenuMeta {
   // parent: id of the feature/group this item nests UNDER; undefined =
   // top-level. The backend is the single source of truth for placement.
   parent?: string;
-  // hw: this page belongs to external HW instance <hw> (SES-LIB-028). Its
+  // hw: this page belongs to external HW instance <hw>. Its
   // placement comes from UiManifest.extHw (components/layout/extHwMenu.ts),
   // never from parent.
   hw?: string;
@@ -28,7 +28,7 @@ export interface TabSpec {
   title?: string;
   icon?: string;        // optional per-tab MUI icon, surfaced on the menu sub-tab leaf
   restPath: string;
-  // SES-LIB-033: a bespoke page tab with a static schema: the UI caches
+  // a bespoke page tab with a static schema: the UI caches
   // <restPath>?schema=1 and takes the values from this flat GET path.
   statePath?: string;
   // A framework renderer for this tab instead of a form (CUSTOM_TABS).
@@ -74,7 +74,7 @@ export interface FeatureEntry {
   // path, kept optional for back-compat; current backends emit `ch`.
   ch?: string;
   ws?: string;
-  // ss: the form's fields don't depend on the state (SES-LIB-033): the UI
+  // ss: the form's fields don't depend on the state: the UI
   // caches <form>?schema=1 and fills it from /state.
   ss?: number;
   tabs?: TabSpec[];
@@ -91,7 +91,7 @@ export interface UiManifest {
   schemaVersion: number;
   // device.name / version  — consumer-app identity from Builder("...","...")
   // device.frameworkVersion — esp-rack library rev (Version.h::ESPRACK_VERSION_STR)
-  // device.tz — the device's timezone (SES-LIB-015): IANA label and POSIX rule.
+  // device.tz — the device's timezone: IANA label and POSIX rule.
   //             Device-local times are formatted in it (utils/deviceTime.ts).
   device?: { name?: string; version?: string; frameworkVersion?: string; tz?: { iana?: string; posix?: string } };
   buildFeatures?: Record<string, boolean>;
@@ -106,7 +106,7 @@ export interface UiManifest {
   // Omitted from the anonymous stub.
   modules?: ModuleEntry[];
   features: FeatureEntry[];
-  // External HW instances (SES-LIB-028), from the backend HwRegistry: the
+  // External HW instances, from the backend HwRegistry: the
   // UI's only source for where their pages go. Live state is in
   // System -> External Hardware.
   extHw?: ExtHwEntry[];
