@@ -77,6 +77,16 @@ describe('Trend', () => {
     expect(p.optionMap.xFmt).toBeUndefined();
     expect(p.optionMap.cat).toBeUndefined();
   });
+
+  it('keeps every series of lines=, not only the first', () => {
+    // web::Trend("pv").line("a", "#ff9800", "monotone", "Current").line("b", "#9e9e9e", "step").legend()
+    const p = parseFieldOptions(
+      'pv',
+      'trend;r;mode=lineChart;xAxis=t;lines=a:color=#ff9800,type=monotone,name=Current;b:color=#9e9e9e,type=step;legend=true'
+    );
+    expect(p.optionMap.lines?.value).toBe('a:color=#ff9800,type=monotone,name=Current;b:color=#9e9e9e,type=step');
+    expect(p.optionMap.legend?.value).toBe(true);
+  });
 });
 
 describe('DateTime time of day', () => {

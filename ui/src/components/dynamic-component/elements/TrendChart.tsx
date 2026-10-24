@@ -134,6 +134,7 @@ function parseLineConfigs(
     let hidden = false;
     let color = getColor(index);
     let type: CustomCurveType = 'monotone';
+    let name = '';
 
     if (rest) {
       // наприклад "color=#ff0000,type=step"
@@ -149,13 +150,15 @@ function parseLineConfigs(
           color = value;
         } else if (key === 'type') {
           type = value as CustomCurveType;
+        } else if (key === 'name') {
+          name = value;
         }
       });
     }
 
     return {
       dataKey,
-      readableLabel: labelMap[dataKey] || dataKey,
+      readableLabel: name || labelMap[dataKey] || dataKey,
       hidden,
       color,
       type,
@@ -350,9 +353,9 @@ const TrendChart: React.FC<TrendChartProps> = ({ field, value = [], getSibling }
   const xAxisMatch = field.o.match(/xAxis=([^;]+)/);
   const xAxisKey: string = xAxisMatch ? xAxisMatch[1] : 'timestamp';
 
-  // lines=...
-  const linesMatch = field.o.match(/lines=([^;]+)/);
-  const linesStr: string = linesMatch ? linesMatch[1] : '';
+  // lines=... — the field parser has already joined the series, which are
+  // separated by the same ';' as the options.
+  const linesStr: string = (om.lines?.value as string) || '';
 
   // maxPoints from the field's options string (C++ side passes it via
   // trendMaxPoints(N)). Caps both the input window AND the accumulated map,

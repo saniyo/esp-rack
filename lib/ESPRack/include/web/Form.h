@@ -322,13 +322,18 @@ class Trend : public FieldSpec<Trend> {
     _refl += key_; _refl += ':'; _refl += (color ? color : ""); _refl += ':'; _refl += (label ? label : "");
     return *this;
   }
-  Trend& line(const char* key_, const char* color, const char* type) { return line(key_, false, color, type); }
-  Trend& line(const char* key_, bool hidden, const char* color, const char* type) {
+  // A series: its state key, color, curve type and, optionally, the name the
+  // legend and the tooltip show (default: the key). No ',' ';' ':' '=' in name.
+  Trend& line(const char* key_, const char* color, const char* type, const char* name = nullptr) {
+    return line(key_, false, color, type, name);
+  }
+  Trend& line(const char* key_, bool hidden, const char* color, const char* type, const char* name = nullptr) {
     if (_lines.length()) _lines += ';';
     _lines += key_; _lines += ':';
     if (hidden) _lines += "hidden=true,";
     _lines += "color="; _lines += color;
     _lines += ",type="; _lines += type;
+    if (name && name[0]) { _lines += ",name="; _lines += name; }
     return *this;
   }
   void writeTo(JsonArray& fields) const {
