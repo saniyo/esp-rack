@@ -329,6 +329,67 @@ This is an audit snapshot of `feature/ses-light-support`, dated 2026-10-13:
   - Upload state is one set of member fields (`modules/filesystem/include/FileSystemService.h:83-86`), so concurrent uploads collide.
   - SD "format" is a recursive delete. Formatting flash is refused (`modules/filesystem/src/FileSystemService.cpp:683-687`).
 
+### `history` — HistoryModule
+> Added on 2026-10-25. Built for C3, C6, S3 and ESP32, and covered by host
+> tests (`test-host/test/test_history`), but not run on hardware yet. Design:
+> `docs/plans/history.md`.
+
+- **Purpose:** Keeps time series on flash without wearing it out, for charts,
+  tables and CSV over any period.
+  - Other modules register series through `IHistoryProvider` (`app->history()`),
+    then `add()` samples or `put()` records.
+  - Records are kept in RAM (PSRAM when there is some) and written in
+    batches by the module's own task, only while PowerGuard allows writes.
+- **Install:** `.install<HistoryModule>()`.
+- **Module identity:** id `"history"`, version `"0.1.0"`, priority 21. Hooks:
+  `onInstall` (`app->setHistory`), `onBegin` (starts the task), `onShutdown`
+  (flushes, if power allows).
+- **Public API** (`lib/ESPRack/include/history/IHistory.h`):
+  - `HistSeriesDef`:
+    - id, title, columns (`HistColumn`: key, unit, `HistAgg`, width, `HistType`, scale);
+    - tiers (`HistTier`: bucketS, keepS);
+    - optional `maxBytes`, `localDays`.
+  - Two kinds of series:
+    - **bucketed:** tier 0 aggregates `add()` samples; rollups follow;
+    - **put-series:** `bucketS` 0, one record per `put()` / `putRaw()`; duplicates are refused.
+  - An element with no sample in a bucket is stored as unknown for every
+    aggregate (a Sum of nothing is not 0).
+  - `localDays`: whole-day tiers start at local midnight.
+  - `series()` copies the id and the arrays but keeps pointers to `title`
+    and to the column `key` / `unit` strings.
+- **Web/REST:**
+  - `GET /api/v1/history/series` lists the series with their stats.
+  - `GET /api/v1/history/series/<id>?from&to&res&cols&cursor` returns rows,
+    one page at a time (4 KB, 16 KB with PSRAM; `next` = the cursor).
+    - `cols` may name a whole column, one element (`mv[5]`) or a row's
+      `[min]` / `[avg]` / `[max]`.
+    - `res` downsamples by the column aggregates; `res=0` gives one row for the whole period.
+  - `&format=csv` streams the same rows as a CSV file, with no page limit.
+  - `DELETE /api/v1/history/series/<id>` erases a series (admin).
+  - The page "History" has status (writes, storage, budget, wear estimate,
+    series table) and settings, plus the actions `history.flush` and
+    `history.eraseAll`.
+- **Persistence:**
+  - `/config/history.json`. Keys: `enabled`, `flush_min` (15), `budget_kb`
+    (1024 per day; past it the flush interval doubles, up to 16x), `cap_kb`
+    (0 = a quarter of the volume).
+  - Data: `/hist/<id>/t<tier>/<YYYYMM[DD]>-<schema hash>.seg`. Segments
+    have a header and crc-checked records; a torn tail is cut at mount.
+  - Retention:
+    - by time, per tier;
+    - then by size: the global cap goes to the series without their own
+      `maxBytes`, in proportion to what each needs for its whole retention;
+      within a series, to the tiers the same way.
+- **Cost notes:**
+  - Task "hist": stack 6144, priority 1.
+  - Buffers: per tier a ring of whole records (tier 0 about two flush
+    intervals). With no PSRAM, at most 16 KB of buffers in the internal
+    heap; a series beyond that is refused.
+- **Caveats:**
+  - What waits in RAM (up to `flush_min`) and the open buckets are lost on an
+    unexpected reset.
+  - The View tab is being replaced by a history mode of the Trend chart.
+
 ### `mothership` — MothershipModule
 - **Purpose:** Fleet-management client.
   - Periodically POSTs over HTTPS (BearSSL, mTLS using the App TLS context) to `<active profile>/api/v1/checkin`. The body carries identity, heap figures, WireGuard status and pending action results.

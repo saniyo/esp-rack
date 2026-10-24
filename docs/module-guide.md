@@ -659,7 +659,10 @@ web->registerPage(std::move(page));
 - **Mutating page endpoints get the operator floor automatically.** That
   covers any non-GET method and any `jsonHandler`: a `reader` token gets 403
   (LIB-FIX-003).
-- **History and series data:** register a paged series with
+- **Time series on flash** (periods, rollups, retention, CSV): use the
+  History module (`app->history()->series(def)`, `history/IHistory.h`,
+  module-catalog `history`), not a store of your own.
+- **Short in-RAM histories:** register a paged series with
   `DataApi::instance().registerSeries({id, title, unit}, fill)`.
   - It's served at `GET /api/v1/data/<id>?limit&cursor` (newest first,
     `limit` ≤ 100) and readable by `reader` tokens (`DataApi.h:11-60`).
