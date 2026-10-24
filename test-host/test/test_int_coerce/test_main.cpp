@@ -14,6 +14,35 @@ using namespace web::coerce;
 void setUp(void) {}
 void tearDown(void) {}
 
+// Number fields that round a double (uint8_t, uint16_t, int, float, double):
+// a cleared field ("") or text is not a value, so it can't become 0.
+static void test_number_from_string(void) {
+  double d = -1;
+  TEST_ASSERT_TRUE(numberFromString("9.00", d));
+  TEST_ASSERT_DOUBLE_WITHIN(1e-9, 9.0, d);
+  TEST_ASSERT_TRUE(numberFromString(" -1.5 ", d));
+  TEST_ASSERT_DOUBLE_WITHIN(1e-9, -1.5, d);
+  TEST_ASSERT_TRUE(numberFromString("1e3", d));
+  TEST_ASSERT_DOUBLE_WITHIN(1e-9, 1000.0, d);
+  TEST_ASSERT_TRUE(numberFromString("3.3", d));
+  TEST_ASSERT_TRUE(d == 3.3);  // exactly the double the literal gives
+  TEST_ASSERT_TRUE(numberFromString("+0.25e-2", d));
+  TEST_ASSERT_DOUBLE_WITHIN(1e-15, 0.0025, d);
+  TEST_ASSERT_TRUE(numberFromString("4200", d));
+  TEST_ASSERT_TRUE(d == 4200.0);
+  TEST_ASSERT_FALSE(numberFromString(".", d));
+  TEST_ASSERT_FALSE(numberFromString("-", d));
+  TEST_ASSERT_FALSE(numberFromString("1e", d));
+  d = 7;
+  TEST_ASSERT_FALSE(numberFromString("", d));
+  TEST_ASSERT_FALSE(numberFromString("   ", d));
+  TEST_ASSERT_FALSE(numberFromString(nullptr, d));
+  TEST_ASSERT_FALSE(numberFromString("abc", d));
+  TEST_ASSERT_FALSE(numberFromString("12abc", d));
+  TEST_ASSERT_FALSE(numberFromString("1.2.3", d));
+  TEST_ASSERT_DOUBLE_WITHIN(1e-9, 7.0, d);  // untouched
+}
+
 static void test_double_rounds_and_clamps(void) {
   TEST_ASSERT_EQUAL_INT64(42, fromDouble<int32_t>(42.0));
   TEST_ASSERT_EQUAL_INT64(43, fromDouble<int32_t>(42.5));
@@ -104,6 +133,7 @@ static void test_long_types(void) {
 int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_double_rounds_and_clamps);
+  RUN_TEST(test_number_from_string);
   RUN_TEST(test_string);
   RUN_TEST(test_string_not_a_number_is_ignored);
   RUN_TEST(test_integers);

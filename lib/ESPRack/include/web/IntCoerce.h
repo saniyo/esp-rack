@@ -12,6 +12,11 @@
 //                is not a value (the field keeps its value)
 // On ESP32 (esp-14.2.0) int32_t/uint32_t are long/unsigned long, so these
 // rules are what int32_t settings get.
+//
+// Floating-point settings (and uint8_t/uint16_t/int, which round a double)
+// take a JSON number or a numeric string ("9.00", " -1.5 "). An empty or
+// non-numeric string is not a value either: a cleared form field must not
+// become 0 (and then, clamped, the minimum).
 
 #include <errno.h>
 #include <stdlib.h>
@@ -74,6 +79,52 @@ bool fromString(const char* s, I& out) {
   } else {
     out = static_cast<I>(v);
   }
+  return true;
+}
+
+// A decimal number in a string ("9.00", " -1.5 ", "1e3"), surrounding blanks
+// allowed. false: empty, null, or anything that is not entirely a number.
+// Hand-rolled: strtod would pull several KB of newlib into every firmware.
+inline bool numberFromString(const char* s, double& out) {
+  if (!s) return false;
+  while (*s == ' ' || *s == '\t') ++s;
+  bool neg = false;
+  if (*s == '+' || *s == '-') neg = (*s++ == '-');
+  unsigned long long mant = 0;
+  int exp10 = 0;
+  bool digits = false;
+  for (; *s >= '0' && *s <= '9'; ++s, digits = true) {
+    if (mant < 100000000000000000ULL) mant = mant * 10 + unsigned(*s - '0');
+    else ++exp10;  // past 17 digits: keep the magnitude only
+  }
+  if (*s == '.') {
+    for (++s; *s >= '0' && *s <= '9'; ++s, digits = true) {
+      if (mant < 100000000000000000ULL) {
+        mant = mant * 10 + unsigned(*s - '0');
+        --exp10;
+      }
+    }
+  }
+  if (!digits) return false;
+  if (*s == 'e' || *s == 'E') {
+    ++s;
+    bool eneg = false;
+    if (*s == '+' || *s == '-') eneg = (*s++ == '-');
+    if (*s < '0' || *s > '9') return false;
+    int e = 0;
+    for (; *s >= '0' && *s <= '9'; ++s) {
+      if (e < 1000) e = e * 10 + (*s - '0');
+    }
+    exp10 += eneg ? -e : e;
+  }
+  while (*s == ' ' || *s == '\t') ++s;
+  if (*s) return false;
+  double v = static_cast<double>(mant);
+  // One division (or multiplication) by a power of ten keeps "3.3" at 3.3.
+  double p = 1.0;
+  for (int i = exp10 < 0 ? -exp10 : exp10; i > 0 && p < 1e308; --i) p *= 10.0;
+  v = exp10 < 0 ? v / p : v * p;
+  out = neg ? -v : v;
   return true;
 }
 

@@ -484,13 +484,30 @@ class FormBuilder {
     return false;
   }
 
-   // uint8_t (години, хвилини, тощо)
-  static bool updateValue(JsonObject& root, const char* key, uint8_t& value) {
+  // The number a form sent for `key`: a JSON number or a numeric string.
+  // false for a missing key, an empty or non-numeric string, null or any
+  // other type: the setting keeps its value (a cleared field is not 0).
+  // Not inlined: every updateValue overload calls it, often per setting.
+  __attribute__((noinline)) static bool numberOf(JsonObject& root, const char* key, double& out) {
     if (!root.containsKey(key)) return false;
     JsonVariant v = root[key];
+    if (v.is<double>()) {
+      out = v.as<double>();
+      return true;
+    }
+    if (v.is<const char*>()) {
+      if (web::coerce::numberFromString(v.as<const char*>(), out)) return true;
+#ifdef log_d
+      log_d("[form] %s: \"%s\" is not a number, ignored", key, v.as<const char*>());
+#endif
+    }
+    return false;
+  }
 
-    // ArduinoJson дозволяє as<double>() навіть із рядка "9.00"
-    double d = v.as<double>();
+   // uint8_t (години, хвилини, тощо)
+  static bool updateValue(JsonObject& root, const char* key, uint8_t& value) {
+    double d;
+    if (!numberOf(root, key, d)) return false;
 
     if (d < 0)   d = 0;
     if (d > 255) d = 255;
@@ -505,10 +522,8 @@ class FormBuilder {
 
   // uint16_t (типові мілісекунди, тощо)
   static bool updateValue(JsonObject& root, const char* key, uint16_t& value) {
-    if (!root.containsKey(key)) return false;
-    JsonVariant v = root[key];
-
-    double d = v.as<double>();
+    double d;
+    if (!numberOf(root, key, d)) return false;
     if (d < 0)      d = 0;
     if (d > 65535)  d = 65535;
 
@@ -522,10 +537,8 @@ class FormBuilder {
 
   // int
   static bool updateValue(JsonObject& root, const char* key, int& value) {
-    if (!root.containsKey(key)) return false;
-    JsonVariant v = root[key];
-
-    double d = v.as<double>();
+    double d;
+    if (!numberOf(root, key, d)) return false;
     long   li = static_cast<long>(d >= 0 ? d + 0.5 : d - 0.5);
 
     int nv = static_cast<int>(li);
@@ -538,10 +551,9 @@ class FormBuilder {
 
   // float
   static bool updateValue(JsonObject& root, const char* key, float& value) {
-    if (!root.containsKey(key)) return false;
-    JsonVariant v = root[key];
-
-    float nv = v.as<float>();  // і з числа, і з рядка працює
+    double d;
+    if (!numberOf(root, key, d)) return false;
+    const float nv = static_cast<float>(d);
     if (nv != value) {
       value = nv;
       return true;
@@ -589,10 +601,8 @@ class FormBuilder {
 
   // double
   static bool updateValue(JsonObject& root, const char* key, double& value) {
-    if (!root.containsKey(key)) return false;
-    JsonVariant v = root[key];
-
-    double nv = v.as<double>();
+    double nv;
+    if (!numberOf(root, key, nv)) return false;
     if (nv != value) {
       value = nv;
       return true;
