@@ -63,6 +63,10 @@ namespace BootGuard {
 
 void begin(uint8_t limit = 4, uint32_t windowMs = 600000, uint32_t stableAfterMs = 120000);
 const BootInfo& info();
+// A crash class (panic, a watchdog, an unexplained reset): the ones that
+// count towards safe mode. E.g. send a report after a crash boot:
+//   if (BootGuard::isCrash(BootGuard::info().bootClass)) ...
+bool isCrash(BootClass c);
 void markStable();
 void clearSafeMode();
 

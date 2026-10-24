@@ -99,11 +99,6 @@ BootClass classify(esp_reset_reason_t rr, const char* last) {
   }
 }
 
-bool isCrash(BootClass c) {
-  return c == BootClass::Panic || c == BootClass::IntWdt || c == BootClass::TaskWdt || c == BootClass::Wdt ||
-         c == BootClass::Unexplained;
-}
-
 void publish() {
   s_info.quickReboots = s_rec.quick;
   s_info.safeMode = (s_rec.flags & kSafe) != 0;
@@ -120,6 +115,11 @@ const char* bootClassName(BootClass c) {
 }
 
 namespace BootGuard {
+
+bool isCrash(BootClass c) {
+  return c == BootClass::Panic || c == BootClass::IntWdt || c == BootClass::TaskWdt || c == BootClass::Wdt ||
+         c == BootClass::Unexplained;
+}
 
 void begin(uint8_t limit, uint32_t windowMs, uint32_t stableAfterMs) {
   (void)windowMs;  // see BootGuard.h
