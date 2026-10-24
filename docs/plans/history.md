@@ -203,3 +203,33 @@ Bench acceptance, carried over from SES-LIB-017:
 
 - 1000 power cuts during append leave the files consistent.
 - 10 000 appends leave `max_alloc` stable.
+
+## Implementation decisions (step 2)
+
+- **Files.**
+  - The flash volume is the core's `ESPFS` (LittleFS).
+  - The SD card follows in a later step: FileSystemModule will answer
+    `queryInterface("fsVolumes.v1")` with its backends, and the history
+    module picks the SD backend from there. No new core path is needed.
+- **Segment names.** `/hist/<id>/t<tier>/<key>-<hash8>.seg`, where `key`
+  comes from `segmentKey()` and `hash8` is the schema hash in hex.
+  - A changed schema therefore never appends to an older file.
+  - Old-schema files stay readable and are counted as `oldBytes`.
+- **A torn tail at mount.** The file is rewritten without the bad tail:
+  copied to `<name>.tmp` and then renamed. Arduino `File` can't truncate,
+  and the name is never `.partial`. A torn tail is rare, since it needs a
+  power cut mid-append.
+- **Rollups after a reboot.** For each tier k > 0, tier k−1's records that
+  are newer than tier k's newest are replayed into tier k's open bucket.
+  The current day's rollup is therefore rebuilt from the hours already on
+  file.
+- **Buffers.**
+  - Each tier has its own byte ring of closed records. Tier 0 holds about
+    the records of 2 flush intervals plus 8; higher tiers hold 4 records.
+  - Put-series hold 16 records. That is their reserve, so `Full` never
+    comes from another series.
+  - Buffers live in PSRAM when there is PSRAM. Without it they are in the
+    internal heap with a 16 KB total cap, and a series beyond it is refused.
+- **Choosing a tier for a query.** The query reads the finest tier whose
+  retention still covers `from`, or the coarsest tier if none does. Rows
+  queued in RAM are included. The open bucket is not.

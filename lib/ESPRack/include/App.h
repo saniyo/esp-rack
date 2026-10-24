@@ -49,6 +49,7 @@ namespace ESPRack {
 
 class ILocationProvider;   // forward — populated by a location module (geo/ILocationProvider.h)
 class IBleProvider;        // forward — populated by BleModule (ble/IBleProvider.h)
+class IHistoryProvider;    // forward — populated by HistoryModule (history/IHistory.h)
 class HwRegistry;          // hw/HwRegistry.h — owned by App
 
 // Graceful device restart (LIB-FIX-006) — THE way to reboot. Runs every
@@ -186,6 +187,10 @@ class App {
   // to a BLE peripheral. Null when BleModule is not installed.
   IBleProvider*       ble()                             { return ble_; }
   void                setBle(IBleProvider* p)           { ble_ = p; }
+  // IHistoryProvider late-binding — populated by HistoryModule, the only
+  // owner of the history files (docs/plans/history.md). null: not installed.
+  IHistoryProvider*   history()                         { return history_; }
+  void                setHistory(IHistoryProvider* p)   { history_ = p; }
 
   // Hardware registry (LIB-FEAT-001, hw/HwRegistry.h): reserved pins,
   // external HW module instances and their claims, find<I>(id) /
@@ -263,6 +268,7 @@ class App {
   IWireguardProvider* wireguard_ {nullptr};  // populated by WireGuardModule
   ILocationProvider*  location_  {nullptr};  // populated by a location module
   IBleProvider*       ble_       {nullptr};  // populated by BleModule
+  IHistoryProvider*   history_   {nullptr};  // populated by HistoryModule
   std::unique_ptr<HwRegistry> hw_;           // created in the ctor
 
   std::vector<std::unique_ptr<Module>> modules_;
