@@ -244,6 +244,7 @@ class WebFeatureEntry : public IWebFeatureEntry {
       jt["live"] = t.live;
       jt["auth"] = webAuthLevelToStr(t.auth);
       if (t.statePath) jt["statePath"] = t.statePath;  // SES-LIB-033
+      if (t.component) jt["component"] = t.component;
     }
 
     JsonArray actions = obj.createNestedArray("actions");

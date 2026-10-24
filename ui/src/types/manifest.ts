@@ -31,6 +31,8 @@ export interface TabSpec {
   // SES-LIB-033: a bespoke page tab with a static schema: the UI caches
   // <restPath>?schema=1 and takes the values from this flat GET path.
   statePath?: string;
+  // A framework renderer for this tab instead of a form (CUSTOM_TABS).
+  component?: string;
   postable?: boolean;  // tab can POST updates to restPath
   live?: boolean;       // tab subscribes to feature.ch over the shared /ws/app socket
   auth?: AuthLevel;

@@ -118,6 +118,8 @@ class WebTab {
   // SES-LIB-033: this bespoke page tab's form never depends on the state; the
   // UI caches <rest>?schema=1 and reads the values from `statePath` (flat).
   WebTab& staticSchema(const char* statePath) { _t.statePath = statePath; return *this; }
+  // A framework renderer instead of a form (the UI's CUSTOM_TABS).
+  WebTab& component(const char* c) { _t.component = c; return *this; }
   WebTab& postable(bool v = true) { _t.postable = v; return *this; }
   WebTab& live(bool v = true)     { _t.live = v; return *this; }
   WebTab& order(int o)            { _t.order = o; return *this; }

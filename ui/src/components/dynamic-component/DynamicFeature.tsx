@@ -17,6 +17,13 @@ import { FeatureEntry, TabSpec } from '../../types';
 import { useRest } from '../../utils';
 import { useWsChannel } from '../../utils/useWsChannel';
 import { DynamicFormContext, DynamicFormCtx } from './DynamicFormContext';
+import HistoryViewer from '../../framework/history/HistoryViewer';
+
+// Framework renderers a tab can name instead of a form (WebTab::component),
+// the per-tab twin of CUSTOM_RENDERERS in AuthenticatedRouting.
+const CUSTOM_TABS: Record<string, FC> = {
+  HistoryViewer,
+};
 
 
 // C1 path contract: a typed feature serves its UI form at /api/v1/<id>/form
@@ -281,6 +288,10 @@ const DynamicFeature: FC<DynamicFeatureProps> = ({ featureId, fallback }) => {
 
   // SES-LIB-033: static-schema tabs read the cached schema + their state.
   const statePathOf = (t: TabSpec) => staticStatePath(entry, t);
+  const panelOf = (t: TabSpec) => {
+    const Custom = t.component ? CUSTOM_TABS[t.component] : undefined;
+    return Custom ? <Custom /> : <DynamicTabPanel tab={t} ws={wsBundle} statePath={statePathOf(t)} />;
+  };
 
   // Titles the page already shows; forms and cards below don't repeat them.
   const shown = (t: { title?: string; key: string }) => [entry.title, entry.menu?.label, t.title, t.key];
@@ -290,7 +301,7 @@ const DynamicFeature: FC<DynamicFeatureProps> = ({ featureId, fallback }) => {
       <>
         {banner}
         <HeadingContext.Provider value={shown(tabs[0])}>
-          <DynamicTabPanel tab={tabs[0]} ws={wsBundle} statePath={statePathOf(tabs[0])} />
+          {panelOf(tabs[0])}
         </HeadingContext.Provider>
       </>
     );
@@ -311,7 +322,7 @@ const DynamicFeature: FC<DynamicFeatureProps> = ({ featureId, fallback }) => {
             path={t.key}
             element={(
               <HeadingContext.Provider value={shown(t)}>
-                <DynamicTabPanel tab={t} ws={wsBundle} statePath={statePathOf(t)} />
+                {panelOf(t)}
               </HeadingContext.Provider>
             )}
           />
