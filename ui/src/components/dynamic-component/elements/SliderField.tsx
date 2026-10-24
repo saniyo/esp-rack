@@ -79,6 +79,7 @@ const SliderField: React.FC<SliderFieldProps> = ({
 
   const handleChange = (_: Event, newVal: number | number[]) => {
     const v = clamp(Array.isArray(newVal) ? newVal[0] : newVal);
+    setIsEditing(true);  // a live push must not snap the thumb back mid-drag
     setInternalValue(v);
     onChange && onChange(field.label, v);
   };
