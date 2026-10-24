@@ -1,31 +1,23 @@
 # History module (`modules/history`)
 
-This is the agreed design: the owner's request, the JK gateway's needs and
-SES-LIB-017 (SES Light), from 2026-10-24.
+This is the agreed design, from 2026-10-24.
 
 It is one framework component that keeps time series on flash or an SD card
 without wearing the flash out. It serves them for charts, bars, pies and
 tables, over a period the page chooses.
 
-## Consumers
+## Use cases
 
 The design has to fit these:
 
-- **JK gateway.**
-  - Per pack, one series `jkBalance.pN`. It has six Sum columns, each with
-    one value per cell (width N, for example 96): `in_mah`, `out_mah`,
-    `in_chg`, `out_chg`, `in_dis`, `out_dis`.
-  - Tiers: hour, then day.
-  - The width is known only after the config is loaded, in `begin()`.
-  - Later: inverter SOC, limits and current, and per-cell voltages
-    (Min/Max).
-- **SES Light.**
-  - `months` and `nights` are put-series of fixed records: one record per
-    put, with integer fields from 1 to 8 bytes, signed or unsigned. That is
-    about 400 records a year.
-  - `power` uses 5-minute slots rolled up to hours and days: mean W, plus
-    a sum of the seconds the relay was on.
-  - `events` has tens of entries a day.
+- **Wide counters.** One value per channel in each column (width N, for
+  example 96), summed into hours, then days. The width is known only after
+  the config is loaded, in `begin()`.
+- **Fixed records.** Put-series of integer fields from 1 to 8 bytes,
+  signed or unsigned, one record per put: a few hundred records a year.
+- **A power profile.** 5-minute slots rolled up to hours and days: mean W,
+  plus a sum of the seconds a relay was on.
+- **Events.** Tens of entries a day.
 
 ## Core interface (`lib/ESPRack/include/history/IHistory.h`)
 
@@ -80,7 +72,8 @@ class IHistoryProvider {
     time.
   - `t ≤ newestT()` gives `Duplicate` or `Stale`, and nothing is written.
     There is no replace.
-  - After a reboot, SES re-appends whatever is missing from its NVS records.
+  - After a reboot the producer can re-append whatever is missing from
+    its own records: what is already there is refused, not doubled.
 - **Full buffer.**
   - `put()` on a full buffer returns `Full`. It never drops data silently
     and never evicts anything.
@@ -147,14 +140,14 @@ class IHistoryProvider {
 
 ## Form DSL and UI
 
-- `web::Trend("k").history("jkBalance.p1", "in_mah,out_mah").range("7d")`.
+- `web::Trend("k").history("meter.main", "energy,temp").range("7d")`.
   `web::Table("t").history(...)` works the same way.
   - The form only declares the binding: the manifest stays a skeleton.
   - The UI fetches the data from the history REST API, not from `/state`
     or WS.
 - A period picker offers 24 h, 7 d, 30 d, all and custom. `.fixedRange()`
   hides it.
-- `.reduce()` uses `res=0`: x is the cell, shown as bars or a pie.
+- `.reduce()` uses `res=0`: x is the element, shown as bars or a pie.
 
 ## Page "History"
 
@@ -199,7 +192,7 @@ smaller buffers. The feature stays.
    - module-catalog and module-guide;
    - probes on C3, C6, S3 and ESP32.
 
-Bench acceptance, carried over from SES-LIB-017:
+Bench acceptance:
 
 - 1000 power cuts during append leave the files consistent.
 - 10 000 appends leave `max_alloc` stable.
@@ -252,22 +245,14 @@ the history and maybe compare it".
      and the row's derived min, avg and max, not all N lines. The server
      computes the derived values; the query is
      `cols=mv[min],mv[avg],mv[max]`, next to `mv[5]`.
-3. **`.history()` on Trend.** Charge and Statistics show the last N hours
-   inline.
+3. **`.history()` on Trend.** A page shows the last N hours inline.
 4. **Deep links.** `/history?series=<id>&cols=<a,b>&from=<t>&to=<t>`,
    plus `&cmp=<from2>` for comparing two periods. Page links open the
    viewer this way.
 
-The JK gateway's planned series, per pack:
-
-| Series | Columns | Tiers |
-|---|---|---|
-| `jk.cells.pN` | U16 mV ×96 (Avg), vmin (Min), vmax (Max), dv (Max) | 5 min × 3 d, 1 h × 60 d, 1 d × 2 y |
-| `jk.balance.pN` | in_mah and out_mah, I16 ×10 ×96 (Sum) | 1 h × 7 d, 1 d × 1 y |
-| `inv.battery` | v, i, soc, lim_chg, lim_dis, t_min, t_max, cell_min, cell_max, wh_in and wh_out (Sum, U32) | 1 min × 2 d, 15 min × 60 d, 1 h × 1 y |
-
-That comes to about 1.3 MB per 96-cell pack, so the gateway builds with
-`-D FACTORY_HISTORY_CAP_KB=1600`.
+Sizing: a tier needs about `recSize × keepS / bucketS` bytes. A device
+whose series need more than the default cap (a quarter of the volume)
+raises `FACTORY_HISTORY_CAP_KB`.
 
 ### Viewer: how it fits the UI architecture
 
