@@ -631,6 +631,8 @@ void TelegramService::taskTrampoline(void* pv) {
 }
 
 void TelegramService::runWorker() {
+  constexpr uint8_t kSendTries = 3;
+  constexpr uint32_t kRetryPauseMs = 5000;
   TelegramQueuedMessage* m = nullptr;
   for (;;) {
     // SES-LIB-019: ask for commands every cmd_poll_s while any is registered.
@@ -638,6 +640,12 @@ void TelegramService::runWorker() {
         static_cast<uint32_t>(millis() - _lastPollMs) >= static_cast<uint32_t>(_state.cmdPollS) * 1000u) {
       _lastPollMs = millis();
       pollCommands(_state.botToken);
+    }
+    // Offline: leave the queue alone, so what was queued meanwhile (a boot
+    // report right after a crash, say) goes out once the network is back.
+    if (_state.enabled && !WiFi.isConnected()) {
+      vTaskDelay(pdMS_TO_TICKS(500));
+      continue;
     }
     if (xQueueReceive(_q, &m, pdMS_TO_TICKS(50)) != pdPASS || !m) {
       vTaskDelay(pdMS_TO_TICKS(20));
@@ -662,6 +670,14 @@ void TelegramService::runWorker() {
         // UTB fallback — different TLS path that can sometimes
         // succeed when raw POST struggles with handshake.
         ok = sendViaUtb(token, chat, topic, m->text, pm);
+      }
+      if (!ok && ++m->tries < kSendTries && xQueueSendToFront(_q, &m, 0) == pdTRUE) {
+        // Back to the head of the queue, order kept: tried again after a
+        // pause, or once the network is back.
+        logLine(false, "retry", m->text);
+        m = nullptr;
+        vTaskDelay(pdMS_TO_TICKS(kRetryPauseMs));
+        continue;
       }
       logLine(ok, ok ? "ok" : "fail", m->text);
       if (ok) _lastSendOkAt_s = (uint32_t)(millis() / 1000);

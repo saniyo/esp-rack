@@ -37,6 +37,7 @@ struct TelegramQueuedMessage {
   String   text;
   int      parseMode{-1};
   bool     silent{false};
+  uint8_t  tries{0};            // failed sends so far (the worker retries)
 };
 
 // Internal subscription record — provider-side state for each handle
