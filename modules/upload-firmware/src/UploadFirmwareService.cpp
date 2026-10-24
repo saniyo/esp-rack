@@ -3,6 +3,7 @@
 #include <AdaptiveJson.h>
 #include <FormBuilder.h>
 #include <WebManager.h>
+#include <system/FirmwareUpdate.h>
 
 UploadFirmwareService::UploadFirmwareService(AsyncWebServer* server, SecurityManager* securityManager) :
     _securityManager(securityManager) {
@@ -102,6 +103,7 @@ void UploadFirmwareService::handleUpload(AsyncWebServerRequest* request,
     Authentication authentication = _securityManager->authenticateRequest(request);
     if (AuthenticationPredicates::IS_ADMIN(authentication)) {
       if (Update.begin(request->contentLength())) {
+        ESPRack::FirmwareUpdate::begin("upload");
         // success, let's make sure we end the update if the client hangs up
         request->onDisconnect(UploadFirmwareService::handleEarlyDisconnect);
       } else {
@@ -120,8 +122,11 @@ void UploadFirmwareService::handleUpload(AsyncWebServerRequest* request,
     if (Update.write(data, len) != len) {
       Update.printError(Serial);
       handleError(request, 500);
+    } else {
+      ESPRack::FirmwareUpdate::progress();
     }
     if (final) {
+      ESPRack::FirmwareUpdate::end();
       if (!Update.end(true)) {
         Update.printError(Serial);
         handleError(request, 500);
@@ -156,6 +161,7 @@ void UploadFirmwareService::handleError(AsyncWebServerRequest* request, int code
     return;
   }
   // send the error code to the client and record the error code in the temp object
+  ESPRack::FirmwareUpdate::end();
   request->_tempObject = new int(code);
   AsyncWebServerResponse* response = request->beginResponse(code);
   request->send(response);
@@ -165,4 +171,5 @@ void UploadFirmwareService::handleEarlyDisconnect() {
 #ifdef ESP32
   Update.abort();
 #endif
+  ESPRack::FirmwareUpdate::end();
 }

@@ -4,6 +4,7 @@
 #include <WebManager.h>
 #include <App.h>  // ESPRack::restartDevice (LIB-FIX-006)
 #include <DeviceIdentity.h>
+#include <system/FirmwareUpdate.h>
 
 #ifdef ESP32
 #include <HTTPClient.h>
@@ -311,12 +312,16 @@ t_httpUpdate_return AutoUpdateService::performUpdate(const String& url) {
 #elif defined(ESP32)
   httpUpdate.rebootOnUpdate(false);
   httpUpdate.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
-  if (_progressCallback) {
-    httpUpdate.onProgress([this](int cur, int total) { _progressCallback(cur, total); });
-  }
+  httpUpdate.onProgress([this](int cur, int total) {
+    ESPRack::FirmwareUpdate::progress();
+    if (_progressCallback) _progressCallback(cur, total);
+  });
   WiFiClient client;
   client.setTimeout(_state.updateTimeoutSec);
-  return httpUpdate.update(client, url, _state.currentVersion);
+  ESPRack::FirmwareUpdate::begin("auto-update");
+  const t_httpUpdate_return r = httpUpdate.update(client, url, _state.currentVersion);
+  ESPRack::FirmwareUpdate::end();
+  return r;
 #endif
 }
 

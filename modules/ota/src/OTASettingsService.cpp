@@ -1,6 +1,7 @@
 #include <OTASettingsService.h>
 
 #include <App.h>  // ESPRack::restartDevice (SES-LIB-007)
+#include <system/FirmwareUpdate.h>
 #include <system/LoopWdt.h>
 #include <web/Form.h>
 #include <WebManager.h>
@@ -120,6 +121,7 @@ void OTASettingsService::configureArduinoOTA() {
     _arduinoOTA->onStart([]() {
       Serial.println(F("Starting"));
       ESPRack::LoopWdt::pause();
+      ESPRack::FirmwareUpdate::begin("ota");
     });
     // Reboot through the framework (SES-LIB-007): the modules' onShutdown()
     // runs on the loop task and the next boot reports lastRestartReason()
@@ -127,12 +129,15 @@ void OTASettingsService::configureArduinoOTA() {
     _arduinoOTA->setRebootOnSuccess(false);
     _arduinoOTA->onEnd([]() {
       Serial.println(F("\r\nEnd"));
+      ESPRack::FirmwareUpdate::end();
       ESPRack::restartDevice(ESPRack::kRestartOta);
     });
     _arduinoOTA->onProgress([](unsigned int progress, unsigned int total) {
+      ESPRack::FirmwareUpdate::progress();
       log_d("Progress: %u%%", (progress / (total / 100)));
     });
     _arduinoOTA->onError([](ota_error_t error) {
+      ESPRack::FirmwareUpdate::end();
       ESPRack::LoopWdt::resume();
       log_d("Error[%u]: ", error);
       if (error == OTA_AUTH_ERROR)
