@@ -268,3 +268,32 @@ The JK gateway's planned series, per pack:
 
 That comes to about 1.3 MB per 96-cell pack, so the gateway builds with
 `-D FACTORY_HISTORY_CAP_KB=1600`.
+
+### Viewer: how it fits the UI architecture
+
+- **A tab can name a framework renderer.** `WebTab(...).component("HistoryViewer")`
+  adds a `component` field to the tab in the manifest.
+  - DynamicFeature renders that tab with the framework component from its
+    `CUSTOM_TABS` map instead of a form.
+  - This is the per-tab twin of `CUSTOM_RENDERERS`.
+  - The History page keeps its Status and Settings tabs from the manifest
+    and gains a first tab, View: `/history/view`.
+- **Deep link.**
+  `/history/view?series=<id>&cols=<a,b[min]>&from=<t>&to=<t>&cmp=<from2>`.
+  The viewer reads the URL and writes changes back to it with a replace.
+- **Viewer data.**
+  - It lists the series from `GET /api/v1/history/series`.
+  - It fetches rows from `/series/<id>?from&to&res&cols`, following `next`
+    for at most 20 pages.
+  - `res` is the larger of the tier bucket and the span divided by 300
+    points.
+- **Charts.**
+  - Each selected column gets its own small chart, and all of them share
+    the x axis (the one-axis rule).
+  - The elements of a width-N column, and its min, avg and max, are lines
+    in that column's chart.
+  - In compare mode the second period is fetched separately and shifted by
+    `from − cmp`, so both periods sit on one axis. It is drawn dashed.
+- **Inline charts.** `web::Trend(k).history(id, cols, range)` emits
+  `hist=id;hcols=…;range=…`. TrendChart then fetches the rows itself
+  instead of reading `/state`. Same endpoint, no WS.
