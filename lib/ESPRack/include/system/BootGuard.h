@@ -22,7 +22,13 @@
 // `limit` of them in a row fit limit × stableAfterMs anyway.
 //
 // Persisted in NVS namespace "esprack", key "boot": two writes per boot at
-// most (begin, markStable). App::begin() calls begin() with the defaults;
+// most (begin, markStable).
+//
+// History: the last kBootHistory boots with their reason, class, the time
+// of the boot and how long the run before it lasted (NVS key "boots": one
+// write at begin, one once the clock is valid). The time is set when this
+// boot's clock becomes valid (0 = never); the previous run's length comes
+// from RTC memory, so a power cut leaves it unknown (0). App::begin() calls begin() with the defaults;
 // call it yourself before app->begin() for other limits (first call wins).
 
 #include <esp_system.h>
@@ -59,7 +65,20 @@ struct BootInfo {
   uint8_t sinceStable[static_cast<int>(BootClass::Count)];
 };
 
+constexpr size_t kBootHistory = 8;
+
+struct BootRecord {
+  uint32_t bootCount = 0;   // 0 = empty
+  uint32_t bootT = 0;       // UTC of the boot, 0 = unknown
+  uint32_t prevUpS = 0;     // the run before this boot lasted, s; 0 = unknown
+  BootClass bootClass = BootClass::Other;
+  char reason[24] = {0};    // lastRestartReason() of that boot
+};
+
 namespace BootGuard {
+
+// The last boots, newest first (this one included). Returns how many.
+size_t history(BootRecord* out, size_t max);
 
 void begin(uint8_t limit = 4, uint32_t windowMs = 600000, uint32_t stableAfterMs = 120000);
 const BootInfo& info();

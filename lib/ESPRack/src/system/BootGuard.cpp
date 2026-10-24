@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 #include <esp_app_desc.h>
+#include <esp_attr.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <esp_rom_crc.h>
@@ -12,6 +13,7 @@
 #include "App.h"
 #include "ProblemJson.h"
 #include "WebManager.h"
+#include "time/TimeSync.h"
 
 namespace ESPRack {
 
@@ -99,6 +101,75 @@ BootClass classify(esp_reset_reason_t rr, const char* last) {
   }
 }
 
+// NVS blob "esprack"/"boots": the last boots, slot head = the newest.
+struct HistRec {
+  uint32_t bootCount;
+  uint32_t bootT;
+  uint32_t prevUpS;
+  uint8_t cls;
+  char reason[24];  // restart reasons are at most 23 chars (App.h)
+  uint8_t pad[3];
+};
+static_assert(sizeof(HistRec) == 40, "boot history record layout");
+struct History {
+  uint32_t magic;
+  uint8_t head;
+  uint8_t pad[3];
+  HistRec rec[kBootHistory];
+  uint32_t crc;
+};
+constexpr uint32_t kHistMagic = 0x31484742u;  // "BGH1"
+constexpr const char* kHistKey = "boots";
+History s_hist{};
+bool s_timed = false;  // this boot's time is in the history
+
+// The run's uptime, kept across a soft reset in RTC memory (not a power cut).
+struct UpRecord {
+  uint32_t magic;
+  uint32_t upS;
+  uint32_t crc;
+};
+constexpr uint32_t kUpMagic = 0x31505542u;  // "BUP1"
+RTC_NOINIT_ATTR UpRecord s_up;
+uint32_t s_lastUpS = 0;
+
+void storeUptime(uint32_t s) {
+  UpRecord r{kUpMagic, s, 0};
+  r.crc = esp_rom_crc32_le(0, reinterpret_cast<const uint8_t*>(&r), offsetof(UpRecord, crc));
+  s_up = r;
+}
+
+uint32_t previousUptime() {
+  const UpRecord r = s_up;
+  const bool ok = r.magic == kUpMagic &&
+                  r.crc == esp_rom_crc32_le(0, reinterpret_cast<const uint8_t*>(&r), offsetof(UpRecord, crc));
+  return ok ? r.upS : 0;
+}
+
+void storeHistory() {
+  s_hist.magic = kHistMagic;
+  s_hist.crc = esp_rom_crc32_le(0, reinterpret_cast<const uint8_t*>(&s_hist), offsetof(History, crc));
+  nvs_handle_t h;
+  if (nvs_open(kNs, NVS_READWRITE, &h) != ESP_OK) return;
+  if (nvs_set_blob(h, kHistKey, &s_hist, sizeof(s_hist)) != ESP_OK || nvs_commit(h) != ESP_OK) {
+    log_w("[boot] NVS write failed — boot history not saved");
+  }
+  nvs_close(h);
+}
+
+void loadHistory() {
+  nvs_handle_t h;
+  bool ok = false;
+  if (nvs_open(kNs, NVS_READONLY, &h) == ESP_OK) {
+    size_t len = sizeof(s_hist);
+    ok = nvs_get_blob(h, kHistKey, &s_hist, &len) == ESP_OK && len == sizeof(s_hist) &&
+         s_hist.magic == kHistMagic && s_hist.head < kBootHistory &&
+         s_hist.crc == esp_rom_crc32_le(0, reinterpret_cast<const uint8_t*>(&s_hist), offsetof(History, crc));
+    nvs_close(h);
+  }
+  if (!ok) s_hist = History{};
+}
+
 void publish() {
   s_info.quickReboots = s_rec.quick;
   s_info.safeMode = (s_rec.flags & kSafe) != 0;
@@ -159,6 +230,18 @@ void begin(uint8_t limit, uint32_t windowMs, uint32_t stableAfterMs) {
   s_rec.flags &= static_cast<uint8_t>(~kStable);
   store();
 
+  // This boot into the history; the previous run's length from RTC memory.
+  loadHistory();
+  s_hist.head = uint8_t((s_hist.head + 1) % kBootHistory);
+  HistRec& h = s_hist.rec[s_hist.head];
+  h = HistRec{};
+  h.bootCount = s_rec.bootCount;
+  h.prevUpS = (rr == ESP_RST_POWERON) ? 0 : previousUptime();
+  h.cls = uint8_t(cls);
+  strlcpy(h.reason, last, sizeof(h.reason));
+  storeHistory();
+  storeUptime(0);
+
   s_info.reason = rr;
   s_info.lastRestart = last;
   s_info.bootClass = cls;
@@ -170,6 +253,22 @@ void begin(uint8_t limit, uint32_t windowMs, uint32_t stableAfterMs) {
 }
 
 const BootInfo& info() { return s_info; }
+
+size_t history(BootRecord* out, size_t max) {
+  Lock l;
+  size_t n = 0;
+  for (size_t i = 0; i < kBootHistory && n < max; ++i) {
+    const HistRec& h = s_hist.rec[(s_hist.head + kBootHistory - i) % kBootHistory];
+    if (!h.bootCount) break;
+    BootRecord& r = out[n++];
+    r.bootCount = h.bootCount;
+    r.bootT = h.bootT;
+    r.prevUpS = h.prevUpS;
+    r.bootClass = h.cls < kClasses ? BootClass(h.cls) : BootClass::Other;
+    strlcpy(r.reason, h.reason, sizeof(r.reason));
+  }
+  return n;
+}
 
 void markStable() {
   Lock l;
@@ -194,7 +293,23 @@ void clearSafeMode() {
 }
 
 void loop() {
-  if (s_begun && !s_info.stable && millis() >= s_stableAfterMs) markStable();
+  if (!s_begun) return;
+  const uint32_t ms = millis();
+  if (!s_info.stable && ms >= s_stableAfterMs) markStable();
+  // The run's length for the next boot (RTC memory: no flash wear).
+  const uint32_t upS = ms / 1000;
+  if (upS - s_lastUpS >= 10) {
+    s_lastUpS = upS;
+    storeUptime(upS);
+  }
+  // The time of this boot, once the clock is valid (one NVS write).
+  if (!s_timed && TimeSync::instance().isValid()) {
+    s_timed = true;
+    const time_t now = time(nullptr);
+    Lock l;
+    s_hist.rec[s_hist.head].bootT = uint32_t(now) - upS;
+    storeHistory();
+  }
 }
 
 void registerManifest(WebManager* web) {
