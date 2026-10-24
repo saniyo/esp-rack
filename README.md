@@ -74,7 +74,21 @@ also has to list it in `lib_deps`. See
 | [`ROADMAP.md`](ROADMAP.md) | Original design and phased plan, plus the current status section. |
 | `docs/plans/*.md` | Design notes per topic: API standardization, discovery protocol, memory/heap work, mothership, WireGuard, tree menu, form DSL. |
 
-## What's new (0.7.1, 2026-10-24)
+## What's new (0.7.2, 2026-10-24)
+
+- **Live pages recover by themselves:** the device sends a heartbeat and
+  drops a client whose queue is stuck; the page reconnects after 15 s
+  without frames instead of freezing until a reload.
+- **Live forms:** fields on a live settings tab are saved like a Settings
+  save (answered, refused values come back); a cleared number field keeps
+  the setting instead of becoming the minimum; sliders don't jump back
+  mid-drag; charts and tables don't double after a hidden tab returns.
+- **Charts:** every Trend series keeps its color and type; series names
+  (`line(key, color, type, name)`).
+- **Bluetooth:** the radio's real cost is internal RAM; see the consumer
+  guide.
+
+## 0.7.1 (2026-10-24)
 
 - **Fixes:** firmware upload from the web page (it got 404), and an empty
   POST to the upload endpoint no longer restarts the device.
