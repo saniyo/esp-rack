@@ -233,3 +233,38 @@ Bench acceptance, carried over from SES-LIB-017:
 - **Choosing a tier for a query.** The query reads the finest tier whose
   retention still covers `from`, or the coarsest tier if none does. Rows
   queued in RAM are included. The open bucket is not.
+
+## UI (step 3): the owner's requirements (2026-10-24)
+
+The owner's words: "tiers in the internal flash, but I must be able to open
+the history and maybe compare it".
+
+1. **Open any series.** The History page has a viewer: pick a series, its
+   columns and a period. The resolution follows the period, through the
+   tiers.
+2. **Compare.**
+   - **(a) Two periods.** The same column over two periods, overlaid on a
+     relative time axis: today vs yesterday, this week vs last week, or
+     date A vs date B.
+   - **(b) Several columns or series.** Shown as stacked charts that share
+     the x axis, never a second y axis.
+   - **(c) Width-N columns.** Pick the elements to draw (cells 5, 17, …)
+     and the row's derived min, avg and max, not all N lines. The server
+     computes the derived values; the query is
+     `cols=mv[min],mv[avg],mv[max]`, next to `mv[5]`.
+3. **`.history()` on Trend.** Charge and Statistics show the last N hours
+   inline.
+4. **Deep links.** `/history?series=<id>&cols=<a,b>&from=<t>&to=<t>`,
+   plus `&cmp=<from2>` for comparing two periods. Page links open the
+   viewer this way.
+
+The JK gateway's planned series, per pack:
+
+| Series | Columns | Tiers |
+|---|---|---|
+| `jk.cells.pN` | U16 mV ×96 (Avg), vmin (Min), vmax (Max), dv (Max) | 5 min × 3 d, 1 h × 60 d, 1 d × 2 y |
+| `jk.balance.pN` | in_mah and out_mah, I16 ×10 ×96 (Sum) | 1 h × 7 d, 1 d × 1 y |
+| `inv.battery` | v, i, soc, lim_chg, lim_dis, t_min, t_max, cell_min, cell_max, wh_in and wh_out (Sum, U32) | 1 min × 2 d, 15 min × 60 d, 1 h × 1 y |
+
+That comes to about 1.3 MB per 96-cell pack, so the gateway builds with
+`-D FACTORY_HISTORY_CAP_KB=1600`.
