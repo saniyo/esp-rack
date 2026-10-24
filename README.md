@@ -74,7 +74,12 @@ also has to list it in `lib_deps`. See
 | [`ROADMAP.md`](ROADMAP.md) | Original design and phased plan, plus the current status section. |
 | `docs/plans/*.md` | Design notes per topic: API standardization, discovery protocol, memory/heap work, mothership, WireGuard, tree menu, form DSL. |
 
-## What's new (0.7.0, 2026-10-24)
+## What's new (0.7.1, 2026-10-24)
+
+- **Fixes:** firmware upload from the web page (it got 404), and an empty
+  POST to the upload endpoint no longer restarts the device.
+
+## 0.7.0 (2026-10-24)
 
 - **Buses as shared hardware:** a CAN port (`hw/ICanPort.h`) and an I2C bus
   (`hw/II2cBus.h`) are external HW instances that software modules and device
