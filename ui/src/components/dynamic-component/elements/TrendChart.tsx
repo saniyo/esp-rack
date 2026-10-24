@@ -22,12 +22,17 @@ import {
   ListItemText,
   Divider,
   Box,
+  LinearProgress,
+  Typography,
 } from '@mui/material';
 import { FieldAvatar } from '../utils/iconRegistry';
 
 import { parseFieldOptions, ParsedFieldOptions, RefLineSpec } from '../utils/fieldParser';
 import { formatFull, formatX, isXFormat, toEpochMs, XFormat } from '../../../utils/deviceTime';
 import { useDeviceZone } from '../../../utils/useDeviceZone';
+import TrendHistoryBar from './trend/TrendHistoryBar';
+import { HistPeriod } from './trend/historyPlan';
+import { HistoryBinding, parsePeriods, useHistoryData } from './trend/useHistoryData';
 
 /** ****************************
  *  КОНСТАНТИ ТА ТИПИ
@@ -49,6 +54,8 @@ interface LineConfig {
   color: string;
   type: CustomCurveType;
   hidden: boolean;
+  histSpec?: string;  // h=: the history column (default: dataKey)
+  histSign: number;   // hk=-1: drawn below 0, like the live push
 }
 
 interface Field {
@@ -135,6 +142,8 @@ function parseLineConfigs(
     let color = getColor(index);
     let type: CustomCurveType = 'monotone';
     let name = '';
+    let histSpec: string | undefined;
+    let histSign = 1;
 
     if (rest) {
       // наприклад "color=#ff0000,type=step"
@@ -152,6 +161,10 @@ function parseLineConfigs(
           type = value as CustomCurveType;
         } else if (key === 'name') {
           name = value;
+        } else if (key === 'h') {
+          histSpec = value;
+        } else if (key === 'hk') {
+          histSign = Number(value) < 0 ? -1 : 1;
         }
       });
     }
@@ -162,6 +175,8 @@ function parseLineConfigs(
       hidden,
       color,
       type,
+      histSpec,
+      histSign,
     };
   });
 }
@@ -254,6 +269,7 @@ interface CustomTooltipProps {
   label?: any;
   hoveredDataKey: string | null;
   formatLabel?: (label: any) => string;
+  unit?: string;
 }
 
 // Recharts v3 removed the `coordinate` prop from the tooltip content payload
@@ -266,6 +282,7 @@ const CustomTooltipComponent: React.FC<CustomTooltipProps> = ({
   label,
   hoveredDataKey,
   formatLabel,
+  unit,
 }) => {
   if (active && payload && payload.length) {
     // Якщо користувач "наводить" на конкретну серію (Bar), можемо відфільтрувати
@@ -313,7 +330,7 @@ const CustomTooltipComponent: React.FC<CustomTooltipProps> = ({
                 marginRight: 5,
               }}
             />
-            {entry.name}: {entry.value}
+            {entry.name}: {entry.value === null || entry.value === undefined ? 'no data' : `${entry.value}${unit ? ` ${unit}` : ''}`}
           </span>
         ))}
       </div>
@@ -594,11 +611,52 @@ const TrendChart: React.FC<TrendChartProps> = ({ field, value = [], getSibling }
         dataKey: key,
         readableLabel: key,
         hidden: false,
-        color: getColor(idx),
+        color: getColor(baseLineConfigs.length + idx),
         type: 'monotone' as CustomCurveType,
+        histSign: 1,
       };
     });
   }, [baseLineConfigs, mergedDataMap, isCategory, chartDataForLine, xAxisKey]);
+
+  // ***************************************************
+  // History mode (hist=...): a period switch; in a history period the rows
+  // come from the History series, and only the declared lines are drawn.
+  // ***************************************************
+  const histBinding = useMemo<HistoryBinding | undefined>(() => {
+    const series = om.hist?.value as string | undefined;
+    if (!series) return undefined;
+    const periods = parsePeriods(om.hper?.value);
+    const initial = (om.hdef?.value as HistPeriod | undefined) ?? 'live';
+    return {
+      series,
+      periods,
+      initial: periods.includes(initial) ? initial : periods[0],
+      liveLabel: (om.hlive?.value as string) || 'Live',
+    };
+  }, [om.hist, om.hper, om.hdef, om.hlive]);
+  const histLines = useMemo(
+    () => baseLineConfigs.map((c) => ({ dataKey: c.dataKey, spec: c.histSpec, sign: c.histSign })),
+    [baseLineConfigs]
+  );
+  const hist = useHistoryData({
+    binding: histBinding,
+    lines: histLines,
+    xAxisKey,
+    liveRows: chartDataForLine,
+    zone,
+    storageKey: `trendHist:${window.location.pathname}:${field.label}`,
+  });
+  const plotRows = useMemo(() => (hist.active ? hist.rows || [] : chartDataForLine), [hist.active, hist.rows, chartDataForLine]);
+  const plotConfigs = hist.active ? baseLineConfigs : mergedLineConfigs;
+  const unit = (om.unit?.value as string | undefined) || hist.unit;
+  // Stacked bars with a negative member (a sign -1 line, or negative values)
+  // stack away from 0 on both sides instead of over each other.
+  const signedStack = useMemo(() => {
+    const stacked = new Set(stacks.flat());
+    if (!stacked.size) return false;
+    if (plotConfigs.some((c) => c.histSign < 0 && stacked.has(c.dataKey))) return true;
+    return plotRows.some((r) => Array.from(stacked).some((k) => typeof r[k] === 'number' && r[k] < 0));
+  }, [stacks, plotConfigs, plotRows]);
 
   // ***************************************************
   // (E) Стан прихованих ліній (show/hide), керуємо через легенду
@@ -639,7 +697,7 @@ const TrendChart: React.FC<TrendChartProps> = ({ field, value = [], getSibling }
   // (G) Рендер ліній / барів / pie
   // ***************************************************
   const renderLines = useMemo(() => {
-    return mergedLineConfigs.map((cfg) => (
+    return plotConfigs.map((cfg) => (
       <Line
         key={cfg.dataKey}
         type={cfg.type}
@@ -656,13 +714,13 @@ const TrendChart: React.FC<TrendChartProps> = ({ field, value = [], getSibling }
         hide={hiddenLines[cfg.dataKey]}
       />
     ));
-  }, [mergedLineConfigs, hiddenLines]);
+  }, [plotConfigs, hiddenLines]);
 
   const renderBars = useMemo(() => {
     // stack=a+b|c+d: bars of one group share a stackId.
     const stackOf: Record<string, string> = {};
     stacks.forEach((g, i) => g.forEach((k) => { stackOf[k] = `s${i}`; }));
-    return mergedLineConfigs.map((cfg) => (
+    return plotConfigs.map((cfg) => (
       <Bar
         key={cfg.dataKey}
         dataKey={cfg.dataKey}
@@ -673,13 +731,14 @@ const TrendChart: React.FC<TrendChartProps> = ({ field, value = [], getSibling }
         isAnimationActive={false}
       />
     ));
-  }, [mergedLineConfigs, hiddenLines, stacks]);
+  }, [plotConfigs, hiddenLines, stacks]);
 
   // refl=key:color:label — a horizontal line at the sibling's live value;
   // hidden while that value is missing or not a number.
   const sibVals = refLines.map((r) => getSibling?.(r.key));
   const sibKey = JSON.stringify(sibVals);
   const renderRefLines = useMemo(() => {
+    if (hist.active) return [];
     return refLines
       .map((r, i) => {
         const raw = sibVals[i];
@@ -698,7 +757,7 @@ const TrendChart: React.FC<TrendChartProps> = ({ field, value = [], getSibling }
       })
       .filter(Boolean);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [refLines, sibKey]);
+  }, [refLines, sibKey, hist.active]);
 
   // vrefl=key:color:label — a vertical line at the x the sibling's live value
   // names: on a category axis the category equal to it, else the nearest x
@@ -707,6 +766,7 @@ const TrendChart: React.FC<TrendChartProps> = ({ field, value = [], getSibling }
   const vsibVals = vrefLines.map((r) => getSibling?.(r.key));
   const vsibKey = JSON.stringify(vsibVals);
   const renderVRefLines = useMemo(() => {
+    if (hist.active) return [];
     const xs = chartDataForLine.map((r) => r[xAxisKey]);
     const numeric = !isCategory && xs.length > 0 && xs.every((v) => typeof v === 'number');
     return vrefLines
@@ -736,7 +796,7 @@ const TrendChart: React.FC<TrendChartProps> = ({ field, value = [], getSibling }
       })
       .filter(Boolean);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [vrefLines, vsibKey, chartDataForLine, xAxisKey, isCategory, tickFormatter]);
+  }, [vrefLines, vsibKey, chartDataForLine, xAxisKey, isCategory, tickFormatter, hist.active]);
 
   // ymin/ymax fix an end of the y axis. ypad lets the free ends follow the
   // visible data with that margin (a fraction of its span), rounded to a
@@ -747,8 +807,8 @@ const TrendChart: React.FC<TrendChartProps> = ({ field, value = [], getSibling }
     if (yPad === undefined) return [yMin ?? 'auto', yMax ?? 'auto'];
     let lo = Infinity;
     let hi = -Infinity;
-    const keys = mergedLineConfigs.filter((c) => !hiddenLines[c.dataKey]).map((c) => c.dataKey);
-    chartDataForLine.forEach((row) =>
+    const keys = plotConfigs.filter((c) => !hiddenLines[c.dataKey]).map((c) => c.dataKey);
+    plotRows.forEach((row) =>
       keys.forEach((k) => {
         const v = row[k];
         if (typeof v === 'number' && Number.isFinite(v)) {
@@ -765,7 +825,7 @@ const TrendChart: React.FC<TrendChartProps> = ({ field, value = [], getSibling }
       yMin ?? tidy(Math.floor((lo - yPad * span) / step) * step),
       yMax ?? tidy(Math.ceil((hi + yPad * span) / step) * step),
     ];
-  }, [yMin, yMax, yPad, mergedLineConfigs, hiddenLines, chartDataForLine]);
+  }, [yMin, yMax, yPad, plotConfigs, hiddenLines, plotRows]);
   const chartMargin = useMemo(
     () => ({ top: vrefLines.length ? 20 : 5, right: 30, left: 20, bottom: 5 }),
     [vrefLines.length]
@@ -847,7 +907,7 @@ const TrendChart: React.FC<TrendChartProps> = ({ field, value = [], getSibling }
       case 'lineChart':
         return (
           <LineChart
-            data={chartDataForLine}
+            data={plotRows}
             margin={chartMargin}
           >
             <CartesianGrid strokeDasharray="3 3" />
@@ -859,13 +919,14 @@ const TrendChart: React.FC<TrendChartProps> = ({ field, value = [], getSibling }
                   {...props}
                   hoveredDataKey={hoveredDataKey}
                   formatLabel={tooltipLabel}
+                  unit={unit}
                 />
               )}
             />
-            <Legend
+            {(!hist.available || plotConfigs.length > 1) && <Legend
               content={
                 <CustomLegend
-                  payload={mergedLineConfigs.map((cfg) => ({
+                  payload={plotConfigs.map((cfg) => ({
                     dataKey: cfg.dataKey,
                     color: cfg.color,
                     value: cfg.readableLabel,
@@ -876,7 +937,7 @@ const TrendChart: React.FC<TrendChartProps> = ({ field, value = [], getSibling }
                   interactive={true}
                 />
               }
-            />
+            />}
             {renderLines}
             {renderRefLines}
             {renderVRefLines}
@@ -890,9 +951,10 @@ const TrendChart: React.FC<TrendChartProps> = ({ field, value = [], getSibling }
         // every series piles into one column.
         return (
           <BarChart
-            data={chartDataForLine}
+            data={plotRows}
             margin={chartMargin}
             barCategoryGap="20%"
+            stackOffset={signedStack ? 'sign' : undefined}
           >
             <CartesianGrid strokeDasharray="3 3" />
             <XAxis dataKey={xAxisKey} tickFormatter={tickFormatter} />
@@ -903,13 +965,14 @@ const TrendChart: React.FC<TrendChartProps> = ({ field, value = [], getSibling }
                   {...props}
                   hoveredDataKey={hoveredDataKey}
                   formatLabel={tooltipLabel}
+                  unit={unit}
                 />
               )}
             />
-            <Legend
+            {(!hist.available || plotConfigs.length > 1) && <Legend
               content={
                 <CustomLegend
-                  payload={mergedLineConfigs.map((cfg) => ({
+                  payload={plotConfigs.map((cfg) => ({
                     dataKey: cfg.dataKey,
                     color: cfg.color,
                     value: cfg.readableLabel,
@@ -920,7 +983,7 @@ const TrendChart: React.FC<TrendChartProps> = ({ field, value = [], getSibling }
                   interactive={true}
                 />
               }
-            />
+            />}
             {renderBars.map((bar) =>
               React.cloneElement(bar, {
                 onMouseEnter: () => handleBarMouseEnter(bar.props.dataKey),
@@ -944,8 +1007,11 @@ const TrendChart: React.FC<TrendChartProps> = ({ field, value = [], getSibling }
     }
   }, [
     rawMode,
-    chartDataForLine,
-    mergedLineConfigs,
+    plotRows,
+    plotConfigs,
+    signedStack,
+    unit,
+    hist.available,
     renderLines,
     renderBars,
     handleLegendClick,
@@ -969,11 +1035,21 @@ const TrendChart: React.FC<TrendChartProps> = ({ field, value = [], getSibling }
   // ***************************************************
   return (
     <>
-      <ChartHeader
-        readableLabel={readableLabel}
-        secondaryText={rawMode}
-        iconName={(parsedOptions.optionMap as any).icon?.value as string | undefined}
-      />
+      {hist.available && histBinding ? (
+        <TrendHistoryBar
+          title={readableLabel}
+          iconName={(parsedOptions.optionMap as any).icon?.value as string | undefined}
+          periods={histBinding.periods}
+          liveLabel={histBinding.liveLabel}
+          h={hist}
+        />
+      ) : (
+        <ChartHeader
+          readableLabel={readableLabel}
+          secondaryText={rawMode}
+          iconName={(parsedOptions.optionMap as any).icon?.value as string | undefined}
+        />
+      )}
       <ListItem disableGutters>
         <Box
           sx={{
@@ -985,9 +1061,27 @@ const TrendChart: React.FC<TrendChartProps> = ({ field, value = [], getSibling }
             backgroundColor: '#ffffff',
           }}
         >
-          <ResponsiveContainer width="100%" height="100%">
-            {renderedChart}
-          </ResponsiveContainer>
+          {hist.active && hist.loading && <LinearProgress sx={{ position: 'absolute', top: 0, left: 0, right: 0, height: 2 }} />}
+          {hist.active && (hist.empty || hist.error) ? (
+            <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', p: 2, textAlign: 'center' }}>
+              <Typography variant="body1" color={hist.error ? 'error' : 'text.primary'}>
+                {hist.error || hist.empty?.title}
+              </Typography>
+              {!hist.error && hist.empty?.detail && (
+                <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
+                  {hist.empty.detail}
+                </Typography>
+              )}
+            </Box>
+          ) : hist.active && hist.loading && !hist.rows ? (
+            <Box sx={{ height: '100%', bgcolor: 'action.hover' }} />
+          ) : (
+            <Box sx={{ height: '100%', opacity: hist.active && hist.loading ? 0.5 : 1 }}>
+              <ResponsiveContainer width="100%" height="100%">
+                {renderedChart}
+              </ResponsiveContainer>
+            </Box>
+          )}
         </Box>
       </ListItem>
       <Divider variant="inset" component="li" />

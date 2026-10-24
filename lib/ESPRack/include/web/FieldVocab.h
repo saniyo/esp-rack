@@ -114,6 +114,10 @@ constexpr const char* VRefLine      = "vrefl";        // trend — "key:color:la
 constexpr const char* YMin          = "ymin";         // trend — fixed lower end of the y axis
 constexpr const char* YMax          = "ymax";         // trend — fixed upper end of the y axis
 constexpr const char* YPad          = "ypad";         // trend — free ends follow the data, margin = pad x span
+constexpr const char* History       = "hist";         // trend — the History series behind the period switch
+constexpr const char* HistPeriods   = "hper";         // trend — "live,24h,7d,30d,1y,date" (the switch's choices)
+constexpr const char* HistDefault   = "hdef";         // trend — the initial period (default live)
+constexpr const char* HistLiveLabel = "hlive";        // trend — the Live choice's label
 
 // Progress.
 constexpr const char* MaxKey        = "maxKey";       // progress — max from a sibling key

@@ -365,6 +365,8 @@ This is an audit snapshot of `feature/ses-light-support`, dated 2026-10-13:
       `[min]` / `[avg]` / `[max]`.
     - `res` downsamples by the column aggregates; `res=0` gives one row for the whole period.
   - `&format=csv` streams the same rows as a CSV file, with no page limit.
+  - `tier=<index>` reads that tier; `cursor` continues a paged answer on the same tier.
+  - The list also gives the device's `now` and `maxv` (values one page holds), and `local_days` per series.
   - `DELETE /api/v1/history/series/<id>` erases a series (admin).
   - The page "History" has status (writes, storage, budget, wear estimate,
     series table) and settings, plus the actions `history.flush` and
@@ -388,7 +390,7 @@ This is an audit snapshot of `feature/ses-light-support`, dated 2026-10-13:
 - **Caveats:**
   - What waits in RAM (up to `flush_min`) and the open buckets are lost on an
     unexpected reset.
-  - The View tab is being replaced by a history mode of the Trend chart.
+  - Charts show history through the Trend history mode (`.history(id)`, module-guide §5.3); the module has no viewer of its own.
 
 ### `mothership` — MothershipModule
 - **Purpose:** Fleet-management client.

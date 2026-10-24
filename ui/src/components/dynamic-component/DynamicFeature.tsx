@@ -17,13 +17,10 @@ import { FeatureEntry, TabSpec } from '../../types';
 import { useRest } from '../../utils';
 import { useWsChannel } from '../../utils/useWsChannel';
 import { DynamicFormContext, DynamicFormCtx } from './DynamicFormContext';
-import HistoryViewer from '../../framework/history/HistoryViewer';
-
 // Framework renderers a tab can name instead of a form (WebTab::component),
-// the per-tab twin of CUSTOM_RENDERERS in AuthenticatedRouting.
-const CUSTOM_TABS: Record<string, FC> = {
-  HistoryViewer,
-};
+// the per-tab twin of CUSTOM_RENDERERS in AuthenticatedRouting. None yet:
+// history shows in the pages' own Trend charts (their history mode).
+const CUSTOM_TABS: Record<string, FC> = {};
 
 
 // C1 path contract: a typed feature serves its UI form at /api/v1/<id>/form

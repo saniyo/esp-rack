@@ -14,6 +14,7 @@ import { useSnackbar } from 'notistack';
 import { Field } from '../types';
 import { useFieldParser } from '../utils/useFieldParser';
 import { AXIOS, toAxiosPath } from '../../../api/endpoints';
+import { fileNameOf, saveBlob } from '../../../utils/download';
 import { extractErrorMessage } from '../../../utils';
 import { resolveIcon } from '../utils/iconRegistry';
 import { useManifest } from '../../../contexts/manifest';
@@ -46,23 +47,6 @@ type MuiColor =
 
 const isMuiColor = (s?: string): s is MuiColor =>
   !!s && ['primary', 'secondary', 'error', 'warning', 'success', 'info', 'inherit'].includes(s);
-
-// Content-Disposition: attachment; filename="x.elf" -> x.elf
-const fileNameOf = (cd?: string): string | undefined => {
-  const m = cd ? /filename="?([^";]+)"?/i.exec(cd) : null;
-  return m ? m[1] : undefined;
-};
-
-const saveBlob = (blob: Blob, name: string) => {
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = name;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-};
 
 const ActionField: FC<ActionFieldProps> = ({ field, value }) => {
   const { readableLabel, optionMap } = useFieldParser(field.label, field.o || '');

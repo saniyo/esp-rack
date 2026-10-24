@@ -271,31 +271,25 @@ Sizing: a tier needs about `recSize × keepS / bucketS` bytes. A device
 whose series need more than the default cap (a quarter of the volume)
 raises `FACTORY_HISTORY_CAP_KB`.
 
-### Viewer: how it fits the UI architecture
+### History in the pages' own charts (2026-10-25)
 
-- **A tab can name a framework renderer.** `WebTab(...).component("HistoryViewer")`
-  adds a `component` field to the tab in the manifest.
-  - DynamicFeature renders that tab with the framework component from its
-    `CUSTOM_TABS` map instead of a form.
-  - This is the per-tab twin of `CUSTOM_RENDERERS`.
-  - The History page keeps its Status and Settings tabs from the manifest
-    and gains a first tab, View: `/history/view`.
-- **Deep link.**
-  `/history/view?series=<id>&cols=<a,b[min]>&from=<t>&to=<t>&cmp=<from2>`.
-  The viewer reads the URL and writes changes back to it with a replace.
-- **Viewer data.**
-  - It lists the series from `GET /api/v1/history/series`.
-  - It fetches rows from `/series/<id>?from&to&res&cols`, following `next`
-    for at most 20 pages.
-  - `res` is the larger of the tier bucket and the span divided by 300
-    points.
-- **Charts.**
-  - Each selected column gets its own small chart, and all of them share
-    the x axis (the one-axis rule).
-  - The elements of a width-N column, and its min, avg and max, are lines
-    in that column's chart.
-  - In compare mode the second period is fetched separately and shifted by
-    `from − cmp`, so both periods sit on one axis. It is drawn dashed.
-- **Inline charts.** `web::Trend(k).history(id, cols, range)` emits
-  `hist=id;hcols=…;range=…`. TrendChart then fetches the rows itself
-  instead of reading `/state`. Same endpoint, no WS.
+The owner rejected the separate viewer: "the charts themselves should be the
+existing ones". It is removed (the View tab, `HistoryViewer.tsx`). History
+shows in `TrendChart` as a mode:
+
+- `web::Trend(k).history(seriesId)` adds a period switch to the chart's
+  header: `Live | 24 h | 7 d | 30 d | 1 y | a day`
+  (`.periods("live,24h,7d")`, `.period("7d")` for the initial one,
+  `.liveLabel("Since reset")`). `.unit("mV")` names the unit, and
+  `.histCol("in_mah", -1)` gives the last line its history column and
+  sign. In a history period the rows come from REST; Live is as before.
+- Without the module or the series the chart is live only, as before.
+- Category charts read one row over the period (`res=0`): a width-N column
+  is transposed to N category rows, averages or totals (Sum).
+- The window is planned on the device's clock (`now` in the list), and
+  clamped to the start of recording before the tier is chosen; the client
+  sends `tier=`. `maxv` in the list packs the columns so a page fits.
+- Reload (history is a snapshot) and CSV in the header; the choice is kept
+  per browser (`localStorage`).
+- The full design, with the time-series path, groups and compare still to
+  come, is the consumer's spec "History mode in the existing charts".

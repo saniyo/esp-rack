@@ -71,6 +71,23 @@ describe('Trend', () => {
     ]);
   });
 
+  it('reads the history binding and keeps it out of the lines', () => {
+    const o =
+      'trend;r;mode=barChart;xAxis=c;cat;lines=in:color=#2a78d6,type=monotone,name=Received mAh,h=in_mah;' +
+      'out:color=#eb6834,type=monotone,name=Given mAh,h=out_mah,hk=-1;stack=in+out;legend=true;' +
+      'hist=jk.balance.p1;hper=live,24h,7d,30d,1y,date;hdef=7d;hlive=Since reset;unit=mAh';
+    const p = parseFieldOptions('b1_cells', o);
+    expect(p.optionMap.hist?.value).toBe('jk.balance.p1');
+    expect(p.optionMap.hper?.value).toEqual(['live', '24h', '7d', '30d', '1y', 'date']);
+    expect(p.optionMap.hdef?.value).toBe('7d');
+    expect(p.optionMap.hlive?.value).toBe('Since reset');
+    expect(p.optionMap.unit?.value).toBe('mAh');
+    const lines = p.optionMap.lines?.value as string;
+    expect(lines.split(';')).toHaveLength(2);
+    expect(lines).toContain('h=out_mah,hk=-1');
+    expect(lines).not.toContain('hist=');
+  });
+
   it('marks a dropdown with string values', () => {
     const p = parseFieldOptions('port', 'dropdown;rw;options=can0:can0,can9 (not in this firmware):can9;sv');
     expect(p.optionMap.sv?.value).toBe(true);

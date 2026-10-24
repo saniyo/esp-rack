@@ -18,8 +18,9 @@ export const fieldConfigurations = {
   radio: { options: ['r', 'rw', 'options', 'pl', 'icon', 'color', 'colorMap', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const },
   // xFmt/cat/stack/refl: device-TZ x labels, category data, stacked bars,
   // reference lines at sibling values; vrefl: vertical ones; ymin/ymax/ypad:
-  // the y axis range.
-  trend: { options: ['to', 'xAxis', 'lines', 'legend', 'tooltip', 'maxPoints', 'mode', 'xFmt', 'cat', 'stack', 'refl', 'vrefl', 'ymin', 'ymax', 'ypad', 'icon', 'color', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const },
+  // the y axis range; hist/hper/hdef/hlive/unit: history mode (a period
+  // switch reading the History module's series).
+  trend: { options: ['to', 'xAxis', 'lines', 'legend', 'tooltip', 'maxPoints', 'mode', 'xFmt', 'cat', 'stack', 'refl', 'vrefl', 'ymin', 'ymax', 'ypad', 'hist', 'hper', 'hdef', 'hlive', 'unit', 'icon', 'color', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const },
   files: { options: ['r', 'rw', 'base', 'initial', 'uploadBase', 'icon', 'color', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const },
   upload: { options: ['r', 'rw', 'url', 'accept', 'icon', 'color', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const },
   // table supports two render modes via layout:
@@ -360,6 +361,15 @@ const optionParsers: Record<string, (option: string) => ParsedFieldOption> = {
   ymin: (opt) => ({ key: 'ymin', value: parseFloat(getAfter(opt, 'ymin')) }),
   ymax: (opt) => ({ key: 'ymax', value: parseFloat(getAfter(opt, 'ymax')) }),
   ypad: (opt) => ({ key: 'ypad', value: parseFloat(getAfter(opt, 'ypad')) }),
+  // trend history mode: the series, the switch's periods, the initial one,
+  // the Live label.
+  hist: (opt) => ({ key: 'hist', value: getAfter(opt, 'hist').trim() }),
+  hper: (opt) => ({
+    key: 'hper',
+    value: getAfter(opt, 'hper').split(',').map((s) => s.trim()).filter(Boolean),
+  }),
+  hdef: (opt) => ({ key: 'hdef', value: getAfter(opt, 'hdef').trim() }),
+  hlive: (opt) => ({ key: 'hlive', value: getAfter(opt, 'hlive').trim() }),
 
   // table `layout=grid|cards` picks between data-grid and avatar-card list.
   layout: (opt) => ({ key: 'layout', value: getAfter(opt, 'layout').trim() }),

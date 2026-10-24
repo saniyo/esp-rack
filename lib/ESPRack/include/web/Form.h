@@ -1,6 +1,7 @@
 #ifndef WEB_FORM_H
 #define WEB_FORM_H
 
+#include <Arduino.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -351,6 +352,30 @@ class Trend : public FieldSpec<Trend> {
   Trend& yMin(double v)            { _yMin = v; _y |= 1; return *this; }
   Trend& yMax(double v)            { _yMax = v; _y |= 2; return *this; }
   Trend& yAuto(double pad = 0.05)  { _yPad = pad; _y |= 4; return *this; }
+  // ── History mode (needs the History module) ──
+  // A period switch in the chart's header: Live | 24 h | 7 d | 30 d | 1 y |
+  // a day. In a history period the rows come from the series' REST instead
+  // of the live state: a category chart shows each element over the period
+  // (averages, or totals for Sum columns). Without the module or the series
+  // the chart is live only, as before. Strings are copied; a value with one
+  // of , ; : | = is refused (logged, left out).
+  Trend& history(const char* seriesId)  { return safe(Opt::History, seriesId, ",;:|="); }
+  Trend& periods(const char* csv)       { return safe(Opt::HistPeriods, csv, ";:|="); }  // "live,24h,7d"
+  Trend& period(const char* p)          { return safe(Opt::HistDefault, p, ",;:|="); }   // initial, default live
+  Trend& liveLabel(const char* s)       { return safe(Opt::HistLiveLabel, s, ",;:|="); } // e.g. "Since reset"
+  Trend& unit(const char* u)            { return safe(Opt::Unit, u, ",;:|="); }          // y axis and tooltip
+  // The history column of the last line() (server syntax: col, col[i],
+  // col[min|avg|max]; default: the line's key) and its sign: -1 draws it
+  // below 0, as the live push does.
+  Trend& histCol(const char* colSpec, int sign = 1) {
+    if (!_lines.length() || !colSpec || !colSpec[0] || strpbrk(colSpec, ",;:=")) {
+      log_w("[form] %s: histCol(\"%s\") refused", _key, colSpec ? colSpec : "");
+      return *this;
+    }
+    _lines += ",h="; _lines += colSpec;
+    if (sign < 0) _lines += ",hk=-1";
+    return *this;
+  }
   // A series: its state key, color, curve type and, optionally, the name the
   // legend and the tooltip show (default: the key). No ',' ';' ':' '=' in name.
   Trend& line(const char* key_, const char* color, const char* type, const char* name = nullptr) {
@@ -388,6 +413,13 @@ class Trend : public FieldSpec<Trend> {
     f["o"] = o;
   }
  private:
+  Trend& safe(const char* opt, const char* v, const char* forbidden) {
+    if (v && strpbrk(v, forbidden)) {
+      log_w("[form] %s: \"%s\" refused for %s", _key, v, opt);
+      return *this;
+    }
+    return putStr(opt, v);
+  }
   static void num(String& o, const char* opt, double v) {
     char b[24];
     snprintf(b, sizeof b, "%g", v);
