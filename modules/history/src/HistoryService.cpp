@@ -280,7 +280,8 @@ struct CsvJob {
         if (downsample) {
           ds.reset(new (std::nothrow) ESPRack::hist::Downsampler());
           if (!ds) return n;  // no memory: end the file here
-          ds->attach(*def, res, acc.data(), cnt.data(), out.data(), s->nValues(tier), onGroup, this);
+          ds->attach(*def, res, acc.data(), cnt.data(), out.data(), s->nValues(tier), onGroup, this,
+                    &ESPRack::histmod::utcOffsetAt);
         }
         s->read(ESPFS, tier, cursor, to, v.data(), rec.data(), onRow, this);
         if (!stop) {
@@ -716,7 +717,8 @@ void HistoryService::sendRows(AsyncWebServerRequest* r, Series* s) {
     acc.resize(n);
     out.resize(n);
     cnt.resize(n);
-    ds.attach(def, res, acc.data(), cnt.data(), out.data(), n, emitRow, &page);
+    ds.attach(def, res, acc.data(), cnt.data(), out.data(), n, emitRow, &page,
+              &ESPRack::histmod::utcOffsetAt);  // whole days: local midnights
     reader.ds = &ds;
   }
   s->read(ESPFS, tier, start, to, v.data(), rec.data(), onRow, &reader);

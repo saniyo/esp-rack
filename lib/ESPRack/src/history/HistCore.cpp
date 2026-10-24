@@ -342,6 +342,11 @@ bool localTier(const HistSeriesDef& def, uint8_t tier) {
 uint32_t tierStart(const HistSeriesDef& def, uint8_t tier, uint32_t t, UtcOffsetFn off) {
   const uint32_t b = def.tiers[tier].bucketS;
   if (!off || !localTier(def, tier)) return bucketStart(t, b);
+  return localBucketStart(t, b, off);
+}
+
+uint32_t localBucketStart(uint32_t t, uint32_t b, UtcOffsetFn off) {
+  if (!off || !b || b % 86400) return bucketStart(t, b);
   const int64_t local = int64_t(t) + off(t);
   const int64_t localStart = local - (local % b + b) % b;
   int64_t utc = localStart - off(t);        // with t's offset first,
@@ -422,9 +427,10 @@ void Bucket::finish(const HistSeriesDef& def, double* out) const {
 // ---- Downsampler ----
 
 void Downsampler::attach(const HistSeriesDef& def, uint32_t res, double* acc, uint32_t* cnt, double* out,
-                         uint16_t nValues, Emit emit, void* ctx) {
+                         uint16_t nValues, Emit emit, void* ctx, UtcOffsetFn off) {
   def_ = &def;
   res_ = res;
+  off_ = off;
   b_.attach(acc, cnt, nValues);
   out_ = out;
   n_ = nValues;
@@ -441,7 +447,7 @@ void Downsampler::flush() {
 }
 
 void Downsampler::feed(uint32_t t, const double* v) {
-  const uint32_t g = res_ ? bucketStart(t, res_) : (open_ ? groupT_ : t);
+  const uint32_t g = res_ ? localBucketStart(t, res_, off_) : (open_ ? groupT_ : t);
   if (open_ && g != groupT_) flush();
   if (!open_) {
     b_.reset(g);

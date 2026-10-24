@@ -333,6 +333,11 @@ static void test_local_days(void) {
   TEST_ASSERT_EQUAL_UINT32(90000, next - day);
   TEST_ASSERT_EQUAL_UINT32(D - 86400 - 10800, tierStart(local, 1, D - 43200, &fallBack));
 
+  // Downsampled days (any series): local midnights too.
+  TEST_ASSERT_EQUAL_UINT32(D - 7200, localBucketStart(D + 43200, 86400, &plus2));
+  TEST_ASSERT_EQUAL_UINT32(D, localBucketStart(D + 43200, 86400, nullptr));
+  TEST_ASSERT_EQUAL_UINT32(D + 3600, localBucketStart(D + 3600 + 5, 3600, &plus2));  // not days: as before
+
   // Part of the schema: other bucket starts, other files.
   Layout a, b;
   TEST_ASSERT_TRUE(layoutOf(utc, 1, a) && layoutOf(local, 1, b));

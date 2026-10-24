@@ -14,8 +14,6 @@
 namespace ESPRack {
 namespace histmod {
 
-namespace {
-// Seconds east of UTC at `utc` in the device's time zone (TimeSync owns TZ).
 int32_t utcOffsetAt(uint32_t utc) {
   const time_t t = time_t(utc);
   struct tm g, l;
@@ -25,6 +23,7 @@ int32_t utcOffsetAt(uint32_t utc) {
   return days * 86400 + (l.tm_hour - g.tm_hour) * 3600 + (l.tm_min - g.tm_min) * 60 + (l.tm_sec - g.tm_sec);
 }
 
+namespace {
 
 constexpr uint32_t kMinValidT = 1577836800;  // 2020-01-01: before it the clock isn't set
 constexpr uint32_t kPutRecords = 16;         // a put-series' ring: its reserve

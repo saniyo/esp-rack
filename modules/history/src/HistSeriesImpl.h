@@ -26,6 +26,9 @@
 namespace ESPRack {
 namespace histmod {
 
+// Seconds east of UTC at `utc` in the device's time zone (TimeSync owns TZ).
+int32_t utcOffsetAt(uint32_t utc);
+
 // A row read back: t and the decoded values (nValues of the tier's layout).
 using RowFn = bool (*)(void* ctx, uint32_t t, const double* v);
 

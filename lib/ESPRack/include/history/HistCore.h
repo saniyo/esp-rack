@@ -86,6 +86,9 @@ bool localTier(const HistSeriesDef& def, uint8_t tier);
 // the local midnight (UTC multiples of bucketS in local time). `off` null:
 // UTC.
 uint32_t tierStart(const HistSeriesDef& def, uint8_t tier, uint32_t t, UtcOffsetFn off);
+// Start of the local-time bucket of `bucketS` (a whole number of days)
+// holding t: local midnights, DST-aware. Never after t.
+uint32_t localBucketStart(uint32_t t, uint32_t bucketS, UtcOffsetFn off);
 
 // Bytes a tier needs for its whole retention: keepS / bucketS records
 // (0 for a put-series: only the producer knows its rate).
@@ -122,8 +125,9 @@ class Downsampler {
  public:
   using Emit = void (*)(void* ctx, uint32_t t, const double* v, uint16_t n);
   // acc/cnt: the group's accumulators, out: the emitted row; nValues each.
+  // off: groups of whole days start at local midnight (null: UTC).
   void attach(const HistSeriesDef& def, uint32_t res, double* acc, uint32_t* cnt, double* out, uint16_t nValues,
-              Emit emit, void* ctx);
+              Emit emit, void* ctx, UtcOffsetFn off = nullptr);
   void feed(uint32_t t, const double* v);
   void finish();
 
@@ -131,6 +135,7 @@ class Downsampler {
   void flush();
   const HistSeriesDef* def_ = nullptr;
   uint32_t res_ = 0;
+  UtcOffsetFn off_ = nullptr;
   Bucket b_;
   double* out_ = nullptr;
   uint16_t n_ = 0;
