@@ -13,6 +13,7 @@
 #include "hw/ExtHwModule.h"
 #include "hw/HwRegistry.h"
 #include "system/BootGuard.h"
+#include "system/CrashDump.h"
 #include "system/LoopWdt.h"
 
 #include <freertos/FreeRTOS.h>
@@ -293,6 +294,7 @@ void App::begin() {
   // other limits before app->begin(); the first call wins.
   BootGuard::begin();
   BootGuard::registerManifest(&webManager_);
+  CrashDump::registerManifest(&webManager_);
   // System -> Hardware tab + "Restore factory pins" (LIB-FEAT-001).
   hw_->registerManifest(&webManager_);
 

@@ -507,6 +507,12 @@ This is an audit snapshot of `feature/ses-light-support`, dated 2026-10-13:
 > (`lastRestartReason()`) and "Boot" (boot count, crash run, safe mode, loop
 > WDT state; "Clear safe mode" in safe mode). The legacy status JSON carries
 > `last_restart`, `boot_count` and `safe_mode`.
+> It also shows "Recent restarts", the last 8 boots from
+> `BootGuard::history()` (when, reason, class, how long the run before
+> lasted), and "Last crash dump", the `CrashDump` summary (task, panic reason,
+> PC, backtrace, this firmware or not) with admin actions to download the
+> raw image (`system.coredump`, decode with `esp-coredump info_corefile -t
+> raw`) and to erase it (`system.eraseCoredump`).
 
 - **Purpose:**
   - System → Identity tab: device id, project, versions, chip, MAC, UIDs.

@@ -20,6 +20,7 @@
 #include <power/PowerGuard.h>
 #include <IMothershipProvider.h>
 #include <system/BootGuard.h>
+#include <system/CrashDump.h>
 #include <system/LoopWdt.h>
 
 SystemStatus::SystemStatus(AsyncWebServer* server, SecurityManager* securityManager, WebManager* web)
@@ -188,6 +189,56 @@ void SystemStatus::buildForm(JsonObject& root,
                 .label("Boot").icon(bi.safeMode ? "ReportProblem" : "Update")
                 .color(bi.safeMode ? "error" : "info"));
     if (bi.safeMode) sta.add(web::Action("a_clear_safe").ref("system.clearSafeMode"));
+  }
+
+  // The last restarts (BootGuard history): when, why, and how long the run
+  // before each one lasted.
+  {
+    ESPRack::BootRecord hist[ESPRack::kBootHistory];
+    const size_t n = ESPRack::BootGuard::history(hist, ESPRack::kBootHistory);
+    sta.add(web::Table("restarts")
+                .col("boot", "#", "number", "0")
+                .col("when", "When", "text")
+                .col("reason", "Reason", "text")
+                .col("cls", "Class", "text")
+                .col("prev", "Run before", "text")
+                .label("Recent restarts").icon("History"));
+    JsonArray rows = sta.rowsOf("restarts");
+    for (size_t i = 0; i < n; ++i) {
+      const ESPRack::BootRecord& h = hist[i];
+      JsonObject r = rows.createNestedObject();
+      r["boot"] = h.bootCount;
+      char when[24] = "—";
+      if (h.bootT) {
+        const time_t t = time_t(h.bootT);
+        struct tm lt;
+        localtime_r(&t, &lt);
+        strftime(when, sizeof when, "%Y-%m-%d %H:%M", &lt);
+      }
+      r["when"] = when;
+      r["reason"] = h.reason;
+      r["cls"] = ESPRack::bootClassName(h.bootClass);
+      char prev[24] = "—";
+      if (h.prevUpS) {
+        const uint32_t s = h.prevUpS;
+        if (s >= 86400) snprintf(prev, sizeof prev, "%u d %u h", unsigned(s / 86400), unsigned(s % 86400 / 3600));
+        else if (s >= 3600) snprintf(prev, sizeof prev, "%u h %u min", unsigned(s / 3600), unsigned(s % 3600 / 60));
+        else snprintf(prev, sizeof prev, "%u min %u s", unsigned(s / 60), unsigned(s % 60));
+      }
+      r["prev"] = prev;
+    }
+  }
+
+  // The last crash dump (panic / watchdog): a summary, download and erase.
+  {
+    char line[200];
+    if (ESPRack::CrashDump::describe(line, sizeof line)) {
+      sta.add(web::Text("crash", line).readOnly().label("Last crash dump").icon("ReportProblem").color("warning"));
+      sta.add(web::Action("a_coredump").ref("system.coredump"));
+      sta.add(web::Action("a_erase_coredump").ref("system.eraseCoredump"));
+    } else {
+      sta.add(web::Text("crash", "none").readOnly().label("Last crash dump").icon("ReportProblem"));
+    }
   }
 
   // ── Three heap views, each captured at a different observer cost ──
