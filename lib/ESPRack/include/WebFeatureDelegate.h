@@ -264,6 +264,7 @@ class WebFeatureEntry : public IWebFeatureEntry {
       ja["auth"] = webAuthLevelToStr(a.auth);
       if (a.confirm) ja["confirm"] = a.confirm;
       if (a.successMessage) ja["successMessage"] = a.successMessage;
+      if (a.download) ja["download"] = a.download;
     }
   }
 

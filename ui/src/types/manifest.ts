@@ -46,6 +46,7 @@ export interface ActionSpec {
   auth?: AuthLevel;
   confirm?: boolean;
   successMessage?: string;
+  download?: string;  // the response is a file to save (default name)
 }
 
 export interface EndpointMeta {

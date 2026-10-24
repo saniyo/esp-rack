@@ -71,6 +71,7 @@ class WebActionEntry : public IWebFeatureEntry {
     if (_spec.color) obj["color"] = _spec.color;
     if (_spec.confirm) obj["confirm"] = _spec.confirm;
     if (_spec.successMessage) obj["successMessage"] = _spec.successMessage;
+    if (_spec.download) obj["download"] = _spec.download;
   }
 
   // Phase 2 — in-process rest.proxy entry point. Mothership's

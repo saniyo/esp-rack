@@ -158,6 +158,8 @@ class WebAction {
   WebAction& method(const char* m)  { _a.method = m; return *this; }
   WebAction& confirm(const char* text) { _a.confirm = text; return *this; }
   WebAction& success(const char* msg)  { _a.successMessage = msg; return *this; }
+  // The response is a file to save (default name; Content-Disposition wins).
+  WebAction& download(const char* fileName) { _a.download = fileName; return *this; }
 
   WebAction& auth(WebAuthLevel a)   { _a.auth = a; return *this; }
   WebAction& publicAccess()         { _a.auth = WebAuthLevel::Public; return *this; }

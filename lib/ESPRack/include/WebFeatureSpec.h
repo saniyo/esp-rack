@@ -121,6 +121,9 @@ struct WebActionSpec {
   std::function<void(AsyncWebServerRequest*)> handler;
   const char* confirm = nullptr;   // dialog text; null = fire immediately
   const char* successMessage = nullptr;
+  // The response is a file: the UI saves it under the Content-Disposition
+  // name, else this one (e.g. "coredump.elf"). null = a plain action.
+  const char* download = nullptr;
 
   // Optional in-process handler — bypasses HTTP/AsyncWebServer when
   // the action is invoked via Mothership's rest.proxy machinery

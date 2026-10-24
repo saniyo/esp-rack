@@ -47,6 +47,23 @@ type MuiColor =
 const isMuiColor = (s?: string): s is MuiColor =>
   !!s && ['primary', 'secondary', 'error', 'warning', 'success', 'info', 'inherit'].includes(s);
 
+// Content-Disposition: attachment; filename="x.elf" -> x.elf
+const fileNameOf = (cd?: string): string | undefined => {
+  const m = cd ? /filename="?([^";]+)"?/i.exec(cd) : null;
+  return m ? m[1] : undefined;
+};
+
+const saveBlob = (blob: Blob, name: string) => {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+};
+
 const ActionField: FC<ActionFieldProps> = ({ field, value }) => {
   const { readableLabel, optionMap } = useFieldParser(field.label, field.o || '');
   const { enqueueSnackbar } = useSnackbar();
@@ -100,6 +117,7 @@ const ActionField: FC<ActionFieldProps> = ({ field, value }) => {
         iconName: (a.icon as string) || field.icon,
         title: (a.title as string) || readableLabel,
         successMessage: a.successMessage as string | undefined,
+        download: a.download as string | undefined,
       };
     }
     return {
@@ -110,6 +128,7 @@ const ActionField: FC<ActionFieldProps> = ({ field, value }) => {
       iconName: field.icon,
       title: value || readableLabel,
       successMessage: undefined as string | undefined,
+      download: undefined as string | undefined,
     };
   }, [usingRef, refEntry, optionMap, field.icon, value, readableLabel]);
 
@@ -163,7 +182,16 @@ const ActionField: FC<ActionFieldProps> = ({ field, value }) => {
       }
 
       const axiosPath = toAxiosPath(url);
-      if (resolved.method === 'GET') await AXIOS.get(axiosPath);
+      if (resolved.download) {
+        // A file: fetched with the session's auth, then saved.
+        const r = await AXIOS.request({
+          url: axiosPath,
+          method: resolved.method as any,
+          responseType: 'blob',
+          data: resolved.method === 'GET' ? undefined : {},
+        });
+        saveBlob(r.data, fileNameOf(r.headers?.['content-disposition']) || resolved.download);
+      } else if (resolved.method === 'GET') await AXIOS.get(axiosPath);
       else if (resolved.method === 'DELETE') await AXIOS.delete(axiosPath);
       else if (resolved.method === 'PUT') await AXIOS.put(axiosPath, {});
       else await AXIOS.post(axiosPath, {});
