@@ -13,7 +13,7 @@
 // onBegin and wraps it in its own library's transport:
 //
 //   ESPRack::ICanPort* port = app->hw()->find<ESPRack::ICanPort>(portId);
-//   if (port && port->claim("jkBus") && port->begin(250000)) ...
+//   if (port && port->claim("myBus") && port->begin(250000)) ...
 //
 // One port has one software user at a time: claim(user) takes it, a second
 // claim by someone else fails, and claimedBy() shows who holds it (the port's

@@ -8,12 +8,12 @@
 // (App::history()); the module that keeps the files is modules/history.
 //
 //   static const ESPRack::HistColumn kCols[] = {
-//     {"in_mah", "mAh", ESPRack::HistAgg::Sum, 96, ESPRack::HistType::I16, 10},
-//     {"out_mah", "mAh", ESPRack::HistAgg::Sum, 96, ESPRack::HistType::I16, 10}};
+//     {"energy", "Wh", ESPRack::HistAgg::Sum, 8, ESPRack::HistType::U32},  // 8 channels
+//     {"temp", "C", ESPRack::HistAgg::Avg}};
 //   static const ESPRack::HistTier kTiers[] = {{3600, 7 * 86400}, {86400, 180 * 86400}};
-//   ESPRack::HistSeriesDef def{"jkBalance.p1", "Balancing, pack 1", kCols, 2, kTiers, 2};
+//   ESPRack::HistSeriesDef def{"meter.main", "Main meter", kCols, 2, kTiers, 2};
 //   series_ = app->history()->series(def, &why);        // any time, also from begin()
-//   series_->add(now, increments, 192);                  // every sweep: summed into the hour
+//   series_->add(now, values, 9);                        // every reading: summed/averaged into the hour
 //
 // Two kinds of series:
 //   * bucketed (tier 0 bucketS > 0): add() samples into the open bucket, or

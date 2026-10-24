@@ -17,8 +17,8 @@
 //
 //   ESPRack::IBleProvider* ble = app->ble();   // null: BleModule not installed
 //   ESPRack::BleLinkSpec spec;
-//   spec.owner = "balancer";
-//   spec.setNamePrefixes("GW-,EK-");            // or spec.setAddress("aa:bb:..", 0)
+//   spec.owner = "sensor";
+//   spec.setNamePrefixes("SN-,TH-");            // or spec.setAddress("aa:bb:..", 0)
 //   spec.setService("ffe0");
 //   spec.setNotifyChar("ffe1");                 // write char defaults to it
 //   spec.onNotify = [this](const uint8_t* d, size_t n) { feed(d, n); };
@@ -75,7 +75,7 @@ struct BleLinkSpec {
 
   // Target. A non-empty address connects to that peer; an empty one makes the
   // provider discover a peer whose advertised name starts with one of
-  // namePrefixes (comma-separated, e.g. "GW-,EK-") or that advertises
+  // namePrefixes (comma-separated, e.g. "SN-,TH-") or that advertises
   // discoverService. addressType: 0 public, 1 random.
   char address[kBleAddrLen] = "";
   uint8_t addressType = 0;

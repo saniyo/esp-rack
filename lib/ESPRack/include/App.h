@@ -202,7 +202,7 @@ class App {
   // look up once (onBegin) and keep the pointer.
   Module* findModule(const char* moduleId) const;
   // A module by id, as interface I (nullptr when there's no such module or
-  // it doesn't implement I): app->find<IJkBus>("jkBus").
+  // it doesn't implement I): app->find<IMyBus>("myBus").
   template <class I>
   I* find(const char* moduleId) const {
     Module* m = findModule(moduleId);

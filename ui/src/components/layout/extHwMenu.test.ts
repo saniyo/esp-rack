@@ -8,15 +8,15 @@ const feat = (id: string, menu: FeatureEntry['menu'], tabs?: FeatureEntry['tabs'
   id, kind: 'feature', menu, tabs,
 });
 
-const owner = feat('sesLight', { label: 'SES Light' });
+const owner = feat('controller', { label: 'Controller' });
 const system = feat('system', { label: 'System' }, [{ key: 'hardware', title: 'External Hardware', restPath: '/x' }]);
 const meter = feat('meter', { label: 'Meter', hw: 'meter' });
 const relay = feat('relay', { label: 'Relay', hw: 'relay' });
 const orphan = feat('orphan', { label: 'Orphan', hw: 'orphan' });
-const plain = feat('plain', { label: 'Plain', parent: 'sesLight' });
+const plain = feat('plain', { label: 'Plain', parent: 'controller' });
 const features = [owner, system, meter, relay, orphan, plain];
 const extHw: ExtHwEntry[] = [
-  { id: 'meter', type: 'energy-meter', owner: 'sesLight', pages: ['meter'] },
+  { id: 'meter', type: 'energy-meter', owner: 'controller', pages: ['meter'] },
   { id: 'relay', type: 'digital-io', pages: ['relay'] },
   { id: 'orphan', type: 'x', owner: 'noMenu', pages: ['orphan'] },
 ];
@@ -26,7 +26,7 @@ describe('extHw placement', () => {
   const m = extHwModules({ features, extHw });
 
   it('puts an owned page under its owner', () => {
-    expect(hwGroupParent(m, meter, has)).toBe('sesLight');
+    expect(hwGroupParent(m, meter, has)).toBe('controller');
   });
   it('puts an unowned page under System', () => {
     expect(hwGroupParent(m, relay, has)).toBe('system');
@@ -42,7 +42,7 @@ describe('extHw placement', () => {
     expect(extHwModules({ features: [owner], extHw: [] }).label).toBe(EXT_HW_FALLBACK_LABEL);
   });
   it('names the owner for "Used by"', () => {
-    expect(usedByLabel(m, meter, features)).toBe('SES Light');
+    expect(usedByLabel(m, meter, features)).toBe('Controller');
     expect(usedByLabel(m, relay, features)).toBeUndefined();
   });
 });

@@ -17,13 +17,13 @@ using namespace ESPRack::hist;
 void setUp(void) {}
 void tearDown(void) {}
 
-// The JK gateway's balancing series: two Sum columns, one value per cell.
-static const HistColumn kJkCols[] = {
+// A wide series: two Sum columns, one value per channel.
+static const HistColumn kWideCols[] = {
     {"in_mah", "mAh", HistAgg::Sum, 96, HistType::I16, 10},
     {"out_mah", "mAh", HistAgg::Sum, 96, HistType::I16, 10},
 };
-static const HistTier kJkTiers[] = {{3600, 7 * 86400}, {86400, 180 * 86400}};
-static const HistSeriesDef kJk{"jkbalance.p1", "Balancing", kJkCols, 2, kJkTiers, 2};
+static const HistTier kWideTiers[] = {{3600, 7 * 86400}, {86400, 180 * 86400}};
+static const HistSeriesDef kWide{"wide.p1", "Wide", kWideCols, 2, kWideTiers, 2};
 
 // One of each aggregate, scalars.
 static const HistColumn kAggCols[] = {
@@ -45,12 +45,12 @@ static const HistSeriesDef kMonths{"ses.months", "Months", kMonthCols, 3, kMonth
 
 static void test_validate(void) {
   const char* why = nullptr;
-  TEST_ASSERT_TRUE(validate(kJk, &why));
+  TEST_ASSERT_TRUE(validate(kWide, &why));
   TEST_ASSERT_TRUE(validate(kMonths, &why));
   TEST_ASSERT_TRUE(isPutSeries(kMonths));
-  TEST_ASSERT_FALSE(isPutSeries(kJk));
+  TEST_ASSERT_FALSE(isPutSeries(kWide));
 
-  HistSeriesDef d = kJk;
+  HistSeriesDef d = kWide;
   d.id = "Bad Id";
   TEST_ASSERT_FALSE(validate(d, &why));
   TEST_ASSERT_NOT_NULL(why);
@@ -62,12 +62,12 @@ static void test_validate(void) {
   TEST_ASSERT_FALSE(validate(d, &why));  // a put-series has one tier
 
   const HistTier notMultiple[] = {{3600, 86400}, {5000, 86400}};
-  d = kJk;
+  d = kWide;
   d.tiers = notMultiple;
   TEST_ASSERT_FALSE(validate(d, &why));
 
   const HistColumn noScale[] = {{"x", "", HistAgg::Sum, 1, HistType::I16, 0}};
-  d = kJk;
+  d = kWide;
   d.cols = noScale;
   d.nCols = 1;
   TEST_ASSERT_FALSE(validate(d, &why));
@@ -80,19 +80,19 @@ static void test_validate(void) {
 
 static void test_layout(void) {
   Layout l0, l1;
-  TEST_ASSERT_TRUE(layoutOf(kJk, 0, l0));
-  TEST_ASSERT_TRUE(layoutOf(kJk, 1, l1));
+  TEST_ASSERT_TRUE(layoutOf(kWide, 0, l0));
+  TEST_ASSERT_TRUE(layoutOf(kWide, 1, l1));
   TEST_ASSERT_EQUAL_UINT(192, l0.nValues);
   TEST_ASSERT_EQUAL_UINT(4 + 192 * 2 + 2, l0.recSize);  // I16 hours
   TEST_ASSERT_EQUAL_UINT(4 + 192 * 4 + 2, l1.recSize);  // Sum widened to I32 for days
   TEST_ASSERT_TRUE(l1.types[0] == HistType::I32);
   TEST_ASSERT_TRUE(l0.schemaHash != l1.schemaHash);
-  TEST_ASSERT_FALSE(layoutOf(kJk, 2, l0));
+  TEST_ASSERT_FALSE(layoutOf(kWide, 2, l0));
 
   // A different width (another topology) is another schema.
-  HistColumn wider[] = {kJkCols[0], kJkCols[1]};
+  HistColumn wider[] = {kWideCols[0], kWideCols[1]};
   wider[0].width = wider[1].width = 120;
-  HistSeriesDef d = kJk;
+  HistSeriesDef d = kWide;
   d.cols = wider;
   Layout lw;
   TEST_ASSERT_TRUE(layoutOf(d, 0, lw));
@@ -101,16 +101,16 @@ static void test_layout(void) {
 
 static void test_record_roundtrip(void) {
   Layout l;
-  TEST_ASSERT_TRUE(layoutOf(kJk, 0, l));
+  TEST_ASSERT_TRUE(layoutOf(kWide, 0, l));
   std::vector<double> v(192), back(192);
   for (int i = 0; i < 192; ++i) v[i] = i * 1.25;
   v[3] = NAN;     // a cell with no sample
   v[4] = 99999;   // clamped (I16 x10)
   v[5] = -12.34;  // rounded to 0.1
   std::vector<uint8_t> rec(l.recSize);
-  encodeRecord(kJk, l, 1761264000, v.data(), rec.data());
+  encodeRecord(kWide, l, 1761264000, v.data(), rec.data());
   uint32_t t = 0;
-  TEST_ASSERT_TRUE(decodeRecord(kJk, l, rec.data(), t, back.data()));
+  TEST_ASSERT_TRUE(decodeRecord(kWide, l, rec.data(), t, back.data()));
   TEST_ASSERT_EQUAL_UINT32(1761264000, t);
   TEST_ASSERT_DOUBLE_WITHIN(1e-9, 2.5, back[2]);
   TEST_ASSERT_TRUE(isnan(back[3]));                     // unknown stays unknown
@@ -118,7 +118,7 @@ static void test_record_roundtrip(void) {
   TEST_ASSERT_DOUBLE_WITHIN(1e-9, -12.3, back[5]);
 
   rec[10] ^= 0x40;  // a flipped bit
-  TEST_ASSERT_FALSE(decodeRecord(kJk, l, rec.data(), t, back.data()));
+  TEST_ASSERT_FALSE(decodeRecord(kWide, l, rec.data(), t, back.data()));
 }
 
 static void test_put_series_exact(void) {
@@ -271,19 +271,19 @@ static void test_names_and_columns(void) {
 
   uint8_t col = 0;
   int el = 0;
-  TEST_ASSERT_TRUE(findColumn(kJk, "out_mah", 7, col, el));
+  TEST_ASSERT_TRUE(findColumn(kWide, "out_mah", 7, col, el));
   TEST_ASSERT_EQUAL_UINT8(1, col);
   TEST_ASSERT_EQUAL_INT(-1, el);
-  TEST_ASSERT_TRUE(findColumn(kJk, "in_mah[95]", 10, col, el));
+  TEST_ASSERT_TRUE(findColumn(kWide, "in_mah[95]", 10, col, el));
   TEST_ASSERT_EQUAL_INT(95, el);
-  TEST_ASSERT_FALSE(findColumn(kJk, "in_mah[96]", 10, col, el));
-  TEST_ASSERT_FALSE(findColumn(kJk, "nope", 4, col, el));
-  TEST_ASSERT_FALSE(findColumn(kJk, "in_mah[x]", 9, col, el));
-  TEST_ASSERT_TRUE(findColumn(kJk, "in_mah[min]", 11, col, el));
+  TEST_ASSERT_FALSE(findColumn(kWide, "in_mah[96]", 10, col, el));
+  TEST_ASSERT_FALSE(findColumn(kWide, "nope", 4, col, el));
+  TEST_ASSERT_FALSE(findColumn(kWide, "in_mah[x]", 9, col, el));
+  TEST_ASSERT_TRUE(findColumn(kWide, "in_mah[min]", 11, col, el));
   TEST_ASSERT_EQUAL_INT(kRowMin, el);
-  TEST_ASSERT_TRUE(findColumn(kJk, "out_mah[avg]", 12, col, el));
+  TEST_ASSERT_TRUE(findColumn(kWide, "out_mah[avg]", 12, col, el));
   TEST_ASSERT_EQUAL_INT(kRowAvg, el);
-  TEST_ASSERT_TRUE(findColumn(kJk, "out_mah[max]", 12, col, el));
+  TEST_ASSERT_TRUE(findColumn(kWide, "out_mah[max]", 12, col, el));
   TEST_ASSERT_EQUAL_INT(kRowMax, el);
   const double row[4] = {3300, NAN, 3290, 3310};
   TEST_ASSERT_DOUBLE_WITHIN(1e-9, 3290, rowDerived(row, 4, kRowMin));

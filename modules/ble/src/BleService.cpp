@@ -481,7 +481,7 @@ void BleState::buildForm(BleState& s, JsonObject& root) {
   web::Form set(root, "settings", "Radio settings");
   set.add(web::Switch("enabled", s.enabled).label("Bluetooth enabled").icon("Bluetooth"));
   set.add(web::Text("device_name", s.deviceName.c_str()).label("Device name (empty = device id)")
-              .placeholder("RdNeey-1a2b3c4d").icon("Badge"));
+              .placeholder("MyDevice-1a2b3c4d").icon("Badge"));
   set.add(web::Number("tx_power", s.txPower).min(-24).max(20).format("0").unit("dBm").label("TX power")
               .icon("SignalCellularAlt"));
   set.add(web::Number("mtu", s.mtu).min(23).max(517).format("0").label("Preferred ATT MTU").icon("Straighten"));
@@ -861,7 +861,7 @@ void logServices(const char* owner, NimBLEClient* client) {
 }
 
 // A characteristic of `service` by UUID. NimBLE asks the peer to "discover characteristics by
-// UUID" first; some peripherals (cheap BLE bridge chips, NEEY balancers among the suspects)
+// UUID" first; some peripherals (cheap BLE bridge chips among them)
 // answer that request wrongly, so fall back to listing all of them and matching here.
 NimBLERemoteCharacteristic* findCharacteristic(NimBLERemoteService* service, const char* uuid) {
   const NimBLEUUID want{std::string(uuid)};
