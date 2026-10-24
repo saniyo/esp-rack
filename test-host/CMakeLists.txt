@@ -1,5 +1,5 @@
 # Host unit tests for the parts of the core that don't need Arduino/IDF
-# (today: time/TimeArbiter, hw/HwClaims, persist/*, power/PowerGuard), with any C++17 compiler (MSVC, GCC, Clang) and a
+# (today: time/TimeArbiter, hw/HwClaims, persist/*, power/PowerGuard, history/HistCore), with any C++17 compiler (MSVC, GCC, Clang) and a
 # self-contained Unity-compatible shim (shim/unity.h).
 #
 #   cmake -S test-host -B test-host/build            (MSVC: -G "Visual Studio 17 2022" -A x64)
@@ -23,7 +23,8 @@ add_library(esprack_host STATIC
   ${ESPRACK_ROOT}/lib/ESPRack/src/hw/HwClaims.cpp
   ${ESPRACK_ROOT}/lib/ESPRack/src/persist/Crc32.cpp
   ${ESPRACK_ROOT}/lib/ESPRack/src/persist/NvsBlob.cpp
-  ${ESPRACK_ROOT}/lib/ESPRack/src/power/PowerGuard.cpp)
+  ${ESPRACK_ROOT}/lib/ESPRack/src/power/PowerGuard.cpp
+  ${ESPRACK_ROOT}/lib/ESPRack/src/history/HistCore.cpp)
 target_include_directories(esprack_host PUBLIC ${ESPRACK_ROOT}/lib/ESPRack/include)
 
 if(MSVC)
