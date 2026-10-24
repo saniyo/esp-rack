@@ -82,6 +82,22 @@ export const numberInputValue = (v: unknown): string | number => {
   return typeof v === 'string' ? v.trim() : (v as number);
 };
 
+// The arrow step of a number input: the field's st= option, else the
+// format's decimals (f=0.0 -> 0.1, f=0.00 -> 0.01, f=0 -> 1), else none.
+export const numberStep = (o: string | undefined): number | undefined => {
+  const opts = (o || '').split(';');
+  const st = opts.find((s) => s.startsWith('st='));
+  if (st) {
+    const n = parseFloat(st.slice(3));
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  const f = opts.find((s) => s.startsWith('f='));
+  if (!f) return undefined;
+  const dot = f.indexOf('.');
+  const decimals = dot < 0 ? 0 : f.length - dot - 1;
+  return decimals > 0 ? Number((10 ** -decimals).toFixed(decimals)) : 1;
+};
+
 
 // Every grid cell: elements keep their own sizes (SES-LIB-029d); long values
 // wrap inside their cell instead of pushing neighbours; the grid separates

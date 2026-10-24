@@ -1,5 +1,5 @@
 // NumberField.tsx (покращений)
-import { numberInputValue } from '../utils/formLayout';
+import { numberInputValue, numberStep } from '../utils/formLayout';
 import React, { useState, useEffect } from 'react';
 import {
   ListItem,
@@ -31,6 +31,7 @@ const NumberField: React.FC<NumberFieldProps> = ({
   const isReadOnly = !!optionMap.r;
   const minValue = optionMap.mn?.value;
   const maxValue = optionMap.mx?.value;
+  const step = numberStep(field.o);
 
   // Локальний стан (якщо треба редагувати «на льоту»)
   const [internalValue, setInternalValue] = useState<any>(numberInputValue(value));
@@ -53,13 +54,13 @@ const NumberField: React.FC<NumberFieldProps> = ({
     setInternalValue(e.target.value);
   };
 
-  // Clamp to [min, max] — only at commit time. Empty / non-numeric is passed
-  // through untouched (the form keeps the last good value).
-  const clampToBounds = (raw: any): string => {
-    raw = String(raw ?? '');
-    if (raw === '') return raw;
-    const n = parseFloat(raw);
-    if (Number.isNaN(n)) return raw;
+  // Clamp to [min, max] — only at commit time. undefined: empty or not a
+  // number, which is not a value.
+  const clampToBounds = (raw: any): string | undefined => {
+    raw = String(raw ?? '').trim();
+    if (raw === '') return undefined;
+    const n = Number(raw);
+    if (!Number.isFinite(n)) return undefined;
     let c = n;
     if (minValue !== undefined && c < +minValue) c = +minValue;
     if (maxValue !== undefined && c > +maxValue) c = +maxValue;
@@ -70,9 +71,14 @@ const NumberField: React.FC<NumberFieldProps> = ({
   const handleBlur = () => {
     setIsEditing(false);
     // Apply min/max ONCE, here at commit — not per keystroke (see
-    // handleInputChange). Reflect the clamped value back into the input and
-    // notify the parent with the final value.
+    // handleInputChange). A cleared or non-numeric field is not a value: it
+    // shows the last committed one again and nothing is sent (the device
+    // would read "" as 0 and clamp it to the minimum).
     const finalValue = clampToBounds(internalValue);
+    if (finalValue === undefined) {
+      setInternalValue(numberInputValue(value));
+      return;
+    }
     if (finalValue !== internalValue) setInternalValue(finalValue);
     if (onBlur) onBlur(field.label, finalValue);
     if (onChange) onChange(field.label, finalValue);
@@ -123,6 +129,7 @@ const NumberField: React.FC<NumberFieldProps> = ({
           onFocus={handleFocus}
           onBlur={handleBlur}
           onKeyDown={handleKeyDown}
+          inputProps={step !== undefined ? { step } : undefined}
           fullWidth
         />
       </Tooltip>

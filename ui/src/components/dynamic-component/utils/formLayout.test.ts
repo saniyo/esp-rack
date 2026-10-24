@@ -2,7 +2,7 @@
 import { describe, expect, it } from '@jest/globals';
 
 import {
-  BRK_TYPE, CELL_SX, COLS_TYPE, fullOf, gridColumnFor, gridTemplateFor, markerFromRaw, numberInputValue,
+  BRK_TYPE, CELL_SX, COLS_TYPE, fullOf, gridColumnFor, gridTemplateFor, markerFromRaw, numberInputValue, numberStep,
   segmentFields, spanOf, visibleHeading,
 } from './formLayout';
 
@@ -71,5 +71,16 @@ describe('form layout', () => {
     expect(numberInputValue('0.50')).toBe('0.50');
     expect(numberInputValue(null)).toBe('');
     expect(numberInputValue(undefined)).toBe('');
+  });
+});
+
+describe('numberStep', () => {
+  it('takes st=, else the format decimals', () => {
+    expect(numberStep('number;rw;st=0.5;f=0.00')).toBe(0.5);
+    expect(numberStep('number;rw;f=0.0')).toBe(0.1);
+    expect(numberStep('number;rw;f=0.00')).toBe(0.01);
+    expect(numberStep('number;rw;f=0')).toBe(1);
+    expect(numberStep('number;rw;mn=0')).toBeUndefined();
+    expect(numberStep(undefined)).toBeUndefined();
   });
 });
