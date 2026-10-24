@@ -151,13 +151,10 @@ class HttpPostEndpoint {
     // sizing: grows the doc when the tree overflows the configured
     // buffer, shrinks under heap pressure, 503s only when genuinely
     // impossible. The write ALREADY applied via updateWithoutPropagation
-    // above — on a 503 the client refetches and state propagates on the
-    // next GET, so we also skip the update-handler chain below (same
-    // contract as before: saveIfChanged + broadcastWs ride only on a
-    // delivered response).
-    if (!sendJsonStateResponse(request, _statefulService, _stateReader, _bufferSize)) {
-      return;
-    }
+    // above, so the update handlers below run even when the echo is shed:
+    // otherwise the new value sat in RAM, unsaved and unapplied, and the
+    // client's retry saw UNCHANGED.
+    sendJsonStateResponse(request, _statefulService, _stateReader, _bufferSize);
 
     // Fire update handlers SYNCHRONOUSLY after queueing the response.
     // The legacy path scheduled this via request->onDisconnect, but

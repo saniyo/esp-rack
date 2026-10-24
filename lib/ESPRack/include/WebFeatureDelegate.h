@@ -382,12 +382,12 @@ class WebFeatureEntry : public IWebFeatureEntry {
         ESPRack::sendUpdateRejected(r);
         return;
       }
-      // Echo (masked). On a 503 the client refetches; handlers ride only on a
-      // delivered response, as in HttpPostEndpoint.
-      if (!sendAdaptiveJson(r, [this](JsonObject& o) { _service->read(o, _maskedEcho); },
-                            _restBufferSize ? _restBufferSize : DEFAULT_BUFFER_SIZE)) {
-        return;
-      }
+      // Echo (masked). The change is already in RAM, so the update handlers
+      // (save, apply, broadcast) run even when the echo had to be shed with a
+      // 503: the client's retry then sees UNCHANGED and gets the echo. Skipping
+      // them left the new value in RAM, unsaved and unapplied, until a reboot.
+      sendAdaptiveJson(r, [this](JsonObject& o) { _service->read(o, _maskedEcho); },
+                       _restBufferSize ? _restBufferSize : DEFAULT_BUFFER_SIZE);
       if (outcome == StateUpdateResult::CHANGED) {
         _service->callUpdateHandlers(HTTP_ENDPOINT_ORIGIN_ID);
       }
