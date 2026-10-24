@@ -1,5 +1,5 @@
 import { describe, expect, it } from '@jest/globals';
-import { bucketWord, planWindow } from './historyPlan';
+import { bucketWord, planSeries, planWindow, timeTicks } from './historyPlan';
 
 const D = 1761264000;  // a UTC midnight
 const utcDay = (t: number) => t - (t % 86400);
@@ -69,6 +69,31 @@ describe('history window plan', () => {
     const today = planWindow({ period: 'date', day: D, now, oldest: D - 300 * 86400, tiers: cells, localDays: false, dayStart: utcDay });
     expect(today.to).toBe(D + 14 * 3600 + 35 * 60);
     expect(today.openEnd).toBe(true);
+  });
+
+  it('reads a time series coarse enough, from the right tier', () => {
+    const battery = [
+      { bucket: 60, keep: 2 * 86400 },
+      { bucket: 900, keep: 60 * 86400 },
+      { bucket: 3600, keep: 365 * 86400 },
+    ];
+    const now = D + 14 * 3600 + 35 * 60;
+    const old = D - 300 * 86400;
+    const day = planSeries({ period: '24h', now, oldest: old, tiers: battery, localDays: false, dayStart: utcDay });
+    expect(day.res).toBe(300);
+    expect(day.plan.tier).toBe(0);
+    const month = planSeries({ period: '30d', now, oldest: old, tiers: battery, localDays: false, dayStart: utcDay });
+    expect(month.res).toBe(3 * 3600);
+    expect(month.plan.tier).toBe(2);
+    const fresh = planSeries({ period: '1y', now, oldest: now - 600, tiers: battery, localDays: false, dayStart: utcDay });
+    expect(fresh.res).toBe(60);
+    expect(fresh.plan.tier).toBe(0);
+  });
+
+  it('puts ticks on round wall-clock times', () => {
+    const ticks = timeTicks(D + 100, D + 86400, 7200);
+    expect(ticks.length).toBeGreaterThan(3);
+    ticks.forEach((t) => expect((t + 7200) % (4 * 3600) === 0 || (t + 7200) % 3600 === 0).toBe(true));
   });
 
   it('names buckets', () => {

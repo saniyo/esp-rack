@@ -16,6 +16,7 @@ export interface PlanInput {
   tiers: HistTierInfo[];
   localDays: boolean;      // whole-day tiers start at local midnight
   dayStart: (t: number) => number;  // the local midnight at or before t
+  startTier?: number;      // search tiers from this one (a coarser read)
 }
 
 export type EmptyReason = 'none' | 'before' | 'noClosed';
@@ -49,7 +50,7 @@ export function planWindow(p: PlanInput): Plan {
   const dayEnd = p.period === 'date' && p.day !== undefined ? nextDay(p.day, p.dayStart) : undefined;
   const rawFrom = p.period === 'date' ? p.day ?? p.now : p.now - span;
   const n = p.tiers.length;
-  let k = 0;
+  let k = Math.min(p.startTier ?? 0, n - 1);
   while (k < n - 1 && !covers(p.tiers[k], Math.max(rawFrom, p.oldest), p.now)) ++k;
 
   for (;;) {
@@ -77,6 +78,39 @@ export function planWindow(p: PlanInput): Plan {
     else if (fromEff >= to) plan.empty = 'noClosed';
     return plan;
   }
+}
+
+// Time series: resolutions a chart reads at, about `points` rows a period.
+export const RES_LADDER = [60, 300, 900, 1800, 3600, 3 * 3600, 6 * 3600, 12 * 3600, 86400];
+
+// The plan for a time series and its resolution: the first ladder step that
+// keeps the rows under `points`, read from the coarsest covering tier whose
+// bucket divides it (30 d: 3 h from the hourly tier, not 2 880 records).
+export function planSeries(p: PlanInput, points = 340): { plan: Plan; res: number } {
+  const fine = planWindow(p);
+  if (fine.empty) return { plan: fine, res: fine.bucket };
+  const want = Math.max(fine.bucket, (fine.to - fine.fromEff) / points);
+  const res = RES_LADDER.find((r) => r >= want) ?? RES_LADDER[RES_LADDER.length - 1];
+  let k = fine.tier;
+  for (let j = p.tiers.length - 1; j > fine.tier; --j) {
+    const t = p.tiers[j];
+    if (t.bucket && res % t.bucket === 0 && covers(t, fine.fromEff, p.now)) {
+      k = j;
+      break;
+    }
+  }
+  const plan = k === fine.tier ? fine : planWindow({ ...p, startTier: k });
+  return { plan, res: Math.max(res, plan.bucket) };
+}
+
+// About six round ticks between from and to, on the device's wall clock
+// (offsetSec: seconds east of UTC there).
+export function timeTicks(from: number, to: number, offsetSec: number): number[] {
+  const steps = [300, 900, 1800, 3600, 3 * 3600, 6 * 3600, 12 * 3600, 86400, 2 * 86400, 7 * 86400, 30 * 86400];
+  const step = steps.find((s) => s >= (to - from) / 6) ?? steps[steps.length - 1];
+  const out: number[] = [];
+  for (let t = Math.ceil((from + offsetSec) / step) * step - offsetSec; t <= to && out.length < 12; t += step) out.push(t);
+  return out;
 }
 
 // "5-min", "hourly", "daily", "15-s"

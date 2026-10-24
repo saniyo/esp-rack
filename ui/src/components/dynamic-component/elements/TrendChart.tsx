@@ -642,12 +642,30 @@ const TrendChart: React.FC<TrendChartProps> = ({ field, value = [], getSibling }
     binding: histBinding,
     lines: histLines,
     xAxisKey,
+    isCategory,
     liveRows: chartDataForLine,
     zone,
     storageKey: `trendHist:${window.location.pathname}:${field.label}`,
   });
   const plotRows = useMemo(() => (hist.active ? hist.rows || [] : chartDataForLine), [hist.active, hist.rows, chartDataForLine]);
   const plotConfigs = hist.active ? baseLineConfigs : mergedLineConfigs;
+  // A history time series: x = epoch s on a number axis over the period.
+  const histTime = hist.active && hist.timeSeries;
+  const xAxisProps = useMemo(() => {
+    if (!histTime || !hist.xDomain) return { tickFormatter };
+    const span = hist.xDomain[1] - hist.xDomain[0];
+    return {
+      type: 'number' as const,
+      domain: hist.xDomain,
+      ticks: hist.ticks,
+      allowDataOverflow: true,
+      tickFormatter: (x: any) => formatX(x, 'epoch', zone, span),
+    };
+  }, [histTime, hist.xDomain, hist.ticks, tickFormatter, zone]);
+  const tipLabel = useMemo(
+    () => (histTime ? (x: any) => formatFull(x, 'epoch', zone) : tooltipLabel),
+    [histTime, zone, tooltipLabel]
+  );
   const unit = (om.unit?.value as string | undefined) || hist.unit;
   // Stacked bars with a negative member (a sign -1 line, or negative values)
   // stack away from 0 on both sides instead of over each other.
@@ -911,14 +929,14 @@ const TrendChart: React.FC<TrendChartProps> = ({ field, value = [], getSibling }
             margin={chartMargin}
           >
             <CartesianGrid strokeDasharray="3 3" />
-            <XAxis dataKey={xAxisKey} tickFormatter={tickFormatter} />
+            <XAxis dataKey={xAxisKey} {...xAxisProps} />
             <YAxis domain={yDomain} />
             <Tooltip
               content={(props: RechartsTooltipProps<any, any>) => (
                 <CustomTooltipComponent
                   {...props}
                   hoveredDataKey={hoveredDataKey}
-                  formatLabel={tooltipLabel}
+                  formatLabel={tipLabel}
                   unit={unit}
                 />
               )}
@@ -957,14 +975,14 @@ const TrendChart: React.FC<TrendChartProps> = ({ field, value = [], getSibling }
             stackOffset={signedStack ? 'sign' : undefined}
           >
             <CartesianGrid strokeDasharray="3 3" />
-            <XAxis dataKey={xAxisKey} tickFormatter={tickFormatter} />
+            <XAxis dataKey={xAxisKey} {...xAxisProps} />
             <YAxis domain={yDomain} />
             <Tooltip
               content={(props: RechartsTooltipProps<any, any>) => (
                 <CustomTooltipComponent
                   {...props}
                   hoveredDataKey={hoveredDataKey}
-                  formatLabel={tooltipLabel}
+                  formatLabel={tipLabel}
                   unit={unit}
                 />
               )}
@@ -1012,6 +1030,8 @@ const TrendChart: React.FC<TrendChartProps> = ({ field, value = [], getSibling }
     signedStack,
     unit,
     hist.available,
+    xAxisProps,
+    tipLabel,
     renderLines,
     renderBars,
     handleLegendClick,

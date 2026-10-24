@@ -10,7 +10,7 @@ import {
 } from '../../../../framework/history/historyClient';
 import { ResolvedZone } from '../../../../utils/deviceTime';
 import { wallParts, wallToEpoch } from '../../utils/dateTimeParts';
-import { ALL_PERIODS, bucketWord, HistPeriod, Plan, planWindow } from './historyPlan';
+import { ALL_PERIODS, bucketWord, HistPeriod, Plan, planSeries, planWindow, timeTicks } from './historyPlan';
 
 export interface HistLine {
   dataKey: string;
@@ -41,6 +41,9 @@ export interface HistoryState {
   empty?: { title: string; detail?: string };
   error?: string;
   unit?: string;
+  timeSeries: boolean;            // x = epoch s on a number axis
+  xDomain?: [number, number];
+  ticks?: number[];
   reload: () => void;
   csv?: () => void;
   zone: ResolvedZone;
@@ -69,11 +72,12 @@ export function useHistoryData(opts: {
   binding?: HistoryBinding;
   lines: HistLine[];
   xAxisKey: string;
+  isCategory: boolean;
   liveRows: Record<string, any>[];
   zone: ResolvedZone;
   storageKey: string;
 }): HistoryState {
-  const { binding, lines, xAxisKey, liveRows, zone, storageKey } = opts;
+  const { binding, lines, xAxisKey, isCategory, liveRows, zone, storageKey } = opts;
 
   const remembered = useMemo(() => store(storageKey) || {}, [storageKey]);
   const [period, setPeriodState] = useState<HistPeriod>(() => {
@@ -86,6 +90,8 @@ export function useHistoryData(opts: {
   const [info, setInfo] = useState<HistSeriesInfo | null>(null);
   const [rows, setRows] = useState<Record<string, any>[] | null>(null);
   const [plan, setPlan] = useState<Plan | null>(null);
+  const [res, setRes] = useState(0);
+  const [gap, setGap] = useState<[number, number] | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string>();
   const queryRef = useRef<HistQuery | null>(null);
@@ -150,7 +156,7 @@ export function useHistoryData(opts: {
       setPlan(null);
       return;
     }
-    const pl = planWindow({
+    const input = {
       period: period as Exclude<HistPeriod, 'live'>,
       day: pickedDay,
       now: deviceNow(list),
@@ -158,11 +164,19 @@ export function useHistoryData(opts: {
       tiers: info.tiers,
       localDays: !!info.local_days,
       dayStart,
-    });
+    };
+    // A category chart reads one row over the period; a time series reads
+    // rows at a resolution the period needs.
+    const planned = isCategory ? { plan: planWindow(input), res: 0 } : planSeries(input);
+    const pl = planned.plan;
     setPlan(pl);
+    setRes(planned.res);
+    setGap(null);
     setError(undefined);
-    if (pl.empty || columns.some((c) => !c.col)) {
+    const wholeOverTime = !isCategory && columns.some((c) => c.width > 1);
+    if (pl.empty || columns.some((c) => !c.col) || wholeOverTime) {
       if (columns.some((c) => !c.col)) setError("This chart's history no longer matches the series");
+      else if (wholeOverTime) setError('Over time a line needs one value: name an element or [avg]');
       setRows(null);
       queryRef.current = null;
       return;
@@ -174,7 +188,7 @@ export function useHistoryData(opts: {
       from: pl.fromEff,
       to: pl.to - 1,
       tier: pl.tier,
-      res: 0,
+      res: planned.res,
     };
     queryRef.current = q;
     const ctl = new AbortController();
@@ -182,6 +196,32 @@ export function useHistoryData(opts: {
     fetchRows(q, list.maxv, ctl.signal)
       .then((r) => {
         if (ctl.signal.aborted) return;
+        if (!isCategory) {
+          // Time series: x = epoch s; a null row where records are missing
+          // (more than 1.5 steps apart), so the lines break there.
+          const out: Record<string, any>[] = [];
+          let prev: number | undefined;
+          let firstGap: [number, number] | null = null;
+          r.rows.forEach((row) => {
+            const t = row[0] as number;
+            if (prev !== undefined && t - prev > 1.5 * planned.res) {
+              const g: Record<string, any> = { [xAxisKey]: prev + planned.res };
+              columns.forEach((c) => (g[c.line.dataKey] = null));
+              out.push(g);
+              if (!firstGap) firstGap = [prev + planned.res, t];
+            }
+            const o: Record<string, any> = { [xAxisKey]: t };
+            columns.forEach((c, ci) => {
+              const v = row[ci + 1];
+              o[c.line.dataKey] = typeof v === 'number' ? v * c.line.sign : null;
+            });
+            out.push(o);
+            prev = t;
+          });
+          setGap(firstGap);
+          setRows(out);
+          return;
+        }
         const row = r.rows[0];
         if (!row) {
           setRows([]);
@@ -212,7 +252,7 @@ export function useHistoryData(opts: {
       .finally(() => !ctl.signal.aborted && setLoading(false));
     return () => ctl.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active, info, list, period, pickedDay, columns, dayStart]);
+  }, [active, info, list, period, pickedDay, columns, dayStart, isCategory]);
 
   // ── words ──
   const dm = (t: number) => {
@@ -237,7 +277,11 @@ export function useHistoryData(opts: {
   const notes: string[] = [];
   let empty: HistoryState['empty'];
   if (active && plan) {
-    const what = isSum ? `totals from ${bucketWord(plan.bucket)} records` : `averages of ${bucketWord(plan.bucket)} records`;
+    const what = !isCategory
+      ? `${bucketWord(res || plan.bucket)} ${isSum ? 'totals' : 'averages'}`
+      : isSum
+        ? `totals from ${bucketWord(plan.bucket)} records`
+        : `averages of ${bucketWord(plan.bucket)} records`;
     const spanName: Record<string, string> = { '24h': 'Last 24 h', '7d': 'Last 7 days', '30d': 'Last 30 days', '1y': 'Last year' };
     if (period === 'date') {
       const d = plan.from;
@@ -257,7 +301,8 @@ export function useHistoryData(opts: {
           : `The current ${plan.bucket === 3600 ? 'hour' : 'bucket'} is still open: totals to ${at(plan.to)}.`
       );
     }
-    if (!isSum && plan.bucket >= 86400) notes.push('Daily averages smooth out short peaks; a shorter period shows them.');
+    if (isCategory && !isSum && plan.bucket >= 86400) notes.push('Daily averages smooth out short peaks; a shorter period shows them.');
+    if (gap) notes.push(`No records ${dm(gap[0])} ${hm(gap[0])}–${dm(gap[1]) === dm(gap[0]) ? '' : `${dm(gap[1])} `}${hm(gap[1])}: the lines break there.`);
     const unitName = plan.bucket === 3600 ? 'hour' : plan.bucket >= 86400 ? 'day' : `${bucketWord(plan.bucket)} bucket`;
     const firstClose = plan.to + plan.bucket;
     if (plan.empty === 'none') {
@@ -300,11 +345,20 @@ export function useHistoryData(opts: {
     empty,
     error,
     unit,
+    timeSeries: !isCategory,
+    xDomain: active && plan && !isCategory ? [plan.fromEff, plan.to] : undefined,
+    ticks: active && plan && !isCategory ? timeTicks(plan.fromEff, plan.to, zoneOffset(plan.to, zone)) : undefined,
     reload,
     csv,
     zone,
   };
 }
+
+// Seconds east of UTC on the device's wall clock at t.
+const zoneOffset = (t: number, zone: ResolvedZone): number => {
+  const w = wallParts(t, zone);
+  return Date.UTC(w.y, w.mo - 1, w.d, w.h, w.mi, w.s) / 1000 - t;
+};
 
 export const parsePeriods = (raw: unknown): HistPeriod[] => {
   const list = Array.isArray(raw) ? (raw as string[]) : [];
