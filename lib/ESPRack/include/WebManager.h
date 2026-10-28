@@ -126,6 +126,7 @@ class WebManager {
     T* raw = entry.get();
     warnIfDuplicate(*raw);
     _entries.push_back(std::move(entry));
+    _entryModule.push_back(_installing);
     return raw;
   }
 
@@ -256,6 +257,28 @@ class WebManager {
   // the manifest shows — the device timezone. No-op before
   // begin(). Loop task; rewrites only when the content signature changed.
   void refreshManifestCache();
+
+  // ── Menu tree: where an item goes ──
+  // The application places a menu item, its own or a module's:
+  //   app->webManager()->placeMenu("jk", "gateway");     // under "gateway"
+  //   app->webManager()->placeMenu("history", "", 900);  // top level, order 900
+  // parentId "" = top level, nullptr = keep; order kKeepOrder = keep.
+  // An item's parent, highest first:
+  //   1. placeMenu();
+  //   2. Builder::under(): the module's own top items go under it;
+  //   3. the one module that uses it (ModuleDescriptor::uses_): under that
+  //      module's first menu item;
+  //   4. the feature's own nestUnder();
+  //   5. top level; an external HW page without either goes into the
+  //      "External Hardware" group (under its owner(), else System).
+  // A module never places itself. Call it before app->begin() returns;
+  // later it re-bakes the manifest cache (loop task).
+  static constexpr int kKeepOrder = -2147483647 - 1;
+  void placeMenu(const char* id, const char* parentId, int order = kKeepOrder);
+  // Framework plumbing (Builder/App): who registers entries from now on,
+  // and each module's composition placement.
+  void setInstallingModule(const char* moduleId) { _installing = moduleId; }
+  void noteModule(const char* moduleId, const char* under, const std::vector<const char*>& uses);
 
   // bytes of the cached manifest per tier (0 = not cached).
   uint32_t manifestBytes(bool authed) const { return _manifestBytes[authed ? 1 : 0]; }
@@ -498,6 +521,26 @@ class WebManager {
   const char* _frameworkVersion{""};
 
   bool _begun{false};
+
+  // Menu tree (placeMenu, noteModule).
+  struct MenuPlace {
+    String id;
+    String parent;
+    bool keepParent;
+    int order;
+  };
+  struct ModuleNote {
+    const char* id;
+    const char* under;
+    std::vector<const char*> uses;
+  };
+  const char* _installing = nullptr;
+  std::vector<const char*> _entryModule;  // parallel to _entries: who registered it
+  std::vector<ModuleNote> _moduleNotes;
+  std::vector<MenuPlace> _menuPlaces;
+  const char* moduleParent(const char* moduleId) const;
+  bool moduleOwns(const char* moduleId, const char* itemId) const;
+  void applyMenuPlace(JsonObject entry, size_t idx) const;
 
   // Content signature of the current manifest (computeManifestSig),
   // cached at boot by writeManifestCacheToFs(). Doubles as the ETag base

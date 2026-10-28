@@ -68,6 +68,11 @@ class Builder {
   //   .installExtHw<MeterModule>("meter", Serial1).owner("sesLight")
   // Its pages then sit under that module's menu, in "External Hardware".
   Builder& owner(const char* moduleId);
+  // The menu items of the module (or instance) installed just before nest
+  // under menu item `parentId`: the composition, not the module, decides
+  // where a module's pages live.
+  //   .install<JkBusModule>("can0").under("jk")
+  Builder& under(const char* parentId);
 
   // Keep a GPIO away from every external HW instance: a board's SD card,
   // status LED, a pin the consumer drives itself. `reason` is shown in
@@ -139,6 +144,7 @@ class Builder {
   uint32_t         ws_pong_ms_  {60000};
 
   std::vector<std::unique_ptr<Module>> modules_;
+  std::vector<std::pair<const Module*, const char*>> unders_;  // under()
   struct Reservation {
     HwKind kind;
     int16_t index;

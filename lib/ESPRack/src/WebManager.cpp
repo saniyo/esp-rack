@@ -270,6 +270,7 @@ void ManifestBuilder::fillPhaseBuffer() {
     case Phase::FEATURES_ITEM: {
       JsonObject o = _doc.to<JsonObject>();
       _mgr->_entries[_featIdx]->toJson(o);
+      _mgr->applyMenuPlace(o, _featIdx);
       compactManifestEntry(o);
       renderDocIntoItem();
       return;
@@ -519,6 +520,83 @@ void WebManager::noteManifestBytes(bool authed, size_t bytes) {
   }
 }
 
+void WebManager::placeMenu(const char* id, const char* parentId, int order) {
+  if (!id || !*id) return;
+  MenuPlace* p = nullptr;
+  for (auto& m : _menuPlaces) {
+    if (m.id == id) p = &m;
+  }
+  if (!p) {
+    _menuPlaces.push_back(MenuPlace{String(id), String(), true, kKeepOrder});
+    p = &_menuPlaces.back();
+  }
+  if (parentId) {
+    p->parent = parentId;
+    p->keepParent = false;
+  }
+  if (order != kKeepOrder) p->order = order;
+  if (_begun) refreshManifestCache();  // the cache was baked without it
+}
+
+void WebManager::noteModule(const char* moduleId, const char* under, const std::vector<const char*>& uses) {
+  if (!moduleId || !*moduleId) return;
+  _moduleNotes.push_back(ModuleNote{moduleId, under, uses});
+}
+
+bool WebManager::moduleOwns(const char* moduleId, const char* itemId) const {
+  for (size_t i = 0; i < _entries.size(); ++i) {
+    const char* m = _entryModule[i];
+    if (m && _entries[i] && strcmp(m, moduleId) == 0 && strcmp(_entries[i]->id(), itemId) == 0) return true;
+  }
+  return false;
+}
+
+// Where a module's items go by the composition: its under(), else under
+// the first menu item of the one module that uses it. nullptr: nowhere new.
+const char* WebManager::moduleParent(const char* moduleId) const {
+  for (const auto& n : _moduleNotes) {
+    if (strcmp(n.id, moduleId) == 0 && n.under && *n.under) return n.under;
+  }
+  const char* user = nullptr;
+  for (const auto& n : _moduleNotes) {
+    for (const char* u : n.uses) {
+      if (!u || strcmp(u, moduleId) != 0) continue;
+      if (user && strcmp(user, n.id) != 0) return nullptr;  // two users: no guess
+      user = n.id;
+    }
+  }
+  if (!user) return nullptr;
+  for (size_t i = 0; i < _entries.size(); ++i) {
+    const char* m = _entryModule[i];
+    if (!m || !_entries[i] || strcmp(m, user) != 0) continue;
+    const auto k = _entries[i]->kind();
+    if (k == IWebFeatureEntry::Kind::Feature || k == IWebFeatureEntry::Kind::Page) return _entries[i]->id();
+  }
+  return nullptr;
+}
+
+void WebManager::applyMenuPlace(JsonObject entry, size_t idx) const {
+  JsonObject menu = entry["menu"];
+  if (menu.isNull()) return;
+  const char* id = entry["id"] | "";
+  for (const auto& p : _menuPlaces) {
+    if (p.id != id) continue;
+    if (!p.keepParent) {
+      if (p.parent.length()) menu["parent"] = p.parent.c_str();  // lives in _menuPlaces
+      else menu.remove("parent");
+    }
+    if (p.order != kKeepOrder) menu["order"] = p.order;
+    return;
+  }
+  const char* mod = idx < _entryModule.size() ? _entryModule[idx] : nullptr;
+  if (!mod) return;
+  const char* parent = moduleParent(mod);
+  if (!parent || strcmp(parent, id) == 0 || moduleOwns(mod, parent)) return;
+  const char* own = menu["parent"] | "";
+  if (*own && moduleOwns(mod, own)) return;  // nested inside its own module: keep
+  menu["parent"] = parent;
+}
+
 void WebManager::refreshManifestCache() {
   if (_manifestSig == 0) return;  // begin() bakes it
   writeManifestCacheToFs();
@@ -552,10 +630,11 @@ void WebManager::buildManifestObject(JsonObject root) {
   }
 
   JsonArray features = root.createNestedArray("features");
-  for (const auto& e : _entries) {
-    if (!e) continue;
+  for (size_t i = 0; i < _entries.size(); ++i) {
+    if (!_entries[i]) continue;
     JsonObject fo = features.createNestedObject();
-    e->toJson(fo);
+    _entries[i]->toJson(fo);
+    applyMenuPlace(fo, i);
   }
 
   if (_extraArray.key && _extraArray.count && _extraArray.item) {

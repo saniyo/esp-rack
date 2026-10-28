@@ -102,6 +102,12 @@ struct ModuleDescriptor {
   // string literals (must outlive the module).
   std::vector<const char*> requires_ {};
 
+  // What this module uses, by module or instance id, as far as the
+  // composition tells it (e.g. the CAN port it was installed with). A menu
+  // item nobody placed nests under its one user (WebManager::placeMenu has
+  // the order). Strings outlive the module (literals or its own members).
+  std::vector<const char*> uses_ {};
+
   // Install order tiebreaker within the topological sort. 0..100, lower
   // = earlier. Defaults to 50. Use lower for low-level (security,
   // filesystem); higher for app code (modules that surface UI).

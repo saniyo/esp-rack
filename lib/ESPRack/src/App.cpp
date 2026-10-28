@@ -412,7 +412,10 @@ void App::begin() {
     if (m) {
       ModuleDescriptor d;
       m->describe(d);
+      if (ExtHwModule* x = m->asExtHw()) d.id = x->instanceId();
+      webManager_.setInstallingModule(d.id);
       m->onBegin();
+      webManager_.setInstallingModule(nullptr);
       log_i("[boot] post-%s: free=%u max_alloc=%u",
             d.id ? d.id : "?",
             (unsigned)ESP.getFreeHeap(),

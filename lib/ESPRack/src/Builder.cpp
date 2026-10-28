@@ -63,6 +63,15 @@ inline void rinfo(const char* fmt, ...) {
 }
 }  // namespace
 
+Builder& Builder::under(const char* parentId) {
+  if (modules_.empty() || !modules_.back() || !parentId || !*parentId) {
+    rerr("under('%s') must follow install<>() or installExtHw<>(); ignored", parentId ? parentId : "");
+    return *this;
+  }
+  unders_.push_back({modules_.back().get(), parentId});
+  return *this;
+}
+
 Builder& Builder::owner(const char* moduleId) {
   ExtHwModule* x = modules_.empty() || !modules_.back() ? nullptr : modules_.back()->asExtHw();
   if (!x) {
@@ -228,7 +237,16 @@ std::unique_ptr<App> Builder::build() {
       // An external HW instance gets its registry (ExtHwModule::hw())
       // before onInstall.
       if (ExtHwModule* x = modules_[idx]->asExtHw()) app->hw()->addInstance(x);
+      // Menu placement: the composition's under() and the module's uses;
+      // the entries it registers now are its own.
+      const char* underId = nullptr;
+      for (const auto& u : unders_) {
+        if (u.first == modules_[idx].get()) underId = u.second;
+      }
+      app->webManager()->noteModule(descs[idx].id, underId, descs[idx].uses_);
+      app->webManager()->setInstallingModule(descs[idx].id);
       modules_[idx]->onInstall(ctx);
+      app->webManager()->setInstallingModule(nullptr);
       sorted.push_back(std::move(modules_[idx]));
       rinfo("installed '%s' v%s priority=%d",
             descs[idx].id, descs[idx].version, descs[idx].priority);
