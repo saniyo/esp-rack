@@ -2,8 +2,8 @@
 import { describe, expect, it } from '@jest/globals';
 
 import {
-  BRK_TYPE, CELL_SX, COLS_TYPE, fullOf, gridColumnFor, gridTemplateFor, markerFromRaw, numberInputValue, numberStep,
-  segmentFields, spanOf, visibleHeading,
+  BRK_TYPE, CELL_SX, COLS_TYPE, fullOf, gridColumnFor, gridTemplateFor, groupByCard, markerFromRaw, numberInputValue,
+  numberStep, segmentFields, spanOf, visibleHeading,
 } from './formLayout';
 
 const f = (label: string, type = 'number') => ({ label, type });
@@ -28,6 +28,45 @@ describe('read-only tiles (Status tabs)', () => {
     expect(visibleHeading('Energy meter and lamp', ['Meter', 'Status'])).toBe('Energy meter and lamp');
     expect(visibleHeading('', ['x'])).toBe('');
     expect(visibleHeading(undefined, [])).toBe('');
+  });
+});
+
+describe('cards', () => {
+  type E = { label: string; type: string; card?: string };
+  const c = (label: string, card?: string): E => ({ label, type: 'number', card });
+  const cols = (n: number, i: number) => markerFromRaw({ t: 'cols', n }, i)! as E;
+  const brk = (i: number) => markerFromRaw({ t: 'brk' }, i)! as E;
+  const group = (es: E[]) =>
+    groupByCard(es, (e) => e, (e) => e.card).map((g) => ({ card: g.card, labels: g.entries.map((e) => e.label) }));
+
+  it('gives a marker before a card to that card', () => {
+    const es = [c('a', 'one'), c('b', 'one'), cols(3, 2), c('x', 'two'), c('y', 'two'), c('z', 'two')];
+    expect(group(es)).toEqual([
+      { card: 'one', labels: ['a', 'b'] },
+      { card: 'two', labels: ['__cols2', 'x', 'y', 'z'] },
+    ]);
+    const two = groupByCard(es, (e) => e, (e) => e.card)[1];
+    expect(segmentFields(two.entries, (e) => e)[0].cols).toBe(3);
+  });
+  it('lays out a card that opens the form', () => {
+    const es = [cols(2, 0), c('a', 'one'), c('b', 'one')];
+    expect(group(es)).toEqual([{ card: 'one', labels: ['__cols0', 'a', 'b'] }]);
+  });
+  it('keeps markers inside a card, and before bare fields with those', () => {
+    const es = [c('a', 'one'), brk(1), c('b', 'one'), cols(2, 3), c('n'), c('m'), cols(2, 6), c('p', 'two')];
+    expect(group(es)).toEqual([
+      { card: 'one', labels: ['a', '__brk1', 'b'] },
+      { card: undefined, labels: ['__cols3', 'n', 'm'] },
+      { card: 'two', labels: ['__cols6', 'p'] },
+    ]);
+  });
+  it('splits cards that are not consecutive, keeps trailing markers', () => {
+    const es = [c('a', 'one'), c('n'), c('b', 'one'), brk(3)];
+    expect(group(es)).toEqual([
+      { card: 'one', labels: ['a'] },
+      { card: undefined, labels: ['n'] },
+      { card: 'one', labels: ['b', '__brk3'] },
+    ]);
   });
 });
 

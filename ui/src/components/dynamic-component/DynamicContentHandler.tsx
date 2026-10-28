@@ -1,6 +1,6 @@
 import { ownerOfAction } from '../../contexts/manifest/normalizeManifest';
 import {
-  CELL_SX, fullOf, gridColumnFor, gridTemplateFor, isLayoutMarker, segmentFields, spanOf,
+  CELL_SX, fullOf, gridColumnFor, gridTemplateFor, groupByCard, isLayoutMarker, segmentFields, spanOf,
   visibleHeading,
 } from './utils/formLayout';
 import { HeadingContext } from './HeadingContext';
@@ -344,61 +344,35 @@ const DynamicContentHandler: FC<DynamicContentHandlerProps> = ({
       </Box>
     ));
 
+  const cardOf = (f: Field): string | undefined =>
+    (parseFieldOptions(f.label, f.o).optionMap as any).card?.value as string | undefined;
+
   const renderAll = (): React.ReactNode[] => {
     const nodes: React.ReactNode[] = [];
-    let bareAccumulator: { f: Field; i: number }[] = [];
-    let bareStart = 0;
+    // Hidden fields are left out first: they neither show nor split a card.
+    // Each card (and each bare run between cards) owns the layout markers
+    // in front of it (groupByCard).
+    const visible = fields.map((f, i) => ({ f, i })).filter(({ f }) => isLayoutMarker(f) || isFieldVisible(f));
+    const groups = groupByCard(visible, (e) => e.f, (e) => (isLayoutMarker(e.f) ? undefined : cardOf(e.f)));
 
-    const flushBare = () => {
-      if (bareAccumulator.length === 0) return;
-      nodes.push(...renderGrid(bareAccumulator, `bare-${bareStart}`));
-      bareAccumulator = [];
-    };
-
-    let i = 0;
-    while (i < fields.length) {
-      const f = fields[i];
-      if (!isFieldVisible(f)) { i++; continue; }
-
-      const parsedF = parseFieldOptions(f.label, f.o);
-      const cardId = (parsedF.optionMap as any).card?.value as string | undefined;
-
+    for (const group of groups) {
+      const groupStart = group.entries[0].i;
+      const cardId = group.card;
       if (!cardId) {
-        if (bareAccumulator.length === 0) bareStart = i;
-        bareAccumulator.push({ f, i });
-        i++;
+        // Bare fields: one grid per segment, at the top level (not in a Card).
+        nodes.push(...renderGrid(group.entries, `bare-${groupStart}`));
         continue;
       }
 
-      // Flush any pending bare fields before emitting the Card so the Card
-      // sits at the top level of the render tree, not inside a <ul>.
-      flushBare();
-
-      // Collect consecutive fields sharing the same card id (visibility-
-      // filtered). The header title/deletable flag are read from the first
-      // field in the span.
-      const groupStart = i;
-      const cardTitleText = (parsedF.optionMap as any).cardTitle?.value as string | undefined;
-      const deletable = !!((parsedF.optionMap as any).cardDeletable?.value);
-
-      const groupFields: { f: Field; absoluteIndex: number }[] = [];
-      while (i < fields.length) {
-        const gf = fields[i];
-        if (isLayoutMarker(gf)) {  // markers stay inside the card
-          groupFields.push({ f: gf, absoluteIndex: i });
-          i++;
-          continue;
-        }
-        const gpOpts = parseFieldOptions(gf.label, gf.o);
-        const gCardId = (gpOpts.optionMap as any).card?.value as string | undefined;
-        if (gCardId !== cardId) break;
-        if (isFieldVisible(gf)) groupFields.push({ f: gf, absoluteIndex: i });
-        i++;
-      }
+      // The header title/deletable flag are read from the card's first field.
+      const first = group.entries.find(({ f }) => !isLayoutMarker(f))!.f;
+      const firstOpts = parseFieldOptions(first.label, first.o).optionMap as any;
+      const cardTitleText = firstOpts.cardTitle?.value as string | undefined;
+      const deletable = !!firstOpts.cardDeletable?.value;
 
       const handleCardDelete = () => {
-        groupFields.forEach(({ f: gf }) => {
-          handleInputChange(gf.label, emptyValueFor(gf.type));
+        group.entries.forEach(({ f: gf }) => {
+          if (!isLayoutMarker(gf)) handleInputChange(gf.label, emptyValueFor(gf.type));
         });
       };
 
@@ -420,12 +394,11 @@ const DynamicContentHandler: FC<DynamicContentHandlerProps> = ({
             />
           )}
           <CardContent sx={{ pt: 0 }}>
-            {renderGrid(groupFields.map(({ f: gf, absoluteIndex }) => ({ f: gf, i: absoluteIndex })), `card-${cardId}`)}
+            {renderGrid(group.entries, `card-${cardId}`)}
           </CardContent>
         </Card>
       );
     }
-    flushBare();
     return nodes;
   };
 

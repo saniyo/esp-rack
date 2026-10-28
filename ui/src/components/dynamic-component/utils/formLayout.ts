@@ -52,6 +52,38 @@ export function segmentFields<T>(entries: T[], fieldOf: (e: T) => { type?: strin
   return out;
 }
 
+export interface FieldGroup<T> {
+  card?: string;  // undefined = the bare fields between cards
+  entries: T[];
+}
+
+// Cuts a form into cards (consecutive fields with one card=<id>) and the
+// bare runs between them. A layout marker goes with the field after it:
+// Cols(n) / Break() before a card's first field lays out that card, not an
+// empty tail of the group before it. Markers at the very end stay with the
+// last group (segmentFields drops them).
+export function groupByCard<T>(
+  entries: T[],
+  fieldOf: (e: T) => { type?: string },
+  cardOf: (e: T) => string | undefined
+): FieldGroup<T>[] {
+  const out: FieldGroup<T>[] = [];
+  let markers: T[] = [];
+  for (const e of entries) {
+    if (isLayoutMarker(fieldOf(e))) {
+      markers.push(e);
+      continue;
+    }
+    const card = cardOf(e);
+    const last = out[out.length - 1];
+    if (last && last.card === card) last.entries.push(...markers, e);
+    else out.push({ card, entries: [...markers, e] });
+    markers = [];
+  }
+  if (markers.length && out.length) out[out.length - 1].entries.push(...markers);
+  return out;
+}
+
 export type Responsive = string | { xs: string; sm: string; md: string };
 
 // grid-template-columns of a segment: one column unless the page asks for
