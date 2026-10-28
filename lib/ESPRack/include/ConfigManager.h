@@ -5,8 +5,11 @@
 #include <Arduino.h>
 #include <FS.h>
 #include <ArduinoJson.h>
+#include "power/FlashWriter.h"
 #include "power/PowerGuard.h"
+#include "power/WriteGate.h"
 
+#include <atomic>
 #include <vector>
 #include <memory>
 #include <functional>
@@ -22,6 +25,7 @@
 #if CFGMGR_USE_FREERTOS
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
+#include <freertos/task.h>
 #endif
 
 class ConfigManager {
@@ -120,8 +124,24 @@ class ConfigManager {
     virtual bool resetToDefaults(ConfigManager& mgr) = 0;
     virtual EntryStats& stats() = 0;
     virtual const EntryStats& stats() const = 0;
-    // A save PowerGuard paused; ConfigManager::flushDeferred() retries it.
+    // A save the write gate put off; the FlashWriter job writes it.
+    // deferredSince: when it was first put off (WriteGate::now()).
     virtual bool deferred() const { return false; }
+    virtual uint32_t deferredSince() const { return 0; }
+    // FlashWriter, the first step of a deferred save: the backup copy of
+    // the file on flash. Unneeded: nothing to save any more (the state is
+    // the saved one again; no longer deferred). Paused: PowerGuard paused
+    // writes, no copy made (it stays deferred).
+    enum class Backup : uint8_t { Unneeded, Made, Paused };
+    virtual Backup backupForSave(ConfigManager&) { return Backup::Made; }
+    // A save whose caller holds a gate slot (slotHeld: no gate here) and
+    // has made the backup copy already (backupDone). saveIfChanged() is
+    // saveStep(mgr, origin, false, false).
+    virtual bool saveStep(ConfigManager& mgr, const String& origin, bool slotHeld, bool backupDone) {
+      (void)slotHeld;
+      (void)backupDone;
+      return saveIfChanged(mgr, origin);
+    }
 
     // observer API — fires AFTER successful atomicWrite on CHANGED only
     virtual ListenerId addObserver(GenericListener l) = 0;
@@ -236,12 +256,24 @@ class ConfigManager {
   bool ensureLoaded(const char* id);
   bool saveIfChanged(const char* id, const String& origin = "");
 
-  // saves PowerGuard paused. flushDeferred() (App::loop) saves
-  // them once writes are allowed again; a latch keeps them until restart.
-  void markDeferred() { _anyDeferred = true; }
-  bool hasDeferred() const { return _anyDeferred; }
+  // Saves the write gate (power/WriteGate.h) put off: PowerGuard paused
+  // writes, or a module holds windows. A save runs at once (any task) only
+  // while the gate is free; otherwise it is marked deferred and the
+  // FlashWriter task writes it, in two steps of one slot each (the backup
+  // copy, then the file), no polling. A PowerGuard latch keeps them until
+  // restart. flushDeferred() kicks that job. flushDeferredNow() (the
+  // restart path) waits for the gate at most boundMs per save, then writes
+  // anyway: a save left waiting would be lost with the restart.
+  void markDeferred() {
+    _anyDeferred = true;
+    ESPRack::FlashWriter::kick(_writerJob);
+  }
+  bool hasDeferred() const { return _anyDeferred.load(); }
   size_t deferredCount() const;
   void flushDeferred();
+  void flushDeferredNow(uint32_t boundMs);
+  // The previous file to <backup> (best effort): atomicWrite's first step.
+  void backupPrimary(const char* primary, const char* backup);
   bool restoreFromBackup(const char* id);
   bool resetToDefaults(const char* id);
 
@@ -379,7 +411,30 @@ class ConfigManager {
     EntryStats& stats() override { return _stats; }
     const EntryStats& stats() const override { return _stats; }
     bool deferred() const override { return _deferred; }
+    uint32_t deferredSince() const override { return _deferredSince; }
     bool _deferred = false;
+    uint32_t _deferredSince = 0;
+
+    Backup backupForSave(ConfigManager& mgr) override {
+      if (!_d.service) return Backup::Unneeded;
+      ensurePaths(mgr);
+      mgr.lock();
+      if (!ESPRack::PowerGuard::writesAllowed()) {
+        mgr.unlock();
+        return Backup::Paused;
+      }
+      DynamicJsonDocument dataDoc(_d.bufferSize);
+      JsonObject data = dataDoc.to<JsonObject>();
+      _d.service->read(data, _d.reader);
+      if (_hasLastSavedCrc && ConfigManager::crc32OfJson(data) == _lastSavedCrc) {
+        _deferred = false;  // back to what is on flash: nothing to write
+        mgr.unlock();
+        return Backup::Unneeded;
+      }
+      mgr.backupPrimary(_primary.c_str(), _backup.c_str());
+      mgr.unlock();
+      return Backup::Made;
+    }
     bool ensureLoaded(ConfigManager& mgr) override {
       if (_loaded) return true;
       if (!_d.service) return false;
@@ -485,6 +540,10 @@ class ConfigManager {
     }
 
     bool saveIfChanged(ConfigManager& mgr, const String& origin) override {
+      return saveStep(mgr, origin, false, false);
+    }
+
+    bool saveStep(ConfigManager& mgr, const String& origin, bool slotHeld, bool backupDone) override {
       if (!_d.service) return false;
 
       ensurePaths(mgr);
@@ -514,13 +573,31 @@ class ConfigManager {
         return true;  // skip flash write
       }
 
-      // no flash writes while PowerGuard pauses them; the save
-      // waits for ConfigManager::flushDeferred().
-      if (!ESPRack::PowerGuard::writesAllowed()) {
-        if (!_deferred) _stats.deferred++;
+      // The flash write gate (power/WriteGate.h). Here (async_tcp, the
+      // loop, any task) the save goes only while the gate is free: it is
+      // two files, more than a pause between a module's windows takes.
+      // Otherwise the FlashWriter task writes it (markDeferred), a step per
+      // pause; the RAM state is in effect already.
+      const bool held = slotHeld;
+      if (!_deferred) _deferredSince = ESPRack::WriteGate::now();
+      struct GatePass {
+        bool on;
+        uint32_t at;
+        void release() {
+          if (on) ESPRack::WriteGate::leave(at);
+          on = false;
+        }
+        ~GatePass() { release(); }
+      } gate{false, 0};
+      if (!held) gate.on = ESPRack::WriteGate::tryEnter(_deferredSince, true, &gate.at);
+      if (!held && !gate.on) {
+        if (!_deferred) {
+          _stats.deferred++;
+          ESPRack::WriteGate::noteDeferred();
+        }
         _deferred = true;
-        mgr.markDeferred();
         mgr.unlock();
+        mgr.markDeferred();
         return false;
       }
 
@@ -542,7 +619,9 @@ class ConfigManager {
       bool primaryExisted = mgr.fileExists(_primary.c_str());
 
       uint32_t written = 0;
-      bool ok = mgr.atomicWrite(_primary.c_str(), _backup.c_str(), _tmp.c_str(), data, _d.bufferSize, &written);
+      bool ok = mgr.atomicWrite(_primary.c_str(), backupDone ? nullptr : _backup.c_str(), _tmp.c_str(), data,
+                                _d.bufferSize, &written);
+      gate.release();
 
       std::vector<std::pair<ListenerId, GenericListener>> snap;
       if (ok) {
@@ -704,7 +783,9 @@ class ConfigManager {
   String _tmpRoot{"/config/_tmp"};
 
   std::vector<std::unique_ptr<IConfigEntry>> _entries;
-  bool _anyDeferred = false;
+  std::atomic<bool> _anyDeferred{false};  // marked from any task
+  int8_t _writerJob = -1;                 // FlashWriter: writeDeferred()
+  uint32_t writeDeferred();
 
   // Probe-mode setter — called from discoverSecretKeysFromForm to flip
   // the thread_local g_probing flag while the service's buildForm runs.

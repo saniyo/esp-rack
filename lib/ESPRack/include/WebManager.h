@@ -1,6 +1,7 @@
 #ifndef WebManager_h
 #define WebManager_h
 
+#include <atomic>
 #include <cstring>
 
 // soft budget of one cached manifest tier (raw bytes). Over it:
@@ -257,6 +258,9 @@ class WebManager {
   // the manifest shows — the device timezone. No-op before
   // begin(). Loop task; rewrites only when the content signature changed.
   void refreshManifestCache();
+  // App::loop: a re-bake the write gate put off, once the FlashWriter found
+  // the gate free (a flag: nothing is polled).
+  void bakeIfDue();
 
   // ── Menu tree: where an item goes ──
   // The application places a menu item, its own or a module's:
@@ -552,6 +556,19 @@ class WebManager {
   uint32_t _manifestBytes[2]{0, 0};
   void noteManifestBytes(bool authed, size_t bytes);
   bool _manifestLive{false};  // writes were paused at the last re-bake: build on the fly
+  // Under _bakeMux (WebManager lives in App, which may be in PSRAM: no
+  // atomic read-modify-write there on Xtensa).
+  portMUX_TYPE _bakeMux = portMUX_INITIALIZER_UNLOCKED;
+  bool _bakePending{false};  // ... and it is to be done when the gate is free
+  bool _bakeDue{false};      // the FlashWriter found it free: App::loop bakes
+  bool swapBake(bool& flag, bool value) {
+    portENTER_CRITICAL(&_bakeMux);
+    const bool was = flag;
+    flag = value;
+    portEXIT_CRITICAL(&_bakeMux);
+    return was;
+  }
+  int8_t _bakeJob{-1};
 
   // Singleton manifest builder — BSS-resident, NOT allocated per
   // request. Mutex guards concurrent UI-manifest fetches; a

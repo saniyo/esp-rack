@@ -3,6 +3,8 @@
 #include "SecretFields.h"
 #include "AdaptiveJson.h"
 #include "power/PowerGuard.h"
+#include "power/FlashWriter.h"
+#include "power/WriteGate.h"
 #include <ProblemJson.h>
 #include <esp_rom_crc.h>
 #include <time/TimeSync.h>
@@ -316,6 +318,23 @@ void WebManager::warnIfDuplicate(const IWebFeatureEntry& n) const {
 
 void WebManager::begin() {
   if (_begun || !_server) return;
+  // A re-bake the write gate put off waits here (the FlashWriter task)
+  // until the gate is free, then hands it to the loop (bakeIfDue).
+  if (_bakeJob < 0) {
+    _bakeJob = ESPRack::FlashWriter::add("manifest", [this]() -> uint32_t {
+      portENTER_CRITICAL(&_bakeMux);
+      const bool pending = _bakePending;
+      portEXIT_CRITICAL(&_bakeMux);
+      if (!pending) return ESPRack::FlashWriter::kDone;
+      if (!ESPRack::PowerGuard::writesAllowed()) return ESPRack::FlashWriter::kOnPower;
+      if (!ESPRack::WriteGate::ready(ESPRack::WriteGate::now(), true)) {
+        const uint32_t idle = ESPRack::WriteGate::config().idleMs;
+        return idle ? idle : 1;
+      }
+      (void)swapBake(_bakeDue, true);
+      return ESPRack::FlashWriter::kDone;
+    });
+  }
 
   // Create the manifest-builder serialisation mutex on first begin().
   // FreeRTOS mutex is ~80 bytes one-time heap; created at boot when
@@ -602,6 +621,11 @@ void WebManager::refreshManifestCache() {
   writeManifestCacheToFs();
 }
 
+void WebManager::bakeIfDue() {
+  if (!swapBake(_bakeDue, false)) return;
+  writeManifestCacheToFs();  // the gate may be busy again: then it waits once more
+}
+
 void WebManager::buildManifestObject(JsonObject root) {
   root["schemaVersion"] = 3;
 
@@ -742,6 +766,7 @@ void WebManager::writeManifestCacheToFs() {
     log_i("[web.manifest] cache sig 0x%08x matches — reusing existing flash files",
           (unsigned)sig);
     _manifestLive = false;
+    (void)swapBake(_bakePending, false);
     for (int authed = 0; authed < 2; ++authed) {
       fs::File cf = ESPFS.open(authed ? kManifestCacheAuthedPath : kManifestCacheAnonPath, "r");
       if (cf) {
@@ -751,14 +776,22 @@ void WebManager::writeManifestCacheToFs() {
     }
     return;
   }
-  // PowerGuard: no flash writes now. Serve the manifest built
-  // on the fly until the next re-bake, never the stale files.
-  if (!ESPRack::PowerGuard::writesAllowed()) {
+  // The flash write gate (power/WriteGate.h): tens of KB, several erases,
+  // fit no pause between a module's windows, so only while the gate is
+  // free. Until then the manifest is built on the fly, never served from
+  // the stale files, and the FlashWriter waits for a free gate.
+  ESPRack::WritePass pass(ESPRack::WriteGate::now(), true);
+  if (!pass.ok()) {
+    if (!swapBake(_bakePending, true)) {
+      log_w("[web.manifest] writes paused: serving the manifest live");
+      ESPRack::WriteGate::noteDeferred();
+    }
     _manifestLive = true;
-    log_w("[web.manifest] writes paused: serving the manifest live");
+    ESPRack::FlashWriter::kick(_bakeJob);
     return;
   }
   _manifestLive = false;
+  (void)swapBake(_bakePending, false);
 
   log_i("[web.manifest] cache sig changed (or missing) — rebuilding to flash, sig=0x%08x",
         (unsigned)sig);

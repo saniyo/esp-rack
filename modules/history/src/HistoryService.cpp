@@ -10,6 +10,7 @@
 #include <WebManager.h>
 #include <esp_heap_caps.h>
 #include <power/PowerGuard.h>
+#include <power/WriteGate.h>
 
 #include <math.h>
 #include <stdio.h>
@@ -441,6 +442,42 @@ IHistorySeries* HistoryService::series(const HistSeriesDef& def, const char** wh
 
 // ===================== the "hist" task =====================
 
+namespace {
+
+// A slot of the flash write gate (power/WriteGate.h) per step of a series'
+// mount / retention / erase, given back as soon as the step's write is
+// over. One wait clock per operation (finish() ends it), so maxWaitMs
+// counts across its steps. Stopping: at once. take() false: PowerGuard
+// paused writes.
+class GateSteps {
+ public:
+  explicit GateSteps(const std::atomic<bool>* stop) : _stop(stop) {}
+  ~GateSteps() { finish(); }
+  bool take() {
+    release();
+    if (!_since) _since = ESPRack::WriteGate::now();
+    _held = ESPRack::WriteGate::enter(0, _stop, _since, &_at);
+    return _held;
+  }
+  void release() {
+    if (_held) ESPRack::WriteGate::leave(_at);
+    _held = false;
+  }
+  void finish() {
+    release();
+    _since = 0;
+  }
+  Series::Step step() { return {[this] { return take(); }, [this] { release(); }}; }
+
+ private:
+  const std::atomic<bool>* _stop;
+  bool _held = false;
+  uint32_t _at = 0;
+  uint32_t _since = 0;
+};
+
+}  // namespace
+
 void HistoryService::begin() {
   (void)_cfg.ensureLoaded();
   if (_server) {
@@ -458,6 +495,7 @@ void HistoryService::begin() {
 void HistoryService::end() {
   if (!_task) return;
   _stop = true;
+  ESPRack::WriteGate::nudge();  // a step waiting for the write gate goes now
   xTaskNotifyGive(_task);
   for (int i = 0; i < 300 && _running; ++i) vTaskDelay(pdMS_TO_TICKS(10));  // the task flushes, then leaves
   _task = nullptr;
@@ -489,8 +527,29 @@ void HistoryService::flushAll(bool force) {
     for (auto& s : _retired) list.push_back(s.get());
   }
   size_t written = 0;
+  bool paused = false;
+  // One wait clock for the pass, so maxWaitMs bounds it, not each chunk.
+  const uint32_t passSince = ESPRack::WriteGate::now();
   for (Series* s : list) {
-    if (s->mounted() && (force || s->queuedBytes())) written += s->flush(ESPFS, scratch, kScratch);
+    if (!s->mounted() || s->erasing() || (!force && !s->queuedBytes())) continue;
+    // A slot of the flash write gate (power/WriteGate.h) per chunk of up to
+    // kScratch bytes (the tiers take turns): a pause between a module's
+    // windows takes one write. What is queued now, not what comes meanwhile:
+    // the pass ends. Stopping: at once.
+    uint32_t left = s->queuedBytes();
+    while (left) {
+      ESPRack::WriteSlot slot(0, &_stop, passSince);
+      if (!slot.ok()) {  // PowerGuard paused writes: the rest stays queued
+        ++_skippedPower;
+        paused = true;
+        break;
+      }
+      const size_t w = s->flush(ESPFS, scratch, kScratch, 1);
+      if (!w) break;
+      written += w;
+      left = w >= left ? 0 : left - uint32_t(w);
+    }
+    if (paused) break;
   }
   free(scratch);
   _lastFlushMs = millis();
@@ -522,12 +581,22 @@ void HistoryService::run() {
       for (auto& s : _series) list.push_back(s.get());
       erase.swap(_eraseIds);
     }
+    // Mounting reads (a gate slot only to cut a torn tail); erasing removes
+    // files, a slot each. An erase a refused step left goes again next pass.
+    GateSteps steps(&_stop);
     for (Series* s : list) {
-      if (!s->mounted()) s->mount(ESPFS);
+      if (!s->mounted()) (void)s->mount(ESPFS, steps.step());
+      steps.finish();
     }
     for (const String& id : erase) {
       for (Series* s : list) {
-        if (id.isEmpty() || id == s->id()) s->erase(ESPFS);
+        if (!id.isEmpty() && id != s->id()) continue;
+        const bool done = s->erase(ESPFS, steps.step());
+        steps.finish();
+        if (!done) {  // the rest of this series' files next pass (not the series done already)
+          Lock l(_mx);
+          _eraseIds.push_back(String(s->id()));
+        }
       }
     }
     const time_t now = time(nullptr);
@@ -550,7 +619,8 @@ void HistoryService::run() {
       std::vector<uint64_t> need;
       for (Series* s : list) {
         if (s->def().maxBytes) {
-          s->retention(ESPFS, uint32_t(now), s->def().maxBytes);
+          s->retention(ESPFS, uint32_t(now), s->def().maxBytes, steps.step());
+          steps.finish();
         } else {
           pooled.push_back(s);
           need.push_back(s->needBytes());
@@ -558,7 +628,10 @@ void HistoryService::run() {
       }
       std::vector<uint32_t> share(pooled.size());
       ESPRack::hist::splitByNeed(capBytes(), need.data(), pooled.size(), share.data());
-      for (size_t i = 0; i < pooled.size(); ++i) pooled[i]->retention(ESPFS, uint32_t(now), share[i]);
+      for (size_t i = 0; i < pooled.size(); ++i) {
+        pooled[i]->retention(ESPFS, uint32_t(now), share[i], steps.step());
+        steps.finish();
+      }
     }
   }
   flushAll(true);  // shutdown, OTA, restart: what is waiting goes to flash (if power allows)

@@ -16,6 +16,7 @@
 // whole mothership module into every build that used system-status
 // (LIB-FIX-012). Without mothership the "Heap @ last checkin" row is skipped.
 #include <App.h>
+#include <power/WriteGate.h>
 #include <nvs.h>
 #include <power/PowerGuard.h>
 #include <IMothershipProvider.h>
@@ -371,6 +372,20 @@ void SystemStatus::buildForm(JsonObject& root,
         sta.add(web::Text("manifest_size", ms.c_str()).readOnly()
                     .label("UI manifest (cached)").icon("Storage"));
       }
+    }
+    // The flash write gate, once a module holds windows (power/WriteGate.h).
+    if (ESPRack::WriteGate::holders()) {
+      const ESPRack::WriteGateStats g = ESPRack::WriteGate::stats();
+      String w = ESPRack::WriteGate::inWindow() ? String("window open") : ESPRack::WriteGate::isFree() ? String("free")
+                                                                                                       : String("between windows");
+      w += " · " + String((unsigned)ESPRack::WriteGate::waiting()) + " waiting · writes " + String(g.grants) + " (" +
+           String(g.inPause) + " in pauses, " + String(g.forced) + " forced) · deferred " + String(g.deferred) +
+           " · windows " + String(g.windows) + " (" + String(g.expired) + " over the limit) · longest: wait " +
+           String(g.longestWaitMs) + " ms, write " + String(g.longestHoldMs) + " ms (free " +
+           String(g.longestFreeHoldMs) + " ms), overlap " +
+           String(g.longestOverlapMs) + " ms (" + String(g.overlaps) + ")";
+      sta.add(web::Text("storage_gate", w.c_str()).readOnly()
+                  .label("Storage: write gate").icon("Schedule"));
     }
     const size_t waiting = _app ? _app->configManager()->deferredCount() : 0;
     if (waiting) {

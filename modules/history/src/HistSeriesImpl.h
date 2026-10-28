@@ -15,6 +15,7 @@
 // Column keys, units and the series id passed in the definition must outlive
 // the series (string literals); the column and tier arrays are copied.
 
+#include <functional>
 #include <Arduino.h>
 #include <FS.h>
 #include <freertos/FreeRTOS.h>
@@ -57,13 +58,31 @@ class Series : public IHistorySeries {
   bool pressing() const;
 
   // ---- the "hist" task ----
-  void mount(fs::FS& fs);
-  size_t flush(fs::FS& fs, uint8_t* scratch, size_t scratchLen);  // bytes written
-  void retention(fs::FS& fs, uint32_t now, uint32_t maxBytes);
+  // Around each flash write of mount / retention / erase (a file removed, a
+  // torn tail cut): take() waits for the caller's write gate slot for that
+  // step (power/WriteGate.h), done() gives it back once the write is over
+  // (the reads that follow hold no slot). take() false: not now
+  // (PowerGuard): the step is skipped.
+  struct Step {
+    std::function<bool()> take;
+    std::function<void()> done;
+  };
+  // Reads without a step; only cutting a torn tail (after a power cut)
+  // takes one. false: that step was refused, the series stays unmounted.
+  bool mount(fs::FS& fs, const Step& step);
+  // Bytes written. budget: stop after this many (a chunk of up to
+  // scratchLen is never split): 1 = one chunk, a write gate slot each.
+  size_t flush(fs::FS& fs, uint8_t* scratch, size_t scratchLen, size_t budget = SIZE_MAX);
+  // A step per file removed; a refused step ends the pass (the next one goes on).
+  void retention(fs::FS& fs, uint32_t now, uint32_t maxBytes, const Step& step);
   // Bytes for the whole retention of all tiers (a put-series: what it has
   // on file plus its buffer), the weight of its share of the global cap.
   uint64_t needBytes() const;
-  void erase(fs::FS& fs);
+  // A step per file / directory removed. false: a step was refused, files
+  // are left: erase again later. The RAM state goes at the first call; until
+  // the files are gone too, flush() writes nothing (erasing()).
+  bool erase(fs::FS& fs, const Step& step);
+  bool erasing() const { return erasing_; }
 
   // ---- queries (any task) ----
   // The finest tier whose retention still covers `from` (else the coarsest).
@@ -92,7 +111,8 @@ class Series : public IHistorySeries {
   // A closed bucket / record of `tier`: queue it and roll it up.
   void closedLocked(uint8_t tier, uint32_t t, const double* v);
   void rollupLocked(uint8_t tier, uint32_t t, const double* v);
-  void scanTier(fs::FS& fs, uint8_t tier);
+  // false: a torn tail that needs cutting, and the step was refused.
+  bool scanTier(fs::FS& fs, uint8_t tier, const Step& step);
   void rebuildRollup(fs::FS& fs, uint8_t tier);
 
   char id_[hist::kMaxIdLen + 1] = "";
@@ -104,6 +124,8 @@ class Series : public IHistorySeries {
   uint8_t* rec_ = nullptr;    // one record of the widest tier
   mutable SemaphoreHandle_t mx_ = nullptr;
   bool mounted_ = false;
+  bool erasing_ = false;     // an erase is under way (hist task only)
+  uint8_t flushFrom_ = 0;    // the tier a budgeted flush() serves first (they take turns)
   bool psram_ = false;
   uint32_t full_ = 0, stale_ = 0;
   uint32_t ramBytes_ = 0;

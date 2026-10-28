@@ -33,6 +33,12 @@
 #include "Module.h"
 #include "ConfigManager.h"
 #include "WsManager.h"
+
+// The restart path writes the config saves the write gate put off; each
+// waits this long for a pause at most, then goes anyway.
+#ifndef ESPRACK_SHUTDOWN_WRITE_WAIT_MS
+#define ESPRACK_SHUTDOWN_WRITE_WAIT_MS 1000
+#endif
 #include "WebManager.h"
 
 class AsyncWebServer;

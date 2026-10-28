@@ -296,7 +296,7 @@ bool Series::pressing() const {
 
 // ---- files ----
 
-void Series::scanTier(fs::FS& fs, uint8_t tier) {
+bool Series::scanTier(fs::FS& fs, uint8_t tier, const Step& step) {
   Tier& z = tier_[tier];
   char dir[48];
   dirOf(tier, dir, sizeof dir);
@@ -325,6 +325,9 @@ void Series::scanTier(fs::FS& fs, uint8_t tier) {
       uint32_t t;
       while (good < n && recordAt(f, h.recSize, good, rec_, t)) ++good;
       const bool torn = good < n || hist::kSegHeaderLen + n * h.recSize != size;
+      // Cutting it copies the whole file: one step (it only follows a power
+      // cut). Refused: appending after a torn record would misalign it.
+      if (torn && !step.take()) return false;
       if (torn) {
         char tmp[84];
         snprintf(tmp, sizeof tmp, "%s.tmp", path);
@@ -345,6 +348,7 @@ void Series::scanTier(fs::FS& fs, uint8_t tier) {
           fs.remove(tmp);
           log_e("[hist] %s: could not cut its torn tail", path);
         }
+        step.done();
         n = good;
         f = fs.open(path, "r");
         if (!f) continue;
@@ -366,6 +370,7 @@ void Series::scanTier(fs::FS& fs, uint8_t tier) {
   z.oldestT = oldest;
   z.fileNewest = newest;
   if (newest > z.queuedNewest) z.queuedNewest = newest;
+  return true;
 }
 
 void Series::rebuildRollup(fs::FS& fs, uint8_t tier) {
@@ -390,16 +395,21 @@ void Series::rebuildRollup(fs::FS& fs, uint8_t tier) {
        &ctx);
 }
 
-void Series::mount(fs::FS& fs) {
-  for (uint8_t k = 0; k < def_.nTiers; ++k) scanTier(fs, k);
+bool Series::mount(fs::FS& fs, const Step& step) {
+  for (uint8_t k = 0; k < def_.nTiers; ++k) {
+    if (!scanTier(fs, k, step)) return false;
+  }
   for (uint8_t k = 1; k < def_.nTiers; ++k) rebuildRollup(fs, k);
   Lock l(mx_);
   mounted_ = true;
+  return true;
 }
 
-size_t Series::flush(fs::FS& fs, uint8_t* scratch, size_t scratchLen) {
+size_t Series::flush(fs::FS& fs, uint8_t* scratch, size_t scratchLen, size_t budget) {
   size_t written = 0;
-  for (uint8_t k = 0; k < def_.nTiers; ++k) {
+  if (erasing_) return 0;  // its files go: nothing appends to them meanwhile
+  for (uint8_t i = 0; i < def_.nTiers; ++i) {
+    const uint8_t k = uint8_t((flushFrom_ + i) % def_.nTiers);
     Tier& z = tier_[k];
     const uint16_t rs = z.lay.recSize;
     char dir[48];
@@ -482,6 +492,10 @@ size_t Series::flush(fs::FS& fs, uint8_t* scratch, size_t scratchLen) {
         log_e("[hist] %s: write failed, kept in RAM", id_);
         return written;
       }
+      if (written >= budget) {
+        flushFrom_ = uint8_t((k + 1) % def_.nTiers);  // the next call starts with the next tier
+        return written;
+      }
     }
   }
   return written;
@@ -497,7 +511,7 @@ uint64_t Series::needBytes() const {
   return need;
 }
 
-void Series::retention(fs::FS& fs, uint32_t now, uint32_t maxBytes) {
+void Series::retention(fs::FS& fs, uint32_t now, uint32_t maxBytes, const Step& step) {
   // The series' bytes go to its tiers by what each needs for its retention.
   uint32_t tierCap[hist::kMaxTiers] = {};
   if (maxBytes) {
@@ -529,26 +543,27 @@ void Series::retention(fs::FS& fs, uint32_t now, uint32_t maxBytes) {
     std::unique_ptr<bool[]> d(new bool[names.size()]);
     hist::retention(info.data(), info.size(), now, tiers_[k].keepS, tierCap[k], d.get());
     bool removed = false;
+    bool refused = false;
     for (size_t i = 0; i < names.size(); ++i) {
       if (!d[i]) continue;
+      if (!step.take()) {
+        refused = true;
+        break;
+      }
       char path[80];
       snprintf(path, sizeof path, "%s/%s", dir, names[i].c_str());
       removed |= fs.remove(path);
+      step.done();
     }
-    if (removed) scanTier(fs, k);
+    if (removed) (void)scanTier(fs, k, step);
+    if (refused) return;
   }
 }
 
-void Series::erase(fs::FS& fs) {
-  for (uint8_t k = 0; k < def_.nTiers; ++k) {
-    char dir[48];
-    dirOf(k, dir, sizeof dir);
-    for (const String& n : segments(fs, dir)) {
-      char path[80];
-      snprintf(path, sizeof path, "%s/%s", dir, n.c_str());
-      fs.remove(path);
-    }
-    fs.rmdir(dir);
+bool Series::erase(fs::FS& fs, const Step& step) {
+  // The RAM state goes at the first call (not again on a retry: records
+  // taken since stay); the files a step at a time.
+  for (uint8_t k = 0; !erasing_ && k < def_.nTiers; ++k) {
     Lock l(mx_);
     Tier& z = tier_[k];
     z.records = z.bytes = z.oldBytes = z.oldestT = 0;
@@ -557,9 +572,32 @@ void Series::erase(fs::FS& fs) {
     z.qHead = z.qLen = 0;
     if (z.acc) z.bucket.reset(0);
   }
+  erasing_ = true;
+  for (uint8_t k = 0; k < def_.nTiers; ++k) {
+    char dir[48];
+    dirOf(k, dir, sizeof dir);
+    for (const String& n : segments(fs, dir)) {
+      if (!step.take()) return false;
+      char path[80];
+      snprintf(path, sizeof path, "%s/%s", dir, n.c_str());
+      fs.remove(path);
+      step.done();
+    }
+    if (fs.exists(dir)) {
+      if (!step.take()) return false;
+      fs.rmdir(dir);
+      step.done();
+    }
+  }
   char p[48];
   snprintf(p, sizeof p, "/hist/%s", id_);
-  fs.rmdir(p);
+  if (fs.exists(p)) {
+    if (!step.take()) return false;
+    fs.rmdir(p);
+    step.done();
+  }
+  erasing_ = false;
+  return true;
 }
 
 uint8_t Series::pickTier(uint32_t from, uint32_t now) const {

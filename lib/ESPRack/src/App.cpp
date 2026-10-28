@@ -1,4 +1,5 @@
 #include "App.h"
+#include "power/FlashWriter.h"
 #include "NullSecurityManager.h"
 #include "ESPFS.h"
 #include "Features.h"
@@ -386,7 +387,9 @@ void App::begin() {
   }
   HeapMonitor::logSnapshot("boot:fs-mounted");
 
-  // 2. ConfigManager picks up its work directories under /config.
+  // 2. ConfigManager picks up its work directories under /config. The
+  // FlashWriter (deferred flash writes) learns of PowerGuard first.
+  FlashWriter::attach();
   configManager_.begin();
   HeapMonitor::logSnapshot("boot:cfgmgr-begun");
 
@@ -601,8 +604,10 @@ void App::loop() {
   // Time first: SNTP / operator samples, clock events.
   TimeSync::instance().loop();
 
-  // Config saves PowerGuard paused, once writes are allowed again.
-  configManager_.flushDeferred();
+  // A manifest re-bake the write gate put off: the FlashWriter says when
+  // the gate is free (a flag); built here, on the loop's stack.
+  webManager_.bakeIfDue();
+  FlashWriter::retry();  // only if its task could not start
 
   // A restart requested from another task is performed HERE, on the loop
   // task, so onShutdown() never runs concurrently with the same module's
@@ -721,12 +726,17 @@ bool App::runShutdownOnce(const char* reason) {
   // The clock keeps running across a soft reset: note that it was valid
   // until now, so the next boot can hold it (RtcHold).
   TimeSync::instance().flushHold();
+  // Config saves the write gate put off (the hooks' own included): written
+  // now, after a short wait for a pause at most, or they'd go with the restart.
+  configManager_.flushDeferredNow(ESPRACK_SHUTDOWN_WRITE_WAIT_MS);
   hooksDone_ = true;
   return true;
 }
 
 uint32_t App::shutdownGraceMs() const {
-  return (uint32_t)modules_.size() * ESPRACK_SHUTDOWN_BUDGET_MS + 2000;
+  // ... and the config saves the write gate put off, written after the hooks.
+  return (uint32_t)modules_.size() * ESPRACK_SHUTDOWN_BUDGET_MS + 2000 +
+         (uint32_t)configManager_.deferredCount() * ESPRACK_SHUTDOWN_WRITE_WAIT_MS;
 }
 
 uint32_t App::restartDeadlineMs() const {

@@ -10,7 +10,7 @@
 //   NvsRecord<Counters> rec("dio", "relay1", /*schema=*/1);
 //   Counters c{};
 //   rec.load(c);   // Ok / Migrated / Missing (fresh device) / Corrupt / NoStore
-//   rec.store(c);  // Ok / Unchanged / Skipped (PowerGuard) / Failed / NoStore
+//   rec.store(c);  // Ok / Unchanged / Skipped (the write gate) / Failed / NoStore
 //
 // Blob: {magic 'NVR1', schema u16, len u16, gen u32, crc32} + payload. NVS
 // replaces an item atomically, so a power cut during store() leaves the old
@@ -27,7 +27,7 @@
 #include <type_traits>
 
 #include "persist/Crc32.h"
-#include "power/PowerGuard.h"
+#include "power/WriteGate.h"
 
 namespace ESPRack {
 
@@ -42,7 +42,7 @@ enum class RecStatus : uint8_t {
 enum class StoreStatus : uint8_t {
   Ok,
   Unchanged,  // the same payload is already stored: nothing written
-  Skipped,    // PowerGuard paused writes
+  Skipped,    // the write gate said not now (PowerGuard, a module's window): store again later
   Failed,     // the NVS write failed
   NoStore     // NVS unavailable
 };
@@ -119,7 +119,10 @@ class NvsRecord {
   StoreStatus store(const T& v) {
     const uint32_t c = crc32Ieee(&v, sizeof(T));
     if (_hasLast && c == _lastCrc) return StoreStatus::Unchanged;
-    if (!PowerGuard::writesAllowed()) {
+    // The flash write gate (power/WriteGate.h): one NVS write, so a pause
+    // between a module's windows will do. Never waits here.
+    WritePass pass(WriteGate::now());
+    if (!pass.ok()) {
       ++_skips;
       return StoreStatus::Skipped;
     }
@@ -135,7 +138,7 @@ class NvsRecord {
 
   uint32_t generation() const { return _gen; }  // of the blob last loaded or stored
   uint32_t writes() const { return _writes; }   // blobs written since boot
-  uint32_t skips() const { return _skips; }     // stores PowerGuard paused
+  uint32_t skips() const { return _skips; }     // stores the write gate turned down
 
  private:
   const char* _ns;

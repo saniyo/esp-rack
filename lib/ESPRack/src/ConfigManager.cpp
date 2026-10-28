@@ -43,6 +43,7 @@ ConfigManager::ConfigManager(fs::FS* fs) : _fs(fs) {
 
 void ConfigManager::begin() {
   if (!_fs) return;
+  if (_writerJob < 0) _writerJob = ESPRack::FlashWriter::add("config", [this] { return writeDeferred(); });
 
   if (!_fs->exists("/config")) {
     (void)_fs->mkdir("/config");
@@ -166,11 +167,50 @@ size_t ConfigManager::deferredCount() const {
 }
 
 void ConfigManager::flushDeferred() {
-  if (!_anyDeferred || !ESPRack::PowerGuard::writesAllowed()) return;
-  _anyDeferred = false;
+  if (_anyDeferred) ESPRack::FlashWriter::kick(_writerJob);
+}
+
+// The FlashWriter task: each deferred save in two steps, a gate slot each
+// (the backup copy, then the file). The config lock is never held while
+// waiting for a slot: a save from async_tcp meanwhile isn't kept waiting.
+// One wait clock for the whole run, so maxWaitMs bounds it, not each step.
+uint32_t ConfigManager::writeDeferred() {
+  const uint32_t runSince = ESPRack::WriteGate::now();
+  bool power = false;
   for (auto& e : _entries) {
-    if (e && e->deferred()) (void)e->saveIfChanged(*this, "deferred");
+    if (!e || !e->deferred()) continue;
+    ESPRack::WriteSlot slot(0, nullptr, runSince);
+    if (!slot.ok()) {
+      power = true;
+      break;
+    }
+    const IConfigEntry::Backup b = e->backupForSave(*this);
+    if (b == IConfigEntry::Backup::Paused) {
+      power = true;
+      break;
+    }
+    if (b == IConfigEntry::Backup::Made) {
+      if (!slot.again()) {
+        power = true;
+        break;
+      }
+      (void)e->saveStep(*this, "deferred", true, true);
+    }
   }
+  _anyDeferred = deferredCount() > 0;
+  // Left over: PowerGuard paused writes (before or during a step), or a save
+  // that failed: run again when PowerGuard allows writes (or on the next kick).
+  return _anyDeferred ? ESPRack::FlashWriter::kOnPower : ESPRack::FlashWriter::kDone;
+}
+
+void ConfigManager::flushDeferredNow(uint32_t boundMs) {
+  for (auto& e : _entries) {
+    if (!e || !e->deferred()) continue;
+    ESPRack::WriteSlot slot(boundMs);
+    if (!slot.ok()) continue;  // PowerGuard: it stays deferred
+    (void)e->saveStep(*this, "deferred", true, false);  // makes its own backup copy
+  }
+  _anyDeferred = deferredCount() > 0;
 }
 
 bool ConfigManager::restoreFromBackup(const char* id) {
@@ -797,6 +837,15 @@ ConfigManager::LoadResult ConfigManager::loadOrRecover(const char* primary,
   return LoadResult::NeedDefaults;
 }
 
+void ConfigManager::backupPrimary(const char* primary, const char* backup) {
+  if (!backup || !primary || !fileExists(primary)) return;
+  mkdirsForFile(backup);
+  (void)removeIfExists(backup);
+  if (!copyFile(primary, backup)) {
+    log_e("[CFG] backup copy %s -> %s failed (continuing)", primary, backup);
+  }
+}
+
 bool ConfigManager::atomicWrite(const char* primary,
                                 const char* backup,
                                 const char* /*tmp*/,
@@ -828,14 +877,9 @@ bool ConfigManager::atomicWrite(const char* primary,
 
   mkdirsForFile(primary);
 
-  // Best-effort backup of the previous primary BEFORE overwriting it.
-  if (backup && fileExists(primary)) {
-    mkdirsForFile(backup);
-    (void)removeIfExists(backup);
-    if (!copyFile(primary, backup)) {
-      log_e("[CFG] backup copy %s -> %s failed (continuing)", primary, backup);
-    }
-  }
+  // Best-effort backup of the previous primary BEFORE overwriting it
+  // (null: done already, as the FlashWriter's first step).
+  backupPrimary(primary, backup);
 
   uint32_t crc = crc32OfJson(data);
   uint32_t ts  = nowTs();
