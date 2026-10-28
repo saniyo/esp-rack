@@ -121,6 +121,8 @@ constexpr const char* HistLiveLabel = "hlive";        // trend — the Live choi
 constexpr const char* HistSince     = "hsince";       // trend — a state key with the epoch the Live data starts at
 constexpr const char* Zero          = "y0";           // trend — 0 always on the y axis, with a zero line
 constexpr const char* Height        = "hgt";          // trend — plot height, px (default 400)
+constexpr const char* Overlay       = "ovl";          // trend — "back+front|…": bars drawn over each other
+constexpr const char* TipKey        = "tip";          // trend — a row key whose text the tooltip adds
 
 // Progress.
 constexpr const char* MaxKey        = "maxKey";       // progress — max from a sibling key

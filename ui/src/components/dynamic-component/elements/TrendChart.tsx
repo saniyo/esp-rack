@@ -270,6 +270,7 @@ interface CustomTooltipProps {
   hoveredDataKey: string | null;
   formatLabel?: (label: any) => string;
   unit?: string;
+  tipKey?: string;  // the row's text key, shown under the values
 }
 
 // Recharts v3 removed the `coordinate` prop from the tooltip content payload
@@ -283,8 +284,10 @@ const CustomTooltipComponent: React.FC<CustomTooltipProps> = ({
   hoveredDataKey,
   formatLabel,
   unit,
+  tipKey,
 }) => {
   if (active && payload && payload.length) {
+    const tipText = tipKey ? payload[0]?.payload?.[tipKey] : undefined;
     // Якщо користувач "наводить" на конкретну серію (Bar), можемо відфільтрувати
     const filteredPayload = hoveredDataKey
       ? payload.filter((entry: any) => entry.dataKey === hoveredDataKey)
@@ -333,6 +336,9 @@ const CustomTooltipComponent: React.FC<CustomTooltipProps> = ({
             {entry.name}: {entry.value === null || entry.value === undefined ? 'no data' : `${entry.value}${unit ? ` ${unit}` : ''}`}
           </span>
         ))}
+        {typeof tipText === 'string' && tipText && (
+          <span style={{ display: 'block', marginTop: 4, fontSize: '12px', opacity: 0.8 }}>{tipText}</span>
+        )}
       </div>
     );
   }
@@ -648,7 +654,15 @@ const TrendChart: React.FC<TrendChartProps> = ({ field, value = [], getSibling }
     storageKey: `trendHist:${window.location.pathname}:${field.label}`,
   });
   const plotRows = useMemo(() => (hist.active ? hist.rows || [] : chartDataForLine), [hist.active, hist.rows, chartDataForLine]);
-  const plotConfigs = hist.active ? baseLineConfigs : mergedLineConfigs;
+  // In history: the declared lines the series has data for (a live-only
+  // line, e.g. an overlay's back bars, is left out).
+  const plotConfigs = useMemo(
+    () =>
+      hist.active
+        ? baseLineConfigs.filter((c) => (hist.rows || []).some((r) => c.dataKey in r))
+        : mergedLineConfigs,
+    [hist.active, hist.rows, baseLineConfigs, mergedLineConfigs]
+  );
   // A history time series: x = epoch s on a number axis over the period.
   const histTime = hist.active && hist.timeSeries;
   const xAxisProps = useMemo(() => {
@@ -734,22 +748,35 @@ const TrendChart: React.FC<TrendChartProps> = ({ field, value = [], getSibling }
     ));
   }, [plotConfigs, hiddenLines]);
 
+  // ovl=back+front: the back bars on a hidden axis of their own, so both lay
+  // out across the whole category and sit over each other (front drawn last).
+  const overlayBack = useMemo(() => {
+    const back = new Set<string>();
+    const pairs: string[][] = Array.isArray(om.ovl?.value) ? om.ovl.value : [];
+    pairs.forEach((g) => back.add(g[0]));
+    return back;
+  }, [om.ovl]);
   const renderBars = useMemo(() => {
     // stack=a+b|c+d: bars of one group share a stackId.
     const stackOf: Record<string, string> = {};
     stacks.forEach((g, i) => g.forEach((k) => { stackOf[k] = `s${i}`; }));
-    return plotConfigs.map((cfg) => (
+    const ordered = [
+      ...plotConfigs.filter((c) => overlayBack.has(c.dataKey)),
+      ...plotConfigs.filter((c) => !overlayBack.has(c.dataKey)),
+    ];
+    return ordered.map((cfg) => (
       <Bar
         key={cfg.dataKey}
         dataKey={cfg.dataKey}
         name={cfg.readableLabel}
         fill={cfg.color}
         stackId={stackOf[cfg.dataKey]}
+        xAxisId={overlayBack.has(cfg.dataKey) ? 'ovl' : undefined}
         hide={hiddenLines[cfg.dataKey]}
         isAnimationActive={false}
       />
     ));
-  }, [plotConfigs, hiddenLines, stacks]);
+  }, [plotConfigs, hiddenLines, stacks, overlayBack]);
 
   // refl=key:color:label — a horizontal line at the sibling's live value;
   // hidden while that value is missing or not a number.
@@ -954,6 +981,7 @@ const TrendChart: React.FC<TrendChartProps> = ({ field, value = [], getSibling }
                   hoveredDataKey={hoveredDataKey}
                   formatLabel={tipLabel}
                   unit={unit}
+                  tipKey={om.tip?.value as string | undefined}
                 />
               )}
             />
@@ -992,6 +1020,7 @@ const TrendChart: React.FC<TrendChartProps> = ({ field, value = [], getSibling }
           >
             <CartesianGrid strokeDasharray="3 3" />
             <XAxis dataKey={xAxisKey} {...xAxisProps} />
+            {overlayBack.size > 0 && <XAxis xAxisId="ovl" dataKey={xAxisKey} hide />}
             <YAxis domain={yDomainZ} />
             {zeroAxis && <ReferenceLine y={0} stroke="#888" />}
             <Tooltip
@@ -1001,6 +1030,7 @@ const TrendChart: React.FC<TrendChartProps> = ({ field, value = [], getSibling }
                   hoveredDataKey={hoveredDataKey}
                   formatLabel={tipLabel}
                   unit={unit}
+                  tipKey={om.tip?.value as string | undefined}
                 />
               )}
             />
@@ -1049,6 +1079,8 @@ const TrendChart: React.FC<TrendChartProps> = ({ field, value = [], getSibling }
     hist.available,
     xAxisProps,
     tipLabel,
+    overlayBack,
+    om.tip,
     renderLines,
     renderBars,
     handleLegendClick,

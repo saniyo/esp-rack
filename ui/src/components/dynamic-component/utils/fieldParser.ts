@@ -20,7 +20,7 @@ export const fieldConfigurations = {
   // reference lines at sibling values; vrefl: vertical ones; ymin/ymax/ypad:
   // the y axis range; hist/hper/hdef/hlive/unit: history mode (a period
   // switch reading the History module's series).
-  trend: { options: ['to', 'xAxis', 'lines', 'legend', 'tooltip', 'maxPoints', 'mode', 'xFmt', 'cat', 'stack', 'refl', 'vrefl', 'ymin', 'ymax', 'ypad', 'hist', 'hper', 'hdef', 'hlive', 'hsince', 'y0', 'hgt', 'unit', 'icon', 'color', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const },
+  trend: { options: ['to', 'xAxis', 'lines', 'legend', 'tooltip', 'maxPoints', 'mode', 'xFmt', 'cat', 'stack', 'refl', 'vrefl', 'ymin', 'ymax', 'ypad', 'hist', 'hper', 'hdef', 'hlive', 'hsince', 'y0', 'hgt', 'ovl', 'tip', 'unit', 'icon', 'color', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const },
   files: { options: ['r', 'rw', 'base', 'initial', 'uploadBase', 'icon', 'color', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const },
   upload: { options: ['r', 'rw', 'url', 'accept', 'icon', 'color', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const },
   // table supports two render modes via layout:
@@ -354,6 +354,16 @@ const optionParsers: Record<string, (option: string) => ParsedFieldOption> = {
       .map((g) => g.split('+').map((k) => k.trim()).filter(Boolean))
       .filter((g) => g.length > 0),
   }),
+  // trend: "back+front|…" -> [["back","front"], …]: bars over each other.
+  ovl: (opt) => ({
+    key: 'ovl',
+    value: getAfter(opt, 'ovl')
+      .split('|')
+      .map((g) => g.split('+').map((k) => k.trim()).filter(Boolean))
+      .filter((g) => g.length === 2),
+  }),
+  // trend: a row's text key the tooltip adds.
+  tip: (opt) => ({ key: 'tip', value: getAfter(opt, 'tip').trim() }),
   // trend: "key:color:label|…" (label may be empty).
   refl: (opt) => ({ key: 'refl', value: parseRefLines(getAfter(opt, 'refl')) }),
   vrefl: (opt) => ({ key: 'vrefl', value: parseRefLines(getAfter(opt, 'vrefl')) }),

@@ -88,6 +88,13 @@ describe('Trend', () => {
     expect(lines).not.toContain('hist=');
   });
 
+  it('reads overlaid bars and the tooltip key', () => {
+    const p = parseFieldOptions('p1_cells', 'trend;r;mode=barChart;xAxis=c;cat;lines=mv:color=#1e88e5,type=monotone;mv_hi:color=#90caf9,type=monotone;ovl=mv_hi+mv;tip=note');
+    expect(p.optionMap.ovl?.value).toEqual([['mv_hi', 'mv']]);
+    expect(p.optionMap.tip?.value).toBe('note');
+    expect((p.optionMap.lines?.value as string).split(';')).toHaveLength(2);
+  });
+
   it('reads the zero line, the height and the live start key', () => {
     const p = parseFieldOptions('bt_i', 'trend;r;mode=lineChart;xAxis=timestamp;lines=i:color=#1e88e5,type=monotone;y0=1;hgt=160;hsince=st_since');
     expect(p.optionMap.y0?.value).toBe(true);

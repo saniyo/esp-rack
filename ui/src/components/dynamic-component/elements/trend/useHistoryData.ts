@@ -145,8 +145,9 @@ export function useHistoryData(opts: {
       const col = info.cols.find((c) => c.key === base);
       const whole = !spec.includes('[');
       return { line: l, spec, col, width: whole ? col?.width ?? 1 : 1 };
-    });
+    }).filter((c) => !!c.col);  // a line the series has no column for is live only
   }, [info, lines]);
+  const unmatched = !!info && lines.length > 0 && columns.length === 0;
   const isSum = columns.some((c) => c.col?.agg === 'sum');
   const unit = columns.find((c) => c.col?.unit)?.col?.unit;
 
@@ -174,8 +175,8 @@ export function useHistoryData(opts: {
     setGap(null);
     setError(undefined);
     const wholeOverTime = !isCategory && columns.some((c) => c.width > 1);
-    if (pl.empty || columns.some((c) => !c.col) || wholeOverTime) {
-      if (columns.some((c) => !c.col)) setError("This chart's history no longer matches the series");
+    if (pl.empty || unmatched || wholeOverTime) {
+      if (unmatched) setError("This chart's history no longer matches the series");
       else if (wholeOverTime) setError('Over time a line needs one value: name an element or [avg]');
       setRows(null);
       queryRef.current = null;
@@ -252,7 +253,7 @@ export function useHistoryData(opts: {
       .finally(() => !ctl.signal.aborted && setLoading(false));
     return () => ctl.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active, info, list, period, pickedDay, columns, dayStart, isCategory]);
+  }, [active, info, list, period, pickedDay, columns, unmatched, dayStart, isCategory]);
 
   // ── words ──
   const dm = (t: number) => {

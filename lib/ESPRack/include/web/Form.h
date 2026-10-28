@@ -329,6 +329,18 @@ class Trend : public FieldSpec<Trend> {
     if (c && c[0]) { _stack += '+'; _stack += c; }
     return *this;
   }
+  // Bars of `back` and `front` in the same place of a category, over each
+  // other (not side by side): `back` behind, at the same width. A row
+  // without `back` shows `front` alone.
+  Trend& overlay(const char* back, const char* front) {
+    if (!back || !front || strpbrk(back, "+|;:,=") || strpbrk(front, "+|;:,=")) return *this;
+    if (_ovl.length()) _ovl += '|';
+    _ovl += back; _ovl += '+'; _ovl += front;
+    return *this;
+  }
+  // A text key of the rows the tooltip shows under the values (e.g. which
+  // device measured what).
+  Trend& tipKey(const char* key)        { return safe(Opt::TipKey, key, ",;:|="); }
   // Horizontal line at y = the sibling state key's live value. No ':' '|' ';'
   // in label.
   Trend& refLine(const char* key_, const char* color, const char* label = nullptr) {
@@ -412,6 +424,7 @@ class Trend : public FieldSpec<Trend> {
     if (_stack.length()) { o += ';'; o += Opt::Stack; o += '='; o += _stack; }
     if (_refl.length()) { o += ';'; o += Opt::RefLine; o += '='; o += _refl; }
     if (_vrefl.length()) { o += ';'; o += Opt::VRefLine; o += '='; o += _vrefl; }
+    if (_ovl.length()) { o += ';'; o += Opt::Overlay; o += '='; o += _ovl; }
     if (_y & 1) num(o, Opt::YMin, _yMin);
     if (_y & 2) num(o, Opt::YMax, _yMax);
     if (_y & 4) num(o, Opt::YPad, _yPad);
@@ -436,7 +449,7 @@ class Trend : public FieldSpec<Trend> {
   String _lines;
   const char* _xFmt = nullptr;
   bool _cat = false;
-  String _stack, _refl, _vrefl;
+  String _stack, _refl, _vrefl, _ovl;
   double _yMin = 0, _yMax = 0, _yPad = 0;
   uint8_t _y = 0;  // bits: yMin, yMax, yAuto set
   bool _legend = false, _tooltip = false;
