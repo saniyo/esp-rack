@@ -6,25 +6,18 @@ import { AuthenticationContext } from '../../contexts/authentication';
 import { RequiredChildrenProps } from '../../utils';
 import { FeaturesContext } from '../../contexts/features';
 import { useManifest } from '../../contexts/manifest';
+import { startPath } from '../../utils/startPage';
 
 const RequireUnauthenticated: FC<RequiredChildrenProps> = ({ children }) => {
   const { features } = useContext(FeaturesContext);
   const { manifest } = useManifest();
   const authenticationContext = useContext(AuthenticationContext);
 
-  // Manifest-aware default landing — first menu-visible feature in
-  // manifest order, with the router-match wildcard stripped (Navigate
-  // takes a literal URL, the "/system/*" pattern would land us on a
-  // URL containing a literal asterisk which matches nothing). Falls
-  // back to /system on the empty-manifest edge case so we never feed
-  // Navigate '/' (which would bounce right back through this guard
-  // and produce a white-screen loop).
-  const defaultPath = useMemo(() => {
-    const first = manifest.features.find(
-      (f) => f.menu?.label && !f.menu?.hidden && f.route
-    );
-    return (first?.route ?? '/system').replace(/\/\*$/, '');
-  }, [manifest]);
+  // The start page, the same everywhere (utils/startPage): the landing
+  // feature, else the role feature, else the first menu item. Never '/'
+  // (it would bounce right back through this guard): /system when the
+  // manifest is empty.
+  const defaultPath = useMemo(() => startPath(manifest.features), [manifest]);
 
   return (
     authenticationContext.me ?
