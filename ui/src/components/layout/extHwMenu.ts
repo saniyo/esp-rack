@@ -29,13 +29,15 @@ export const hwOf = (model: ExtHwModules, f: FeatureEntry): ExtHwEntry | undefin
   (f.menu?.hw ? model.byId.get(f.menu.hw) : undefined);
 
 // The menu node that gets this page's "External Hardware" group: the owner,
-// else System. undefined: not a hardware page. hasNode: a menu node exists.
+// else System. undefined: not a hardware page, or one the composition placed
+// (menu.parent: under(), uses, placeMenu), which goes straight under that
+// parent. hasNode: a menu node exists.
 export const hwGroupParent = (
   model: ExtHwModules,
   f: FeatureEntry,
   hasNode: (id: string) => boolean,
 ): string | undefined => {
-  if (!f.menu?.hw) return undefined;
+  if (!f.menu?.hw || f.menu?.parent) return undefined;
   const owner = hwOf(model, f)?.owner;
   return owner && hasNode(owner) ? owner : SYSTEM_FEATURE_ID;
 };

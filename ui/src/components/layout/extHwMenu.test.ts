@@ -34,6 +34,10 @@ describe('extHw placement', () => {
   it('falls back to System when the owner has no menu entry', () => {
     expect(hwGroupParent(m, orphan, has)).toBe('system');
   });
+  it('puts a placed instance page straight under its parent', () => {
+    const placed = { ...meter, menu: { ...meter.menu, parent: 'plain' } } as any;
+    expect(hwGroupParent(m, placed, has)).toBeUndefined();
+  });
   it('leaves other pages alone', () => {
     expect(hwGroupParent(m, plain, has)).toBeUndefined();
   });
