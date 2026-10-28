@@ -216,7 +216,7 @@ void SystemStatus::buildForm(JsonObject& root,
         strftime(when, sizeof when, "%Y-%m-%d %H:%M", &lt);
       }
       r["when"] = when;
-      r["reason"] = h.reason;
+      r["reason"] = String(h.reason);  // a copy: the array is gone before the reply is sent
       r["cls"] = ESPRack::bootClassName(h.bootClass);
       char prev[24] = "—";
       if (h.prevUpS) {
@@ -396,7 +396,7 @@ void SystemStatus::buildForm(JsonObject& root,
         JsonArray rows = sta.rowsOf("rtos_tasks");
         for (UBaseType_t i = 0; i < got; i++) {
           JsonObject r = rows.createNestedObject();
-          r["name"]       = tasks[i].pcTaskName;
+          r["name"]       = String(tasks[i].pcTaskName);  // a copy: the task may end before the send
           r["prio"]       = (uint32_t)tasks[i].uxCurrentPriority;
           r["stack_free"] = (uint32_t)tasks[i].usStackHighWaterMark;
         }
