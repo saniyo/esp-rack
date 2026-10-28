@@ -61,12 +61,32 @@
 // holds one lwIP PCB (16-slot pool shared with HTTP and /ws/presence) plus
 // its AsyncWebSocket queue, so the no-PSRAM C3 gets a conservative default.
 // Override per consumer: -D ESPRACK_WS_MAX_CLIENTS=<n>.
+//
+// A client over the cap (or over ESPRACK_WS_MAX_PER_CHANNEL on the channel
+// it subscribes to) closes one that nobody looks at, never a visible tab.
+// The UI says whether its tab is shown ({type:"vis",hidden}); a tab hidden
+// for 30 s closes its socket itself (usePageActive). So the one closed is:
+//   0. first, at connect: the tab's own older socket (the page names its tab
+//      in the URL, ?tab=), e.g. one a Wi-Fi drop left behind;
+//   1. a client that missed its pong (dead; the pong timeout would take
+//      it a minute later), the quietest first;
+//   2. a hidden tab, the one hidden longest;
+//   3. else a client that never said (an older UI build, a script), the one
+//      that sent nothing (sub, unsub, a write) for the longest time; pongs
+//      do not count, a browser answers them for a background tab too;
+//   4. else, all the others being in view: the newcomer itself is refused.
+// Closed with 1000 "evicted" / "busy", which Sockette does not retry: the
+// UI shows Busy and tries again when the tab is shown or used, or after a
+// minute. cleanupClients (one above the cap) only reaps closed clients.
 #ifndef ESPRACK_WS_MAX_CLIENTS
 #if defined(CONFIG_IDF_TARGET_ESP32C3)
 #define ESPRACK_WS_MAX_CLIENTS 3
 #else
 #define ESPRACK_WS_MAX_CLIENTS 6
 #endif
+#endif
+#ifndef ESPRACK_WS_MAX_PER_CHANNEL
+#define ESPRACK_WS_MAX_PER_CHANNEL 4
 #endif
 
 // Per-client back-pressure threshold for outbound broadcasts. When a
@@ -311,6 +331,17 @@ class WsManager {
   bool hasClients(const String& channel) const { return subscriberCount(channel) > 0; }
   size_t clientCount(const String& channel) const { return subscriberCount(channel); }
 
+  // For Resources: clients now (not counting ones being closed), the most
+  // since boot, and how many were closed by the caps / as stuck.
+  size_t totalClients() const {
+    ClientsLock g(_clientsMx);
+    return liveCount();
+  }
+  size_t peakClients() const { return _peakClients; }
+  uint32_t evictions() const { return _evictions; }
+  uint32_t refusals() const { return _refusals; }
+  uint32_t stuckEvictions() const { return _stuckEvictions; }
+
   // Serialise the registry for the admin Clients/Endpoints tabs: every channel
   // with the clients currently SUBSCRIBED to it (id, ip, age, seconds since last
   // rx/tx). Shape kept compatible with the old per-endpoint layout
@@ -348,6 +379,7 @@ class WsManager {
         c["last_tx_s"] = kv.second.lastTxMs == 0 ? (uint32_t)0 : sinceSec(kv.second.lastTxMs);
         c["drops"]     = kv.second.droppedFrames;
         c["slow_s"]    = sinceSec(kv.second.slowSinceMs);
+        c["view"]      = kv.second.hidden < 0 ? "?" : kv.second.hidden ? "hidden" : "shown";
       }
       j["count"] = cnt;
     }
@@ -356,6 +388,11 @@ class WsManager {
     for (auto& kv : _clients) totalDropped += kv.second.droppedFrames;
 
     root["total_clients"]  = _clients.size();   // distinct connections on the one socket
+    root["max_clients"]    = (uint32_t)ESPRACK_WS_MAX_CLIENTS;
+    root["max_per_channel"] = (uint32_t)ESPRACK_WS_MAX_PER_CHANNEL;
+    root["peak_clients"]   = (uint32_t)_peakClients;
+    root["evictions"]      = _evictions;
+    root["refusals"]       = _refusals;
     root["avg_rtt_ms"]     = _avgRtt;
     root["ping_interval_s"] = _pingIntervalSec;
     root["pong_timeout_ms"] = _pongTimeoutMs;
@@ -381,7 +418,9 @@ class WsManager {
 
   // Processing queues (call from loop)
   void processAllQueues() {
-    if (_ws) _ws->cleanupClients(ESPRACK_WS_MAX_CLIENTS);  // cap + reap closed clients
+    // Reap closed clients. The cap itself is WS_EVT_CONNECT's: one above it,
+    // so this can't close a second client while that one picks its victim.
+    if (_ws) _ws->cleanupClients(ESPRACK_WS_MAX_CLIENTS + 1);
     processRx();
     processTx();
     // Keepalive — inline on the queue-pump task so ping/eviction share the
@@ -476,6 +515,7 @@ class WsManager {
     String   remoteIp;
     uint32_t connectedAtMs{0};
     uint32_t lastRxMs{0};
+    uint32_t lastAppRxMs{0};     // last frame from the page itself (not a pong)
     uint32_t lastTxMs{0};
     uint32_t droppedFrames{0};   // frames skipped due to per-client back-pressure
     uint32_t slowSinceMs{0};     // since when this client's queue is full (0 = it moves)
@@ -483,6 +523,10 @@ class WsManager {
     // Resolved once at connect (see setSecurityManager).
     WebAuthLevel level{WebAuthLevel::Admin};
     bool canWrite{true};
+    bool evicting{false};        // closed by a cap, waiting for its disconnect
+    int8_t hidden{-1};           // the page says: 1 hidden, 0 shown, -1 never said
+    uint32_t hiddenSinceMs{0};
+    uint32_t tab{0};             // the page's tab (see tabHash), 0 unknown
   };
 
   // --------- Channel type-erasure ---------
@@ -561,22 +605,37 @@ class WsManager {
     const void* tcp = nullptr;
     WebAuthLevel level = WebAuthLevel::Public;
     bool canWrite = false;
+    uint32_t tab = 0;  // the page's ?tab= (hashed), 0 none
     uint32_t atMs = 0;
   };
   static constexpr size_t kPendingIdentities = 6;
   static constexpr uint32_t kPendingIdentityTtlMs = 10000;
   PendingIdentity _pendingIds[kPendingIdentities];
 
+  // FNV-1a of the page's tab id; 0 is kept for "none".
+  static uint32_t tabHash(const String& s) {
+    uint32_t h = 2166136261u;
+    for (size_t i = 0; i < s.length(); ++i) h = (h ^ (uint8_t)s[i]) * 16777619u;
+    return h ? h : 1;
+  }
+
   // Handshake handler (async_tcp task): the request is valid here.
   bool stashIdentity(AsyncWebServerRequest* r) {
-    if (!_sm || !r) return true;
-    Authentication au = _sm->authenticateRequest(r);  // may be slow: outside the lock
+    if (!r) return true;
     PendingIdentity p;
     p.tcp = r->client();
-    p.level = !au.authenticated ? WebAuthLevel::Public
-            : (au.user && au.user->admin) ? WebAuthLevel::Admin
-            : WebAuthLevel::Authenticated;
-    p.canWrite = AuthenticationPredicates::IS_OPERATOR(au);
+    if (const AsyncWebParameter* t = r->getParam("tab")) {
+      if (t->value().length()) p.tab = tabHash(t->value());
+    }
+    if (_sm) {
+      Authentication au = _sm->authenticateRequest(r);  // may be slow: outside the lock
+      p.level = !au.authenticated ? WebAuthLevel::Public
+              : (au.user && au.user->admin) ? WebAuthLevel::Admin
+              : WebAuthLevel::Authenticated;
+      p.canWrite = AuthenticationPredicates::IS_OPERATOR(au);
+    } else if (!p.tab) {
+      return true;  // nothing to carry to the connect
+    }
     p.atMs = millis();
     {
       ClientsLock g(_clientsMx);
@@ -609,16 +668,24 @@ class WsManager {
     }
   }
 
-  // Caller holds _clientsMx. Unknown connection -> Public, no write (fail closed).
-  void takeIdentity(const void* tcp, WebAuthLevel& level, bool& canWrite) {
-    level = WebAuthLevel::Public;
-    canWrite = false;
+  // Caller holds _clientsMx. With a security manager, an unknown connection
+  // is Public, no write (fail closed); without one the caller's open
+  // defaults stay. `tab`: the page's tab, 0 if none.
+  void takeIdentity(const void* tcp, WebAuthLevel& level, bool& canWrite, uint32_t& tab) {
+    if (_sm) {
+      level = WebAuthLevel::Public;
+      canWrite = false;
+    }
+    tab = 0;
     const uint32_t now = millis();
     for (auto& p : _pendingIds) {
       if (!p.tcp || p.tcp != tcp) continue;
       if (now - p.atMs <= kPendingIdentityTtlMs) {
-        level = p.level;
-        canWrite = p.canWrite;
+        if (_sm) {
+          level = p.level;
+          canWrite = p.canWrite;
+        }
+        tab = p.tab;
       }
       p = PendingIdentity{};
       break;  // at most one entry per connection (stashIdentity dedupes)
@@ -656,6 +723,9 @@ class WsManager {
   std::map<uint32_t, unsigned long> _lastPong;
   uint32_t _lastHeartbeatMs{0};
   uint32_t _stuckEvictions{0};
+  uint32_t _evictions{0};
+  uint32_t _refusals{0};
+  size_t _peakClients{0};
 
   SemaphoreHandle_t _clientsMx = nullptr;
   struct ClientsLock {
@@ -697,6 +767,68 @@ class WsManager {
   ChannelBase* findChannel(const String& name) {
     auto it = _channels.find(name);
     return (it == _channels.end()) ? nullptr : it->second;
+  }
+
+  // Under _clientsMx. Whether a roster entry still counts: not closed by a
+  // cap, and still connected for the library (client() is null once it is
+  // closing, e.g. the page closed it; the same rule as its count()).
+  bool isLive(const std::pair<const uint32_t, WsClientInfo>& kv) const {
+    return !kv.second.evicting && _ws && _ws->client(kv.first);
+  }
+
+  // Under _clientsMx. Live clients (on `channel` if given).
+  size_t liveCount(const String* channel = nullptr) const {
+    size_t n = 0;
+    for (auto& kv : _clients) {
+      if (!isLive(kv)) continue;
+      if (channel && kv.second.subs.find(*channel) == kv.second.subs.end()) continue;
+      n++;
+    }
+    return n;
+  }
+
+  // Under _clientsMx. The client to close for `keep` (see the cap note at
+  // the top; on `channel` if given), marked evicting; `keep` itself when no
+  // other one may go.
+  uint32_t pickEviction(const String* channel, uint32_t keep) {
+    const uint32_t now = millis();
+    // Silent past one ping and a margin: it missed its pong.
+    const uint32_t deadMs = _pingIntervalSec ? _pingIntervalSec * 1000u + 5000u : 0;
+    WsClientInfo* dead = nullptr;
+    WsClientInfo* hidden = nullptr;
+    WsClientInfo* unknown = nullptr;
+    for (auto& kv : _clients) {
+      WsClientInfo& ci = kv.second;
+      if (kv.first == keep || !isLive(kv)) continue;
+      if (channel && ci.subs.find(*channel) == ci.subs.end()) continue;
+      if (deadMs && now - ci.lastRxMs > deadMs) {
+        if (!dead || now - ci.lastRxMs > now - dead->lastRxMs) dead = &ci;
+      } else if (ci.hidden > 0) {
+        if (!hidden || now - ci.hiddenSinceMs > now - hidden->hiddenSinceMs) hidden = &ci;
+      } else if (ci.hidden < 0) {
+        if (!unknown || now - ci.lastAppRxMs > now - unknown->lastAppRxMs) unknown = &ci;
+      }
+    }
+    WsClientInfo* victim = dead ? dead : hidden ? hidden : unknown;
+    if (!victim) {
+      auto self = _clients.find(keep);
+      if (self != _clients.end()) self->second.evicting = true;
+      return keep;
+    }
+    victim->evicting = true;
+    return victim->id;
+  }
+
+  // Closes a client picked by pickEviction. Takes _clientsMx (recursive):
+  // held, the client can't be freed between the lookup and close(); its
+  // disconnect event waits for the lock.
+  void evict(uint32_t cid, bool refused, const char* why) {
+    if (!cid || !_ws) return;
+    ClientsLock g(_clientsMx);
+    if (refused) ++_refusals;
+    else ++_evictions;
+    log_w("[ws] client %u %s: %s", (unsigned)cid, refused ? "refused" : "closed", why);
+    if (AsyncWebSocketClient* c = _ws->client(cid)) c->close(1000, refused ? "busy" : "evicted");
   }
 
   size_t subscriberCount(const String& channel) const {
@@ -837,19 +969,34 @@ class WsManager {
         ChannelBase* base = ch.length() ? findChannel(ch) : nullptr;
         const bool known = clientRights(it->cid, level, canWrite);
 
-        if (ch.length() > 0) {
+        if (strcmp(type, "vis") == 0) {
+          // The page is shown or hidden (see the cap note at the top).
+          ClientsLock g(_clientsMx);
+          auto cit = _clients.find(it->cid);
+          if (cit != _clients.end()) {
+            const int8_t h = (root["hidden"] | false) ? 1 : 0;
+            if (h && cit->second.hidden != 1) cit->second.hiddenSinceMs = millis();
+            cit->second.hidden = h;
+          }
+        } else if (ch.length() > 0) {
           if (strcmp(type, "sub") == 0) {
             // Subscribing to an unknown channel stays allowed (no data
             // flows until it exists); a known channel needs the level.
             if (!known || (base && !levelAtLeast(level, base->level))) {
               log_w("[ws] sub denied: cid=%u ch=%s", (unsigned)it->cid, ch.c_str());
             } else {
+              uint32_t victim = 0;
               {
                 ClientsLock g(_clientsMx);
                 auto cit = _clients.find(it->cid);
-                if (cit != _clients.end()) cit->second.subs.insert(ch);
+                if (cit != _clients.end()) {
+                  cit->second.subs.insert(ch);
+                  if (liveCount(&ch) > ESPRACK_WS_MAX_PER_CHANNEL) victim = pickEviction(&ch, it->cid);
+                  if (victim == it->cid) cit->second.subs.erase(ch);
+                }
               }
-              pushSnapshot(ch, it->cid);   // enqueues a unicast; processTx (below) sends it
+              evict(victim, victim == it->cid, "over the per-channel cap");
+              if (victim != it->cid) pushSnapshot(ch, it->cid);   // a unicast; processTx (below) sends it
             }
           } else if (strcmp(type, "unsub") == 0) {
             ClientsLock g(_clientsMx);
@@ -884,6 +1031,8 @@ class WsManager {
                      size_t len) {
     const uint32_t id = c->id();
     bool justConnected = false;
+    uint32_t victim = 0;
+    std::vector<uint32_t> replaced;  // this tab's older sockets
 
     // The connection's identity was resolved at the handshake (stashIdentity).
     // `a` on WS_EVT_CONNECT is the upgrade request, already DELETED by
@@ -905,12 +1054,22 @@ class WsManager {
           info.remoteIp = c->remoteIP().toString();
           info.connectedAtMs = millis();
           info.lastRxMs = millis();
+          info.lastAppRxMs = millis();
           info.lastTxMs = 0;
-          if (_sm) takeIdentity(c->client(), connLevel, connCanWrite);
+          takeIdentity(c->client(), connLevel, connCanWrite, info.tab);
           info.level = connLevel;
           info.canWrite = connCanWrite;
+          if (info.tab) {
+            for (auto& kv : _clients) {
+              if (kv.second.tab != info.tab || !isLive(kv)) continue;
+              kv.second.evicting = true;
+              replaced.push_back(kv.first);
+            }
+          }
           _clients[id] = info;   // empty subs — state flows only after an explicit sub
           justConnected = true;
+          if (liveCount() > ESPRACK_WS_MAX_CLIENTS) victim = pickEviction(nullptr, id);
+          if (liveCount() > _peakClients) _peakClients = liveCount();
         } break;
 
         case WS_EVT_PONG: {
@@ -929,7 +1088,7 @@ class WsManager {
         case WS_EVT_DATA: {
           _lastPong[id] = millis();
           auto cit = _clients.find(id);
-          if (cit != _clients.end()) cit->second.lastRxMs = millis();
+          if (cit != _clients.end()) cit->second.lastRxMs = cit->second.lastAppRxMs = millis();
           AwsFrameInfo* info = reinterpret_cast<AwsFrameInfo*>(a);
           if (info && info->final && info->index == 0 && info->opcode == WS_TEXT) {
             String s(reinterpret_cast<char*>(data), len);
@@ -943,7 +1102,9 @@ class WsManager {
     }
 
     if (justConnected) {
-      sendId(c);   // {"type":"id","id":"ws:<cid>"} — NO auto state broadcast; client subscribes
+      for (uint32_t old : replaced) evict(old, false, "its tab reconnected");
+      evict(victim, victim == id, "over the client cap");
+      if (victim != id) sendId(c);   // {"type":"id","id":"ws:<cid>"} — NO auto state broadcast; client subscribes
     }
 
     processAllQueues();

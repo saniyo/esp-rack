@@ -1,5 +1,7 @@
-import React, { FC } from 'react';
+import React, { FC, useContext } from 'react';
 import { Box, Typography, keyframes } from '@mui/material';
+
+import { WsContext } from '../../contexts/ws/WsProvider';
 
 // One-shot heartbeat pulse — fires once per render, not infinitely.
 // LiveIndicator re-keys the inner dot on every messageTick change,
@@ -22,6 +24,12 @@ interface LiveIndicatorProps {
 }
 
 const LiveIndicator: FC<LiveIndicatorProps> = ({ connected, messageTick }) => {
+  // Paused: the tab sat in the background and let its socket go. Busy: the
+  // device has as many clients as it takes (WsProvider).
+  const ws = useContext(WsContext);
+  const paused = !connected && !!ws?.paused;
+  const busy = !connected && !paused && !!ws?.busy;
+  const label = connected ? 'Live' : paused ? 'Paused' : busy ? 'Busy' : 'Offline';
   return (
     <Box
       sx={{
@@ -37,7 +45,15 @@ const LiveIndicator: FC<LiveIndicatorProps> = ({ connected, messageTick }) => {
         lineHeight: 1,
         userSelect: 'none',
       }}
-      aria-label={connected ? 'Live updates connected' : 'Live updates offline'}
+      aria-label={
+        connected
+          ? 'Live updates connected'
+          : paused
+            ? 'Live updates paused'
+            : busy
+              ? 'Live updates refused: the device has too many open pages'
+              : 'Live updates offline'
+      }
     >
       <Box
         // key forces remount on each messageTick → replay one-shot pulse.
@@ -51,7 +67,7 @@ const LiveIndicator: FC<LiveIndicatorProps> = ({ connected, messageTick }) => {
         }}
       />
       <Typography component="span" variant="caption" sx={{ fontWeight: 500 }}>
-        {connected ? 'Live' : 'Offline'}
+        {label}
       </Typography>
     </Box>
   );

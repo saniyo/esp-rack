@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import Sockette from 'sockette';
 import { throttle } from 'lodash';
 import { addAccessTokenParameter } from '../api/authentication';
+import { usePageActive } from './usePageActive';
 
 export interface WebSocketIdMessage {
   type: 'id';
@@ -67,6 +68,10 @@ export const useWs = <D>(
   // Outgoing-state coordination flags (see updateData).
   const [transmit, setTransmit] = useState<boolean>(false);
   const [clear, setClear] = useState<boolean>(false);
+  // Closed while the tab is in the background (usePageActive); a fresh
+  // socket per generation (forceReconnect).
+  const active = usePageActive();
+  const [generation, setGeneration] = useState<number>(0);
 
   const onMessage = useCallback((event: MessageEvent) => {
     const rawData = event.data;
@@ -130,22 +135,12 @@ export const useWs = <D>(
     }
   }, []);
 
-  // Force a fresh socket — tears down the current Sockette instance and
-  // lets the connect-effect re-run (we re-use the existing wsUrl deps so
-  // bumping a nonce here would be redundant; calling reconnect() drops
-  // the underlying WebSocket which fires onclose → Sockette's own
-  // reconnect kicks immediately, sidestepping the long timeout we'd
-  // otherwise wait through).
+  // Force a fresh socket: the connect-effect closes the current Sockette
+  // instance and opens a new one. Not Sockette's reconnect(): on an open
+  // or connecting socket it opens a second WebSocket and leaves the first
+  // one running, a client leaked on the device each time.
   const forceReconnect = useCallback(() => {
-    const inst = ws.current;
-    if (!inst) return;
-    try {
-      inst.reconnect();
-    } catch {
-      // Older Sockette versions: fall back to close → instance reopens
-      // via its own retry loop.
-      inst.close();
-    }
+    if (ws.current) setGeneration((g) => g + 1);  // none while paused
   }, []);
 
   useEffect(() => {
@@ -160,7 +155,7 @@ export const useWs = <D>(
   // Connect + register handlers. Empty wsUrl = noop (DynamicFeature
   // calls useWs unconditionally and passes '' for non-live features).
   useEffect(() => {
-    if (!wsUrl) return;
+    if (!wsUrl || !active) return;
 
     let attempts = 0;
 
@@ -173,6 +168,7 @@ export const useWs = <D>(
         console.log('[useWs] WebSocket connected');
       },
       onclose: () => {
+        if (ws.current !== instance) return;  // a closed, replaced one
         clientId.current = undefined;
         setConnected(false);
         setWsData(undefined);
@@ -193,9 +189,12 @@ export const useWs = <D>(
 
     ws.current = instance;
     return () => {
+      ws.current = undefined;
       instance.close();
+      clientId.current = undefined;
+      setConnected(false);
     };
-  }, [wsUrl, onMessage, maxAttempts]);
+  }, [wsUrl, active, generation, onMessage, maxAttempts]);
 
   // Staleness watchdog — covers the "page hung on the live tab forever"
   // class of bugs where the TCP socket reports `connected=true` but the

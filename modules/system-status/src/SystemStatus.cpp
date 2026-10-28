@@ -267,6 +267,17 @@ void SystemStatus::buildForm(JsonObject& root,
   //      two ever diverge, it's a server-side cache/lag bug, not a
   //      device measurement bug.
 
+  // Live-update connections (one per open UI tab; a tab in the background
+  // lets its go) against the caps in WsManager.h.
+  if (WsManager* ws = _app ? _app->wsManager() : nullptr) {
+    String wsc = String(ws->totalClients()) + " of " + (unsigned)ESPRACK_WS_MAX_CLIENTS + " (" +
+                 (unsigned)ESPRACK_WS_MAX_PER_CHANNEL + " per page) · peak " + (unsigned)ws->peakClients() +
+                 " · closed: " + ws->evictions() + " unwatched, " + ws->refusals() + " refused (busy), " +
+                 ws->stuckEvictions() + " stuck";
+    sta.add(web::Text("ws_clients", wsc.c_str()).readOnly()
+                .label("WebSocket clients").icon("Devices"));
+  }
+
   uint32_t fh_live = free_snap ? free_snap : ESP.getFreeHeap();
   uint32_t ma_live = max_snap  ? max_snap  : ESP.getMaxAllocHeap();
   String heap_live = String(fh_live) + " / " + String(ma_live) + " bytes";

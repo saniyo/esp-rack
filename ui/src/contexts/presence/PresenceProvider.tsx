@@ -3,6 +3,7 @@ import { useLocation } from 'react-router-dom';
 import Sockette from 'sockette';
 
 import { getClientKey } from '../../utils/clientKey';
+import { usePageActive } from '../../utils/usePageActive';
 import { WEB_SOCKET_ROOT } from '../../api/endpoints';
 import { addAccessTokenParameter } from '../../api/authentication';
 import { RequiredChildrenProps } from '../../utils';
@@ -10,7 +11,8 @@ import { RequiredChildrenProps } from '../../utils';
 // Global presence channel — one persistent /ws/presence connection per
 // authenticated SPA session. Survives feature navigation (any feature's
 // own WS comes and goes independently), so the backend always knows which
-// tab is open and where the user currently is.
+// tab is open and where the user currently is. A tab left in the background
+// (usePageActive) closes it and says hello again when shown.
 //
 // Frames:
 //   hello: { type: "hello", clientKey, page, userAgent }
@@ -22,11 +24,13 @@ export const PresenceProvider: FC<RequiredChildrenProps> = ({ children }) => {
   const wsRef = useRef<Sockette | null>(null);
   const connectedRef = useRef(false);
   const pendingPageRef = useRef<string | null>(null);
+  const active = usePageActive();
 
-  // Open the WS once at mount, close on unmount. We deliberately DO NOT
-  // restart on route changes — the whole point is that this channel is
-  // stable across the session.
+  // Open the WS while the tab is in use. We deliberately DO NOT restart on
+  // route changes — the whole point is that this channel is stable across
+  // the session.
   useEffect(() => {
+    if (!active) return;
     const clientKey = getClientKey();
     const wsUrl = addAccessTokenParameter(WEB_SOCKET_ROOT + PRESENCE_WS_PATH);
 
@@ -50,6 +54,7 @@ export const PresenceProvider: FC<RequiredChildrenProps> = ({ children }) => {
         }
       },
       onclose: () => {
+        if (wsRef.current !== s) return;  // a closed, replaced one
         connectedRef.current = false;
       },
       onerror: () => {
@@ -65,7 +70,7 @@ export const PresenceProvider: FC<RequiredChildrenProps> = ({ children }) => {
       wsRef.current = null;
       connectedRef.current = false;
     };
-  }, []);
+  }, [active]);
 
   // Push page-change notifications as the user navigates. If WS is briefly
   // offline, stash the latest path; the onopen flush above sends it once

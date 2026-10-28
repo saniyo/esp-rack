@@ -144,9 +144,13 @@ export const useWsChannel = <D>(channel?: string, wsThrottle: number = 500) => {
 
   // Subscribe for the channel's lifetime. Inbound frames are accumulated and
   // flushed on the next animation frame (see header note) rather than each
-  // triggering an immediate setState.
+  // triggering an immediate setState. Keyed on the provider's stable
+  // subscribe, not the context value: that changes with connected / busy,
+  // and a resubscribe there would be a navigation to WsProvider (a busy tab
+  // retries on one). WsProvider sends the subs again on every open.
+  const subscribe = ctx?.subscribe;
   useEffect(() => {
-    if (!channel || !ctx) return;
+    if (!channel || !subscribe) return;
     const onFrame = (msg: WsChannelMessage) => {
       pendingRef.current = coalescePayload(pendingRef.current, msg.p, isFullSet);
       if (msg.origin_id) pendingOriginRef.current = msg.origin_id;
@@ -154,7 +158,7 @@ export const useWsChannel = <D>(channel?: string, wsThrottle: number = 500) => {
         rafRef.current = window.requestAnimationFrame(flush);
       }
     };
-    const unsub = ctx.subscribe(channel, onFrame);
+    const unsub = subscribe(channel, onFrame);
     return () => {
       unsub();
       if (rafRef.current !== null) {
@@ -164,7 +168,7 @@ export const useWsChannel = <D>(channel?: string, wsThrottle: number = 500) => {
       pendingRef.current = undefined;
       pendingOriginRef.current = undefined;
     };
-  }, [channel, ctx, flush, isFullSet]);
+  }, [channel, subscribe, flush, isFullSet]);
 
   // Mirror provider connection state; writes that waited go out on reconnect.
   useEffect(() => {
