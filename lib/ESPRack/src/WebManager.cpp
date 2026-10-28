@@ -582,7 +582,7 @@ void WebManager::applyMenuPlace(JsonObject entry, size_t idx) const {
   for (const auto& p : _menuPlaces) {
     if (p.id != id) continue;
     if (!p.keepParent) {
-      if (p.parent.length()) menu["parent"] = p.parent.c_str();  // lives in _menuPlaces
+      if (p.parent.length()) menu["parent"] = p.parent;  // a copy
       else menu.remove("parent");
     }
     if (p.order != kKeepOrder) menu["order"] = p.order;
