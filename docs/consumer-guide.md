@@ -499,6 +499,48 @@ consumer's `src/`, like the demo's, or as a module library.
 
 ---
 
+### 9.5 The menu tree: where module pages live
+
+Modules that serve one purpose live inside the item they serve, in the menu
+and in the breadcrumbs. The composition decides, never the module:
+
+```cpp
+ESPRack::Builder(server, ...)
+    .install<GatewayModule>()                      // features gateway, jk, inverter
+    .install<JkBusModule>("can0").under("jk")      // the module's pages under "jk"
+    .install<InverterLinkModule>("can1").under("inverter")
+    .installExtHw<CanMcp2515Module>("can0", ...)   // under jkBus by itself: jk-bus uses can0
+    .installExtHw<CanTwaiModule>("can1", ...)      // under inverterLink
+    ...
+// and, for anything else, the low-level primitive:
+app->webManager()->placeMenu("history", "", 900);  // top level, order 900
+```
+
+An item's parent, highest first:
+
+1. `WebManager::placeMenu(id, parentId, order)`: `""` = top level,
+   `nullptr` = keep the parent and change only the order.
+2. `Builder::under(parentId)` after an `install<>()` / `installExtHw<>()`:
+   the module's own top items go under that item. Its items nested inside
+   its own module stay where they are.
+3. The one module that uses it: a module lists what it uses in
+   `ModuleDescriptor::uses_` (e.g. the port it was installed with), and an
+   unplaced item used by exactly one module goes under that module's first
+   menu item. Only what the composition knows: a port chosen in the
+   settings later does not move the menu (the manifest is static).
+4. The feature's own `WebMenu::nestUnder()`.
+5. Top level. An external HW page with none of 1-3 goes into the
+   "External Hardware" group, under its `owner()` or else under System, as
+   before.
+
+- Without `under`, `uses` and `placeMenu` nothing changes.
+- The sidebar is a tree of any depth that folds. A feature can have its
+  tabs in the tree (`expandTabs`) and child items at once.
+- The app bar shows the path to a page nested in the tree (root ›
+  … › page) on screens wider than a phone; each step is a link.
+- `placeMenu()` belongs before `app->begin()` returns (setup, or the app's
+  own `onInstall` / `onBegin`); later it re-bakes the manifest cache.
+
 ## 10. Checklist: a new consumer from scratch
 
 1. Create `<parent>/my-device/` next to `<parent>/esp-rack/`, and check out
