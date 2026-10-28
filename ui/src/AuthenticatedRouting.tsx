@@ -9,6 +9,7 @@ import { AXIOS } from './api/endpoints';
 import { Layout, RequireAdmin } from './components';
 import { useManifest } from './contexts/manifest';
 import { FeatureEntry } from './types';
+import { startPath } from './utils/startPage';
 
 import Security from './framework/security/Security';
 import FileSystem from './framework/filesystem/FileSystem';
@@ -103,13 +104,9 @@ const AuthenticatedRouting: FC = () => {
   // permanent white screen until manual reload. Bit me right after a
   // sign-in flow (fetchLoginRedirect → navigate("/") → catch-all →
   // Navigate(defaultPath) — this is the only place the chain runs).
-  const defaultPath = useMemo(() => {
-    const first = manifest.features.find(
-      (f) => f.menu?.label && !f.menu?.hidden && f.route
-    );
-    const raw = first?.route ?? '/system';
-    return raw.replace(/\/\*$/, '');
-  }, [manifest]);
+  // The start page: the landing feature, else the role feature, else the
+  // first menu item (utils/startPage).
+  const defaultPath = useMemo(() => startPath(manifest.features), [manifest]);
 
   return (
     <PresenceProvider>

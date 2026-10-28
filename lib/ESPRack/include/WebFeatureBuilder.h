@@ -97,6 +97,9 @@ class WebMenu {
   // device discovery menu it renders directly under the device record; non-role
   // features fall into the "Device" group. Default off (framework / infra).
   WebMenu& role(bool v = true)             { _m.role = v; return *this; }
+  // The page the UI opens first (one per firmware). Without it, the role
+  // feature; without that, the first menu item, as before.
+  WebMenu& landing(bool v = true)          { _m.landing = v; return *this; }
 
   WebMenuMeta build() const  { return _m; }
   operator WebMenuMeta() const { return _m; }

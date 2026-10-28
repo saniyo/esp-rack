@@ -196,6 +196,7 @@ class WebFeatureEntry : public IWebFeatureEntry {
       if (_spec.menu.hw) menu["hw"] = _spec.menu.hw;
       if (_spec.menu.expandTabs) menu["expandTabs"] = true;
       if (_spec.menu.role) menu["role"] = true;
+      if (_spec.menu.landing) menu["landing"] = true;
     }
 
     // C1: paths are DERIVED from the id, not read from spec.restRead/Update.

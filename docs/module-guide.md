@@ -408,7 +408,8 @@ than ~8 KB don't fit the no-PSRAM C3's `max_alloc` and need streaming.
 | `.order(n)` | Sort key. The System shell uses 900 (`App.cpp:126`). |
 | `.nestUnder(id)` | Nest under another feature/group in the tree menu. The composition can move a module's items (`Builder::under`, `WebManager::placeMenu`; consumer guide §9.5). A module never places itself; it lists what it uses in `ModuleDescriptor::uses_` (e.g. its factory port), and an unplaced item used by one module nests under it. |
 | `.expandTabs(bool)` | Tabs become tree leaves (default **on**). |
-| `.role()` | Marks the device's main-role feature for the discovery menu. |
+| `.role()` | Marks the device's main-role feature for the discovery menu. The UI opens it first unless a feature is marked `.landing()`. |
+| `.landing()` | The page the UI opens first, and where the brand in the sidebar leads (one per firmware). Without it the role feature, else the first menu item. |
 | `.hidden()` | Keeps the feature off the menu. |
 | `.auth(...)`, `.adminOnly()`, ... | Menu **visibility** only. |
 

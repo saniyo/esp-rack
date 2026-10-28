@@ -90,6 +90,7 @@ class WebInfoEntry : public IWebFeatureEntry {
       if (_spec.menu.hw) menu["hw"] = _spec.menu.hw;
       if (_spec.menu.expandTabs) menu["expandTabs"] = true;
       if (_spec.menu.role) menu["role"] = true;
+      if (_spec.menu.landing) menu["landing"] = true;
     }
 
     if (_spec.restRead) {

@@ -61,6 +61,9 @@ struct WebMenuMeta {
   // directly under the device record; everything else falls into the "Device" group.
   // Default false (framework / infra). The consumer opts its app feature in.
   bool role = false;
+  // landing: the page the UI opens first (and the brand in the sidebar
+  // leads to). Without one, the role feature; without that, the first item.
+  bool landing = false;
 };
 
 struct WebTabSpec {

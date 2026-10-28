@@ -4,7 +4,9 @@ import { Box, Divider, Drawer, Toolbar, Typography, styled, Tooltip } from '@mui
 
 import { PROJECT_NAME } from '../../api/env';
 import { useManifest } from '../../contexts/manifest';
+import { Link as RouterLink } from 'react-router-dom';
 import LayoutMenu from './LayoutMenu';
+import { startPath } from '../../utils/startPage';
 import { DRAWER_WIDTH } from './Layout';
 import { useState, useContext, useEffect } from 'react';
 import { FeaturesContext } from '../../contexts/features';
@@ -56,7 +58,16 @@ const LayoutDrawer: FC<LayoutDrawerProps> = ({ mobileOpen, onClose }) => {
   const drawer = (
     <>
       <Toolbar disableGutters>
-        <Box display="flex" alignItems="center" px={2} width="100%" position="relative">
+        <Box
+          component={RouterLink}
+          to={startPath(manifest.features)}
+          display="flex"
+          alignItems="center"
+          px={2}
+          width="100%"
+          position="relative"
+          sx={{ color: 'inherit', textDecoration: 'none' }}
+        >
           <LayoutDrawerLogo src="/app/icon.png" alt={brand} />
           <Tooltip title={versionString} arrow placement="bottom">
             <Typography variant="h6" color="textPrimary">

@@ -21,6 +21,9 @@ export interface MenuMeta {
   // device discovery menu, role features render directly under the device record;
   // everything else goes into the "Device" group. Absent/false = infra.
   role?: boolean;
+  // landing: the page the UI opens first (else the role feature, else the
+  // first item).
+  landing?: boolean;
 }
 
 export interface TabSpec {
