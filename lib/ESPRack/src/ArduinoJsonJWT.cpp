@@ -57,37 +57,50 @@ String ArduinoJsonJWT::buildJWT(JsonObject& payload) {
   return jwt;
 }
 
-void ArduinoJsonJWT::parseJWT(String jwt, JsonDocument& jsonDocument) {
+ArduinoJsonJWT::Result ArduinoJsonJWT::parseJWT(String jwt, JsonDocument& jsonDocument) {
   // clear json document before we begin, jsonDocument wil be null on failure
   jsonDocument.clear();
+  if (jsonDocument.capacity() == 0) return Result::NoMemory;  // its pool was not allocated
 
   // must have the correct header and delimiter
   if (!jwt.startsWith(JWT_HEADER) || jwt.indexOf('.') != JWT_HEADER_SIZE) {
-    return;
+    return Result::Invalid;
   }
 
   // check there is a signature delimieter
   int signatureDelimiterIndex = jwt.lastIndexOf('.');
   if (signatureDelimiterIndex == JWT_HEADER_SIZE) {
-    return;
+    return Result::Invalid;
   }
 
-  // check the signature is valid
+  // Each step below allocates; one that fails leaves an empty or short
+  // String. That is a device short of memory, not a bad token.
+  const unsigned sigLen = jwt.length() - unsigned(signatureDelimiterIndex) - 1;
   String signature = jwt.substring(signatureDelimiterIndex + 1);
+  if (signature.length() != sigLen) return Result::NoMemory;
   jwt = jwt.substring(0, signatureDelimiterIndex);
-  if (sign(jwt) != signature) {
-    return;
-  }
+  if (jwt.length() != unsigned(signatureDelimiterIndex)) return Result::NoMemory;
+  const String expected = sign(jwt);
+  if (!expected.length()) return Result::NoMemory;  // an HMAC is never empty
+  if (expected != signature) return Result::Invalid;
 
   // decode payload
   jwt = jwt.substring(JWT_HEADER_SIZE + 1);
+  if (!jwt.length()) return Result::NoMemory;  // the signed part had a payload
   jwt = decode(jwt);
+  if (!jwt.length()) return Result::NoMemory;
 
   // parse payload, clearing json document after failure
   DeserializationError error = deserializeJson(jsonDocument, jwt);
+  if (error == DeserializationError::NoMemory) {
+    jsonDocument.clear();
+    return Result::NoMemory;
+  }
   if (error != DeserializationError::Ok || !jsonDocument.is<JsonObject>()) {
     jsonDocument.clear();
+    return Result::Invalid;
   }
+  return Result::Ok;
 }
 
 String ArduinoJsonJWT::encode(const char* cstr, int inputLen) {

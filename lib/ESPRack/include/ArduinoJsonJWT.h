@@ -31,7 +31,10 @@ class ArduinoJsonJWT {
   String getSecret();
 
   String buildJWT(JsonObject& payload);
-  void parseJWT(String jwt, JsonDocument& jsonDocument);
+  // Invalid: a wrong or damaged token. NoMemory: it could not be checked
+  // (an allocation failed): not the token's fault, the caller says so.
+  enum class Result : uint8_t { Ok, Invalid, NoMemory };
+  Result parseJWT(String jwt, JsonDocument& jsonDocument);
 };
 
 #endif

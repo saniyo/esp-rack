@@ -63,7 +63,7 @@ int AuthenticationService::authenticateAndMintToken(JsonVariantConst body,
 
 void AuthenticationService::verifyAuthorization(AsyncWebServerRequest* request) {
   Authentication authentication = _securityManager->authenticateRequest(request);
-  request->send(authentication.authenticated ? 200 : 401);
+  request->send(authentication.authenticated ? 200 : authentication.busy ? 503 : 401);
 }
 
 void AuthenticationService::signIn(AsyncWebServerRequest* request, JsonVariant& json) {

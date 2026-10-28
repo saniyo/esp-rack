@@ -4,6 +4,7 @@
 #include <ProblemJson.h>
 #include <web/Form.h>
 #include <WebManager.h>
+#include <esp_heap_caps.h>
 #include <esp_random.h>  // esp_fill_random for machine-token ids
 #include <time.h>
 #include <time/TimeSync.h>
@@ -462,7 +463,13 @@ void SecuritySettingsService::configureJWTHandler() {
 
 Authentication SecuritySettingsService::authenticateJWT(String& jwt) {
   DynamicJsonDocument payloadDocument(MAX_JWT_SIZE);
-  _jwtHandler.parseJWT(jwt, payloadDocument);
+  if (_jwtHandler.parseJWT(jwt, payloadDocument) == ArduinoJsonJWT::Result::NoMemory) {
+    log_w("[auth] token not checked: short of memory (free %u, largest internal %u)", (unsigned)ESP.getFreeHeap(),
+          (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    Authentication busy;
+    busy.busy = true;
+    return busy;
+  }
   if (payloadDocument.is<JsonObject>()) {
     JsonObject parsedPayload = payloadDocument.as<JsonObject>();
 
@@ -612,7 +619,10 @@ ArRequestFilterFunction SecuritySettingsService::filterRequest(AuthenticationPre
 // page for endpoints they simply lacked the role for. Bodies are RFC 9457
 // problem+json so machine clients branch on `title`, not on prose.
 static void sendAuthProblem(AsyncWebServerRequest* request, Authentication& authentication) {
-  if (!authentication.authenticated) {
+  if (authentication.busy) {
+    // A valid token the device could not check now: the UI retries a 503.
+    sendProblem(request, 503, "heap_pressure", "The device is short of memory: try again", 1);
+  } else if (!authentication.authenticated) {
     sendProblem(request, 401, "unauthorized", "Missing or invalid token");
   } else {
     sendProblem(request, 403, "forbidden", "Insufficient role for this endpoint");

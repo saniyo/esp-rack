@@ -49,6 +49,9 @@ class Authentication {
   // the device's token registry (the registry is the revocation/role
   // authority, not the signed claim).
   String role;
+  // The token could not be checked: the device was short of memory. Not
+  // the token's fault: answered 503 (try again), not 401.
+  bool busy = false;
 
  public:
   Authentication(User& user)
