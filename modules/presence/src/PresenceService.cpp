@@ -1,4 +1,13 @@
 #include <PresenceService.h>
+#include <power/FlashWriter.h>
+#include <power/WriteGate.h>
+
+namespace {
+// The queue lock: held for a deque operation only, so a short wait.
+constexpr TickType_t kLogLockWait = pdMS_TO_TICKS(50);
+// A log line is written in one piece: no 4 KB stdio buffer per append.
+constexpr size_t kLogFileBuf = 128;
+}  // namespace
 
 PresenceService::PresenceService() {}
 
@@ -101,35 +110,189 @@ void PresenceService::setLogSink(fs::FS* fs, const char* path, size_t maxBytes) 
   _logFs       = fs;
   _logPath     = path ? path : "/logs/presence.log";
   _logMaxBytes = maxBytes;
+  // Setup: the queue lock and the FlashWriter job for the appends the
+  // write gate puts off. Without them the appends go at once, as before.
+  if (!_logMx) _logMx = xSemaphoreCreateMutex();
+  if (_logJob < 0 && _logMx) {
+    _logJob = ESPRack::FlashWriter::add("presence", [this]() -> uint32_t { return drainLog(0); });
+    if (_logJob < 0) log_w("[presence] no FlashWriter job left: log appends go at once");
+  }
 }
 
 void PresenceService::setLogEnabled(bool on) {
   _logEnabled = on;
 }
 
+bool PresenceService::claimLogWriter() {
+  portENTER_CRITICAL(&_logMux);
+  const bool ok = !_logWriting;
+  _logWriting = true;
+  portEXIT_CRITICAL(&_logMux);
+  return ok;
+}
+
+void PresenceService::releaseLogWriter() {
+  portENTER_CRITICAL(&_logMux);
+  _logWriting = false;
+  portEXIT_CRITICAL(&_logMux);
+}
+
+void PresenceService::countLogLost(size_t lines) {
+  portENTER_CRITICAL(&_logMux);
+  _logLost += uint32_t(lines);
+  portEXIT_CRITICAL(&_logMux);
+}
+
+// Simple size cap — if the file grows past _logMaxBytes we roll over by
+// truncating. Keeping it dumb: no rotation to .1/.2 — admin exports via
+// FileSystem page when they need history, and we don't fill flash.
+bool PresenceService::logOverCap() const {
+  if (_logMaxBytes == 0 || !_logFs->exists(_logPath)) return false;
+  File probe = _logFs->open(_logPath, "r");  // size only: no I/O, no stdio buffer
+  if (!probe) return false;
+  const size_t sz = probe.size();
+  probe.close();
+  return sz >= _logMaxBytes;
+}
+
+void PresenceService::logRoll() { _logFs->remove(_logPath); }
+
+bool PresenceService::logAppend(const char* data, size_t len) {
+  File f = _logFs->open(_logPath, "a");
+  if (!f) return false;
+  f.setBufferSize(kLogFileBuf);  // before the first write: the buffer comes then
+  const size_t n = f.write(reinterpret_cast<const uint8_t*>(data), len);
+  f.close();
+  return n == len;
+}
+
 void PresenceService::appendLog(const String& line) {
   if (!_logEnabled || !_logFs || _logPath.length() == 0) return;
 
-  // Simple size cap — if the file grows past _logMaxBytes we roll over by
-  // truncating. Keeping it dumb: no rotation to .1/.2 — admin exports via
-  // FileSystem page when they need history, and we don't fill flash.
-  if (_logFs->exists(_logPath)) {
-    File probe = _logFs->open(_logPath, "r");
-    if (probe) {
-      const size_t sz = probe.size();
-      probe.close();
-      if (_logMaxBytes > 0 && sz >= _logMaxBytes) {
-        _logFs->remove(_logPath);
-      }
-    }
+  String row;
+  row.reserve(line.length() + 16);
+  row += millis();
+  row += '\t';
+  row += line;
+  row += "\r\n";
+
+  if (_logJob < 0) {  // no queue / job: at once, as without the gate
+    if (logOverCap()) logRoll();
+    (void)logAppend(row.c_str(), row.length());
+    return;
   }
 
-  File f = _logFs->open(_logPath, "a");
-  if (!f) return;
-  f.print(millis());
-  f.print('\t');
-  f.println(line);
-  f.close();
+  // At once when nothing is queued and nobody is writing, else behind the
+  // queued lines (the order stays; one writer of the file at a time).
+  if (xSemaphoreTake(_logMx, kLogLockWait) != pdTRUE) {
+    countLogLost(1);
+    return;
+  }
+  const bool direct = _logQueue.empty() && claimLogWriter();
+  if (!direct) _logQueue.push(std::move(row));
+  xSemaphoreGive(_logMx);
+  if (!direct) {
+    ESPRack::FlashWriter::kick(_logJob);
+    return;
+  }
+
+  // async_tcp: a gate pass, never a wait. One step: the append, or the
+  // roll-over (then the line goes to the job, a step of its own).
+  bool queue = true;
+  {
+    ESPRack::WritePass pass(ESPRack::WriteGate::now());
+    if (!pass.ok()) {
+      ESPRack::WriteGate::noteDeferred();
+    } else if (logOverCap()) {
+      logRoll();
+    } else {
+      if (!logAppend(row.c_str(), row.length())) countLogLost(1);
+      queue = false;
+    }
+  }
+  if (queue) {
+    if (xSemaphoreTake(_logMx, kLogLockWait) == pdTRUE) {
+      _logQueue.push(std::move(row));
+      xSemaphoreGive(_logMx);
+    } else {
+      countLogLost(1);
+      queue = false;
+    }
+  }
+  releaseLogWriter();
+  if (queue) ESPRack::FlashWriter::kick(_logJob);
+}
+
+uint32_t PresenceService::drainLog(uint32_t boundMs) {
+  if (!_logFs || !_logMx) return ESPRack::FlashWriter::kDone;
+  if (!claimLogWriter()) return 10;  // an append on async_tcp is at it: look again
+  // One wait clock for the run, so maxWaitMs bounds it, not each batch.
+  const uint32_t since = ESPRack::WriteGate::now();
+  uint32_t r = ESPRack::FlashWriter::kDone;
+  for (;;) {
+    if (xSemaphoreTake(_logMx, kLogLockWait) != pdTRUE) {
+      r = 10;
+      break;
+    }
+    const bool empty = _logQueue.empty();
+    xSemaphoreGive(_logMx);
+    if (empty) break;
+
+    ESPRack::WriteSlot slot(boundMs, nullptr, since);
+    if (!slot.ok()) {  // PowerGuard paused writes: the lines stay queued
+      r = ESPRack::FlashWriter::kOnPower;
+      break;
+    }
+    if (logOverCap()) {
+      logRoll();
+      if (!slot.again()) {
+        r = ESPRack::FlashWriter::kOnPower;
+        break;
+      }
+    }
+    // What this slot writes, taken now: lines that come meanwhile wait in
+    // the queue (bounded), not in a batch that could be lost.
+    String batch;
+    size_t n = 0;
+    if (xSemaphoreTake(_logMx, kLogLockWait) == pdTRUE) {
+      batch.reserve(LOG_BATCH_BYTES < _logQueue.bytes() ? LOG_BATCH_BYTES : _logQueue.bytes());
+      n = _logQueue.take(batch, LOG_BATCH_BYTES);
+      xSemaphoreGive(_logMx);
+    } else {
+      r = 10;
+      break;
+    }
+    if (n && !logAppend(batch.c_str(), batch.length())) {
+      log_w("[presence] log append failed: %u lines lost", unsigned(n));
+      countLogLost(n);
+    }
+  }
+  releaseLogWriter();
+  return r;
+}
+
+void PresenceService::flushLog(uint32_t boundMs) {
+  if (_logJob < 0) return;
+  (void)drainLog(boundMs);  // the FlashWriter task at it: it finishes them
+}
+
+size_t PresenceService::logPending() const {
+  if (!_logMx || xSemaphoreTake(_logMx, kLogLockWait) != pdTRUE) return 0;
+  const size_t n = _logQueue.lines();
+  xSemaphoreGive(_logMx);
+  return n;
+}
+
+uint32_t PresenceService::logDropped() const {
+  uint32_t n = 0;
+  if (_logMx && xSemaphoreTake(_logMx, kLogLockWait) == pdTRUE) {
+    n = _logQueue.dropped();
+    xSemaphoreGive(_logMx);
+  }
+  portENTER_CRITICAL(&_logMux);
+  n += _logLost;
+  portEXIT_CRITICAL(&_logMux);
+  return n;
 }
 
 PresenceService::ClientPresence&
@@ -282,4 +445,8 @@ void PresenceService::fillStats(JsonObject& root) const {
     j["page_history"]   = joined;
   }
   root["total_presence"] = _clients.size();
+  if (_logFs) {  // the log sink: lines waiting for the write gate, lines lost
+    root["log_pending"] = logPending();
+    root["log_dropped"] = logDropped();
+  }
 }

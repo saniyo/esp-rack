@@ -8,10 +8,13 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
+#include <atomic>
 #include <memory>
 #include <new>
 
 #include "WebManager.h"
+#include "power/FlashWriter.h"
+#include "power/WriteGate.h"
 
 namespace ESPRack {
 namespace CrashDump {
@@ -19,16 +22,85 @@ namespace CrashDump {
 namespace {
 Info s_info;
 bool s_cached = false;
+uint32_t s_cachedGen = 0;
+std::atomic<uint32_t> s_gen{0};  // bumped by each erase step: the cached summary is stale
 StaticSemaphore_t s_mxBuf;
 SemaphoreHandle_t s_mx = nullptr;
+constexpr TickType_t kLockWait = pdMS_TO_TICKS(500);
 
+// The summary cache (info(): the System page on async_tcp, any task). Held
+// while the dump is read (flash reads, tens of ms), never while it is
+// erased. Taken with a timeout: then the last summary stands.
 struct Lock {
   Lock() {
     if (!s_mx) s_mx = xSemaphoreCreateMutexStatic(&s_mxBuf);
-    xSemaphoreTake(s_mx, portMAX_DELAY);
+    ok = xSemaphoreTake(s_mx, kLockWait) == pdTRUE;
   }
-  ~Lock() { xSemaphoreGive(s_mx); }
+  ~Lock() {
+    if (ok) xSemaphoreGive(s_mx);
+  }
+  bool ok;
 };
+
+// The erase, a sector per write gate slot (see CrashDump.h).
+portMUX_TYPE s_eraseMux = portMUX_INITIALIZER_UNLOCKED;
+EraseStatus s_erase;
+bool s_stepping = false;  // a sector is being erased
+int8_t s_job = -1;
+
+const esp_partition_t* partition() {
+  return esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_COREDUMP, nullptr);
+}
+
+uint32_t sectorOf(const esp_partition_t* p) { return p->erase_size ? p->erase_size : 4096; }
+
+// The next sector: the caller holds a gate pass or slot. false: no more to
+// do (done, failed, or no erase under way).
+bool eraseStep() {
+  portENTER_CRITICAL(&s_eraseMux);
+  const bool on = s_erase.state == EraseState::Erasing;
+  const bool busy = s_stepping;  // one step at a time
+  if (on && !busy) s_stepping = true;
+  const uint16_t i = s_erase.done;
+  const uint16_t total = s_erase.total;
+  portEXIT_CRITICAL(&s_eraseMux);
+  if (!on) return false;
+  if (busy) return true;
+  const esp_partition_t* part = partition();
+  esp_err_t e = ESP_ERR_NOT_FOUND;
+  if (part && i < total) {
+    const uint32_t sec = sectorOf(part);
+    e = esp_partition_erase_range(part, size_t(i) * sec, sec);
+    if (e == ESP_OK && i == 0) {
+      // As esp_core_dump_image_erase(): a blank size word at the start, in
+      // 16 bytes (encrypted flash is written in blocks of 16).
+      const uint32_t blank[4] = {0xFFFFFFFFu, 0, 0, 0};
+      e = esp_partition_write(part, 0, blank, sizeof blank);
+    }
+  }
+  s_gen.store(s_gen.load() + 1);  // one writer: the step that holds the slot
+  portENTER_CRITICAL(&s_eraseMux);
+  if (e != ESP_OK) s_erase.state = EraseState::Failed;
+  else if (++s_erase.done >= s_erase.total) s_erase.state = EraseState::Done;
+  s_stepping = false;
+  const EraseState st = s_erase.state;
+  portEXIT_CRITICAL(&s_eraseMux);
+  if (e != ESP_OK) {
+    log_w("[coredump] erase failed at sector %u/%u: %s", unsigned(i + 1), unsigned(total), esp_err_to_name(e));
+  } else if (st == EraseState::Done) {
+    log_i("[coredump] erased (%u sectors)", unsigned(total));
+  }
+  return st == EraseState::Erasing;
+}
+
+// The FlashWriter task: one sector per run, so the other jobs go in
+// between. A fresh wait clock per sector: nothing waits on this erase.
+uint32_t eraseJob() {
+  if (eraseStatus().state != EraseState::Erasing) return FlashWriter::kDone;
+  WriteSlot slot;
+  if (!slot.ok()) return FlashWriter::kOnPower;  // PowerGuard: resumes where it stopped
+  return eraseStep() ? 1 : FlashWriter::kDone;
+}
 
 void load(Info& i) {
   i = Info{};
@@ -84,9 +156,12 @@ void sendFile(AsyncWebServerRequest* r) {
 
 const Info& info() {
   Lock l;
-  if (!s_cached) {
+  if (!l.ok) return s_info;  // another task is reading the dump: the last summary
+  const uint32_t gen = s_gen.load();
+  if (!s_cached || s_cachedGen != gen) {
     load(s_info);
     s_cached = true;
+    s_cachedGen = gen;
   }
   return s_info;
 }
@@ -106,13 +181,61 @@ bool describe(char* out, size_t len) {
 }
 
 bool erase() {
-  Lock l;
-  const bool ok = esp_core_dump_image_erase() == ESP_OK;
-  s_cached = false;
-  return ok;
+  const esp_partition_t* part = partition();
+  if (!part) {
+    log_w("[coredump] no coredump partition");
+    return false;
+  }
+  if (s_job < 0) {
+    log_w("[coredump] no FlashWriter job: not erased");
+    return false;
+  }
+  bool start = false;
+  portENTER_CRITICAL(&s_eraseMux);
+  if (s_erase.state != EraseState::Erasing) {
+    s_erase.state = EraseState::Erasing;
+    s_erase.done = 0;
+    s_erase.total = uint16_t(part->size / sectorOf(part));
+    start = true;
+  }
+  portEXIT_CRITICAL(&s_eraseMux);
+  if (!start) return true;  // under way
+  // The first sector at once when the gate lets it (one bounded step; the
+  // dump is invalid from then on), the rest in the job.
+  bool more = true;
+  {
+    WritePass pass;
+    if (pass.ok()) more = eraseStep();
+    else WriteGate::noteDeferred();
+  }
+  if (more) FlashWriter::kick(s_job);
+  return eraseStatus().state != EraseState::Failed;
+}
+
+EraseStatus eraseStatus() {
+  portENTER_CRITICAL(&s_eraseMux);
+  const EraseStatus s = s_erase;
+  portEXIT_CRITICAL(&s_eraseMux);
+  return s;
+}
+
+const char* eraseStateName(EraseState s) {
+  switch (s) {
+    case EraseState::Idle: return "idle";
+    case EraseState::Erasing: return "erasing";
+    case EraseState::Done: return "done";
+    case EraseState::Failed: return "failed";
+  }
+  return "?";
 }
 
 void registerManifest(WebManager* web) {
+  if (!s_mx) s_mx = xSemaphoreCreateMutexStatic(&s_mxBuf);  // setup: before any page asks
+  // The erase steps (setup, the loop task).
+  if (s_job < 0) {
+    s_job = FlashWriter::add("coredump", [] { return eraseJob(); });
+    if (s_job < 0) log_w("[coredump] no FlashWriter job left: erase unavailable");
+  }
   if (!web) return;
   {
     WebActionSpec spec;
@@ -134,10 +257,16 @@ void registerManifest(WebManager* web) {
     spec.method = "POST";
     spec.auth = WebAuthLevel::Admin;
     spec.confirm = "Erase the crash dump? Download it first if it is still needed.";
-    spec.successMessage = "Crash dump erased";
+    spec.successMessage = "Erasing the crash dump";
     spec.handler = [](AsyncWebServerRequest* r) {
+      // Never the whole partition here: a sector at most, the rest in the
+      // FlashWriter job. 202 while it runs, 200 once done.
       const bool ok = erase();
-      r->send(ok ? 200 : 500, "application/json", ok ? "{\"ok\":true}" : "{\"ok\":false}");
+      const EraseStatus s = eraseStatus();
+      char body[96];
+      snprintf(body, sizeof body, "{\"ok\":%s,\"state\":\"%s\",\"done\":%u,\"of\":%u}", ok ? "true" : "false",
+               eraseStateName(s.state), unsigned(s.done), unsigned(s.total));
+      r->send(!ok ? 500 : s.state == EraseState::Done ? 200 : 202, "application/json", body);
     };
     web->registerAction(std::move(spec));
   }

@@ -19,6 +19,9 @@ class WebManager;
 //                         (operator-explicit "freeze current configs as
 //                         backup"). Same file the auto-rotate writes to;
 //                         operator just gets to choose when "now" is.
+//                         Done at once while the flash write gate is free
+//                         (200), else queued for the flash writer (202);
+//                         the "Last backup" row shows how it went.
 //   * config.restore    — copy every <primary>.snapshot back over its
 //                         primary, then reboot so each service's begin()
 //                         picks the restored state up cleanly.

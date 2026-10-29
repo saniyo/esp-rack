@@ -7,10 +7,14 @@
 #include <ESPAsyncWebServer.h>
 #include <FS.h>
 #include <SecurityManager.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 
 #include <deque>
 #include <functional>
 #include <map>
+
+#include "PresenceLogQueue.h"
 
 #define PRESENCE_WS_PATH "/ws/presence"
 
@@ -71,10 +75,26 @@ class PresenceService {
   // explicitly off-by-default: a busy SPA can produce many rows per minute
   // and log writes go through async flash I/O. Admin toggles via UI; the
   // setter is idempotent and doesn't retroactively flush buffered events.
+  //
+  // The appends go through the flash write gate (power/WriteGate.h): a gate
+  // pass on async_tcp, never a wait; when the gate says no, the line waits
+  // in a bounded RAM queue (LOG_QUEUE_LINES / LOG_QUEUE_BYTES, the oldest
+  // go when full, counted in logDropped()) and the FlashWriter job
+  // "presence" appends it, one gate slot per batch of up to LOG_BATCH_BYTES.
+  // While PowerGuard pauses writes the lines wait there.
+  // setLogSink: at setup (it adds the FlashWriter job).
   void setLogSink(fs::FS* fs, const char* path = "/logs/presence.log",
                   size_t maxBytes = 64UL * 1024UL);
   void setLogEnabled(bool on);
   bool logEnabled() const { return _logEnabled; }
+  size_t logPending() const;     // lines waiting for the write gate
+  uint32_t logDropped() const;   // lines lost: queue full, or a failed write
+  // Shutdown: what is queued, waiting for a gate slot boundMs at most.
+  void flushLog(uint32_t boundMs);
+
+  static constexpr size_t LOG_QUEUE_LINES = 64;
+  static constexpr size_t LOG_QUEUE_BYTES = 4096;
+  static constexpr size_t LOG_BATCH_BYTES = 4096;
 
   // Hook into every secured REST handler (see SecuritySettingsService::
   // wrapRequest / wrapCallback): idempotent upsert keyed by X-Client-Key.
@@ -114,6 +134,19 @@ class PresenceService {
   // either sink is unconfigured or toggle is off.
   void appendLog(const String& line);
 
+  // Log file steps, each one bounded flash operation (the caller holds a
+  // gate pass or slot and the writer flag).
+  bool logOverCap() const;  // reads only
+  void logRoll();           // removes the file
+  bool logAppend(const char* data, size_t len);
+  // The queued lines, a gate slot per batch (the FlashWriter job: boundMs 0).
+  uint32_t drainLog(uint32_t boundMs);
+  // One writer of the log file at a time (async_tcp, the FlashWriter task,
+  // shutdown); a spinlock, never held across a write.
+  bool claimLogWriter();
+  void releaseLogWriter();
+  void countLogLost(size_t lines);
+
   std::map<String, ClientPresence> _clients;  // keyed by clientKey
 
   AsyncWebSocket* _ws{nullptr};
@@ -124,6 +157,15 @@ class PresenceService {
   String       _logPath;
   size_t       _logMaxBytes{0};
   bool         _logEnabled{false};
+
+  // Lines the write gate put off (under _logMx, taken with a timeout).
+  PresenceLogQueue<String> _logQueue{LOG_QUEUE_LINES, LOG_QUEUE_BYTES};
+  SemaphoreHandle_t _logMx{nullptr};
+  int8_t            _logJob{-1};
+  // Under _logMux (a spinlock: plain fields, no atomics in a heap object).
+  mutable portMUX_TYPE _logMux = portMUX_INITIALIZER_UNLOCKED;
+  bool              _logWriting{false};
+  uint32_t          _logLost{0};  // a failed write or a missed lock (the queue counts its own drops)
 };
 
 #endif  // PresenceService_h

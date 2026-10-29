@@ -16,6 +16,13 @@
 //
 // The summary is read from flash once and cached; erase() clears it. A new
 // crash replaces the dump (one at a time).
+//
+// The erase goes through the flash write gate (power/WriteGate.h): one 4 KB
+// sector per gate slot (a 64 KB partition: 16 erases of ~45 ms, up to
+// ~0.4 s each, fit no pause between a module's windows and would stall
+// async_tcp past its watchdog), in the FlashWriter job "coredump". The
+// first sector goes first: the dump is invalid from then on. eraseStatus()
+// tells how far it got.
 
 #include <stddef.h>
 #include <stdint.h>
@@ -42,7 +49,19 @@ const Info& info();
 // One line: "loopTask: <reason>, PC 0x…, bt 0x… 0x… (this firmware)".
 // false (and "") when there is no dump.
 bool describe(char* out, size_t len);
+
+enum class EraseState : uint8_t { Idle, Erasing, Done, Failed };
+struct EraseStatus {
+  EraseState state = EraseState::Idle;
+  uint16_t done = 0;   // sectors erased
+  uint16_t total = 0;  // sectors in the partition
+};
+// Starts the erase (any task, never waits for the gate): true when it is
+// under way (or already was) or done, false when there is no coredump
+// partition or no FlashWriter job.
 bool erase();
+EraseStatus eraseStatus();
+const char* eraseStateName(EraseState s);  // "idle", "erasing", "done", "failed"
 
 // Framework plumbing (App): admin actions system.coredump (GET: the file)
 // and system.eraseCoredump.

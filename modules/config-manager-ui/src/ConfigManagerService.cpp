@@ -4,6 +4,7 @@
 #include <ESPFS.h>
 #include <FormBuilder.h>
 #include <WebManager.h>
+#include <power/PowerGuard.h>
 #include <App.h>  // ESPRack::restartDevice (LIB-FIX-006)
 
 ConfigManagerService::ConfigManagerService(AsyncWebServer* server,
@@ -57,16 +58,20 @@ void ConfigManagerService::registerManifest(WebManager* web) {
   // existing <primary>.snapshot with the CURRENT primary. The form's
   // refetchForm() decorator on the embedded button refreshes the tab so
   // the table's Snap column flips to ✓ without operator reload.
+  // async_tcp never waits for the flash: with the write gate free it is
+  // done here (200), otherwise queued for the flash writer (202) and the
+  // "Last backup" row tells queued / saved / failed.
   WebActionSpec snap;
   snap.id             = "config.snapshot";
   snap.title          = "Save Backup";
   snap.icon           = "Save";
   snap.color          = "primary";
   snap.auth           = WebAuthLevel::Admin;
-  snap.successMessage = "Snapshot saved — current configs frozen as backup";
+  snap.successMessage = "Backup saved, or queued until the flash is free (see Last backup)";
   snap.handler        = [this](AsyncWebServerRequest* r) {
-    bool ok = _cfg && _cfg->snapshotAll();
-    r->send(ok ? 200 : 500);
+    using S = ConfigManager::SnapState;
+    const S s = _cfg ? _cfg->requestSnapshot() : S::Failed;
+    r->send(s == S::Done ? 200 : s == S::Queued ? 202 : 500);
   };
   web->registerAction(snap);
 
@@ -93,6 +98,12 @@ void ConfigManagerService::registerManifest(WebManager* web) {
     }
     if (!anySnapshot) {
       r->send(500);
+      return;
+    }
+    // The restore writes the files: while PowerGuard pauses writes the
+    // request is refused (503), no restart (the writes would be skipped).
+    if (!ESPRack::PowerGuard::writesAllowed()) {
+      r->send(503, "application/json", "{\"ok\":false,\"error\":\"flash writes paused\"}");
       return;
     }
     // The restore itself runs AFTER every module's onShutdown()
@@ -143,6 +154,18 @@ void ConfigManagerService::buildForm(JsonObject& root) {
   FormBuilder::addTextField(cm, "snap_summary", AF::R, snapStr.c_str(),
                             icon("SettingsBackupRestore"),
                             colorMap(mapSpec.c_str()));
+
+  // The last Save Backup of this boot: done at once, or queued for the
+  // flash writer while the write gate is busy, then saved or failed.
+  const char* lastSnap = "Not this boot";
+  switch (_cfg->snapshotState()) {
+    case ConfigManager::SnapState::Queued: lastSnap = "Queued (waiting for the flash)"; break;
+    case ConfigManager::SnapState::Done:   lastSnap = "Saved"; break;
+    case ConfigManager::SnapState::Failed: lastSnap = "Failed"; break;
+    default: break;
+  }
+  FormBuilder::addTextField(cm, "snap_last", AF::R, lastSnap, icon("Save"), label("Last backup"),
+                            colorMap("Saved:success,Failed:error,Not this boot:info,default:warning"));
 
   // Per-entry table — populated inline with current state.
   // Two distinct counters and two file-size columns:
@@ -213,7 +236,7 @@ void ConfigManagerService::buildForm(JsonObject& root) {
   // Footer actions — actionRef pulls URL/icon/color/confirm/successMessage
   // from the manifest entries registered in registerManifest().
   FormBuilder::addActionField(cm, "a_save",    "Save Backup",    AF::RW,
-                              actionRef("config.snapshot"));
+                              actionRef("config.snapshot"), refetchForm());
   FormBuilder::addActionField(cm, "a_restore", "Restore Backup", AF::RW,
                               actionRef("config.restore"));
 }

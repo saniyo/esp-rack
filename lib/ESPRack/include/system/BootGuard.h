@@ -22,7 +22,11 @@
 // `limit` of them in a row fit limit × stableAfterMs anyway.
 //
 // Persisted in NVS namespace "esprack", key "boot": two writes per boot at
-// most (begin, markStable).
+// most (begin, markStable), plus one per clearSafeMode. The boot's writes go
+// at once; the later ones go through the flash write gate
+// (power/WriteGate.h): a gate pass on the loop / async_tcp, else the
+// FlashWriter job "bootguard" writes them (the change is in effect in RAM
+// at once; while PowerGuard pauses writes it waits there).
 //
 // History: the last kBootHistory boots with their reason, class, the time
 // of the boot and how long the run before it lasted (NVS key "boots": one
@@ -87,11 +91,18 @@ const BootInfo& info();
 //   if (BootGuard::isCrash(BootGuard::info().bootClass)) ...
 bool isCrash(BootClass c);
 void markStable();
-void clearSafeMode();
+// true: cleared and saved; false: cleared, the save put off by the write
+// gate (or not begun). Never waits.
+bool clearSafeMode();
 
 // Framework plumbing (App).
 void loop();                            // markStable() once uptime >= stableAfterMs
 void registerManifest(WebManager* web);  // admin action system.clearSafeMode
+// A write the gate put off is still in RAM.
+bool savePending();
+// Shutdown: writes what is pending now, waiting for a gate slot boundMs at
+// most per blob (not on async_tcp or the loop task outside shutdown).
+void flush(uint32_t boundMs);
 
 }  // namespace BootGuard
 }  // namespace ESPRack

@@ -5,6 +5,7 @@
 #include <DeviceIdentity.h>
 #include <WebManager.h>
 #include <App.h>  // ESPRack::restartDevice (LIB-FIX-006)
+#include <power/PowerGuard.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
@@ -1357,6 +1358,9 @@ String MothershipService::actionConfigRestore(JsonObjectConst params) {
     if (configs[e.id().c_str()].is<JsonObjectConst>()) ++matching;
   });
   if (matching == 0) return "no_entries_matched";
+  // The files are flash writes: refused, not restarted, while PowerGuard
+  // pauses writes.
+  if (!ESPRack::PowerGuard::writesAllowed()) return "flash writes paused";
   // The files are written AFTER every module's onShutdown() (LIB-FIX-006),
   // so a module persisting state on shutdown can't overwrite them. The
   // payload must outlive this action: keep a serialized copy. If that

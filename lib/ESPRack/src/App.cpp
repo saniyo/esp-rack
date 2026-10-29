@@ -729,14 +729,18 @@ bool App::runShutdownOnce(const char* reason) {
   // Config saves the write gate put off (the hooks' own included): written
   // now, after a short wait for a pause at most, or they'd go with the restart.
   configManager_.flushDeferredNow(ESPRACK_SHUTDOWN_WRITE_WAIT_MS);
+  // The boot record writes put off the same way (clearSafeMode, markStable).
+  BootGuard::flush(ESPRACK_SHUTDOWN_WRITE_WAIT_MS);
   hooksDone_ = true;
   return true;
 }
 
 uint32_t App::shutdownGraceMs() const {
-  // ... and the config saves the write gate put off, written after the hooks.
+  // ... and the config saves and boot record blobs (two at most) the write
+  // gate put off, written after the hooks.
   return (uint32_t)modules_.size() * ESPRACK_SHUTDOWN_BUDGET_MS + 2000 +
-         (uint32_t)configManager_.deferredCount() * ESPRACK_SHUTDOWN_WRITE_WAIT_MS;
+         ((uint32_t)configManager_.deferredCount() + (BootGuard::savePending() ? 2u : 0u)) *
+             ESPRACK_SHUTDOWN_WRITE_WAIT_MS;
 }
 
 uint32_t App::restartDeadlineMs() const {
@@ -757,6 +761,17 @@ void App::runAfterShutdownOnce() {
   if (afterState_.compare_exchange_strong(expected, 1)) {
     if (afterShutdown_) {
       armRestartDeadline(ESPRACK_RESTART_DEADLINE_MS);  // its own allowance
+      // One write gate entry for the whole step (config.restore, Factory
+      // Reset's /config wipe, ...). It runs on the loop task (watchdog
+      // paused for the shutdown) or on the restartDevice caller (off the
+      // task watchdog by then, e.g. async_tcp): a short wait for a pause,
+      // then it goes anyway, the restart is coming. The callers refuse the
+      // request while PowerGuard pauses writes; one that paused them since
+      // doesn't drop a step already confirmed: it runs as without the gate
+      // (the config writes still ask PowerGuard themselves).
+      WriteSlot slot(ESPRACK_SHUTDOWN_WRITE_WAIT_MS);
+      if (!slot.ok()) log_w("[restart] flash writes paused (PowerGuard): after-shutdown step runs anyway");
+      ConfigManager::GateHeld held;  // the config helpers take no slot of their own
       afterShutdown_();
     }
     afterState_ = 2;

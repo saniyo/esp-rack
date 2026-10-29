@@ -34,7 +34,7 @@ class FlashWriter {
  public:
   static constexpr uint32_t kDone = 0;
   static constexpr uint32_t kOnPower = 0xFFFFFFFFu;
-  static constexpr uint8_t kMaxJobs = 8;
+  static constexpr uint8_t kMaxJobs = 12;  // the framework's modules take 8: room for a consumer's
   using Job = std::function<uint32_t()>;
 
   // At setup (the loop task). -1 when all kMaxJobs are taken.

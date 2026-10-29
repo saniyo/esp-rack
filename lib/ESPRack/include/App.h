@@ -75,6 +75,11 @@ class HwRegistry;          // hw/HwRegistry.h — owned by App
 // `afterShutdown` (optional) runs once, AFTER every onShutdown() and right
 // before the chip resets — e.g. factory reset wipes /config there, so a
 // module that persists state in onShutdown() can't resurrect the files.
+// It runs inside one write gate slot (power/WriteGate.h; a wait of
+// ESPRACK_SHUTDOWN_WRITE_WAIT_MS at most for a pause, then it goes), after
+// the config saves the gate put off. Callers refuse the request while
+// PowerGuard pauses writes (PowerGuard::writesAllowed()); a step already
+// confirmed still runs if writes were paused since (and logs it).
 [[noreturn]] void restartDevice(const char* reason,
                                 std::function<void()> afterShutdown = nullptr);
 

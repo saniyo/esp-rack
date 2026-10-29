@@ -28,6 +28,12 @@
 #include <freertos/task.h>
 #endif
 
+// How long a caller on a shared task (async_tcp, the loop: Save Backup, the
+// restart's restore) waits for the config lock before its error path.
+#ifndef CFGMGR_LOCK_WAIT_MS
+#define CFGMGR_LOCK_WAIT_MS 1000
+#endif
+
 class ConfigManager {
  public:
   struct VerifyInfo {
@@ -40,6 +46,10 @@ class ConfigManager {
   enum class LoadResult {
     OkPrimary,
     OkRestoredFromBackup,
+    // The verified backup's data, the primary not repaired (the write gate
+    // or PowerGuard turned the copy away, or it failed): the next save
+    // writes the primary without rotating it over the backup.
+    OkBackupOnly,
     NeedDefaults,
     Fail
   };
@@ -128,6 +138,9 @@ class ConfigManager {
     // deferredSince: when it was first put off (WriteGate::now()).
     virtual bool deferred() const { return false; }
     virtual uint32_t deferredSince() const { return 0; }
+    // Loaded from the backup while the primary on flash failed to verify
+    // and is not rewritten yet: never copy that primary over the backup.
+    virtual bool primaryStale() const { return false; }
     // FlashWriter, the first step of a deferred save: the backup copy of
     // the file on flash. Unneeded: nothing to save any more (the state is
     // the saved one again; no longer deferred). Paused: PowerGuard paused
@@ -263,7 +276,8 @@ class ConfigManager {
   // copy, then the file), no polling. A PowerGuard latch keeps them until
   // restart. flushDeferred() kicks that job. flushDeferredNow() (the
   // restart path) waits for the gate at most boundMs per save, then writes
-  // anyway: a save left waiting would be lost with the restart.
+  // anyway: a save left waiting would be lost with the restart. A queued
+  // Save Backup (requestSnapshot) follows the saves, one wait for its run.
   void markDeferred() {
     _anyDeferred = true;
     ESPRack::FlashWriter::kick(_writerJob);
@@ -330,16 +344,53 @@ class ConfigManager {
   // restoreAllFromSnapshot() is non-destructive to the snapshot itself —
   // it copies snapshot → primary and leaves snapshot in place; caller
   // (action handler) reboots so each service's begin() picks up the
-  // restored primary cleanly.
+  // restored primary cleanly. It runs under the lock (at most
+  // CFGMGR_LOCK_WAIT_MS to get it) and the write gate: the restart's
+  // after-shutdown step holds a slot for it (GateHeld).
   bool snapshotEntry(const char* primaryPath);
   bool restoreEntryFromSnapshot(const char* primaryPath);
   bool hasSnapshot(const char* primaryPath) const;
+  // Now, any task, never waits for the gate: under the lock (at most
+  // CFGMGR_LOCK_WAIT_MS) with one write gate pass for the run, only while
+  // the gate is free. false: a copy failed, or the lock / gate said no.
   bool snapshotAll();
   bool restoreAllFromSnapshot();
+
+  // Save Backup from a shared task (async_tcp), never waits: snapshotAll()
+  // now when it can (a free gate: as without the gate); otherwise queued
+  // for the FlashWriter job, a gate slot per file step, after the deferred
+  // saves (so it freezes what they write). PowerGuard pausing writes keeps
+  // it queued; the restart path (flushDeferredNow) writes it at the latest.
+  enum class SnapState : uint8_t { None, Queued, Done, Failed };
+  SnapState requestSnapshot();
+  SnapState snapshotState() const;  // the last request's outcome so far
+  uint32_t snapshotStateTs() const;  // when it got there (nowTs() secs)
+
+  // ---- the write gate for the file helpers ----
+  // copyFile / removeIfExists / mkdirsForFile each write one bounded step;
+  // atomicWrite and restoreBackupToPrimary a few (they go only while the
+  // gate is free). A helper takes a write gate pass (power/WriteGate.h) of
+  // its own for that, never waits, and fails like a flash error when the
+  // gate says no (the caller keeps what it has). A task that holds a slot
+  // or pass for its config work already (a save, the FlashWriter job, the
+  // restart's after-shutdown step) says so with a GateHeld for that scope:
+  // the helpers then take none (no second entry into the gate).
+  class GateHeld {
+   public:
+    explicit GateHeld(bool on = true);
+    ~GateHeld();
+    static bool here();  // the calling task holds one
+    GateHeld(const GateHeld&) = delete;
+    GateHeld& operator=(const GateHeld&) = delete;
+
+   private:
+    bool _on = false;
+  };
 
   // ---- internal helpers used by entries/templates ----
   void lock();
   void unlock();
+  bool tryLock(uint32_t ms);  // false: not within ms (the caller's error path)
 
   String makeBackupPathFor(const char* primary) const;
   String makeTmpPathFor(const char* primary) const;
@@ -412,8 +463,10 @@ class ConfigManager {
     const EntryStats& stats() const override { return _stats; }
     bool deferred() const override { return _deferred; }
     uint32_t deferredSince() const override { return _deferredSince; }
+    bool primaryStale() const override { return _primaryStale; }
     bool _deferred = false;
     uint32_t _deferredSince = 0;
+    bool _primaryStale = false;  // under the manager's lock
 
     Backup backupForSave(ConfigManager& mgr) override {
       if (!_d.service) return Backup::Unneeded;
@@ -431,7 +484,8 @@ class ConfigManager {
         mgr.unlock();
         return Backup::Unneeded;
       }
-      mgr.backupPrimary(_primary.c_str(), _backup.c_str());
+      // A primary that failed to verify is no backup: the good one stays.
+      if (!_primaryStale) mgr.backupPrimary(_primary.c_str(), _backup.c_str());
       mgr.unlock();
       return Backup::Made;
     }
@@ -485,7 +539,11 @@ class ConfigManager {
         return true;
       }
 
-      if (res == LoadResult::OkPrimary || res == LoadResult::OkRestoredFromBackup) {
+      if (res == LoadResult::OkPrimary || res == LoadResult::OkRestoredFromBackup ||
+          res == LoadResult::OkBackupOnly) {
+        // The primary failed to verify and is not repaired yet: whatever
+        // is saved next (normalize, reset) is not rotated over the backup.
+        _primaryStale = (res == LoadResult::OkBackupOnly);
         JsonObjectConst root = doc.as<JsonObjectConst>();
         JsonObjectConst dataConst;
         bool legacy = false;
@@ -519,6 +577,9 @@ class ConfigManager {
         if (legacy) needNormalize = true;
         if (!legacy && !vP.hadMeta) needNormalize = true;
         if (res == LoadResult::OkRestoredFromBackup) needNormalize = true;
+        // The normalize save repairs a stale primary (deferred while the
+        // write gate is busy).
+        if (_primaryStale) needNormalize = true;
         if (foundPlaintext) needNormalize = true;
 
         _loaded = true;
@@ -616,11 +677,16 @@ class ConfigManager {
       // as a snapshot write — surface that on the Config Manager tab
       // by bumping snaps + lastSnapshotTs. First-save-ever (no primary
       // yet) skips the snapshot bookkeeping because no file rotated.
-      bool primaryExisted = mgr.fileExists(_primary.c_str());
+      // A stale primary (failed to verify) is not rotated: the backup stays.
+      bool primaryExisted = !_primaryStale && mgr.fileExists(_primary.c_str());
 
       uint32_t written = 0;
-      bool ok = mgr.atomicWrite(_primary.c_str(), backupDone ? nullptr : _backup.c_str(), _tmp.c_str(), data,
-                                _d.bufferSize, &written);
+      bool ok;
+      {
+        ConfigManager::GateHeld mark;  // the pass or the caller's slot covers atomicWrite's steps
+        ok = mgr.atomicWrite(_primary.c_str(), (backupDone || _primaryStale) ? nullptr : _backup.c_str(),
+                             _tmp.c_str(), data, _d.bufferSize, &written);
+      }
       gate.release();
 
       std::vector<std::pair<ListenerId, GenericListener>> snap;
@@ -630,6 +696,7 @@ class ConfigManager {
         _lastSavedCrc = crcPlain;
         _hasLastSavedCrc = true;
         _deferred = false;
+        _primaryStale = false;
 
         uint32_t now = mgr.nowTs();
         _stats.saves++;
@@ -786,6 +853,19 @@ class ConfigManager {
   std::atomic<bool> _anyDeferred{false};  // marked from any task
   int8_t _writerJob = -1;                 // FlashWriter: writeDeferred()
   uint32_t writeDeferred();
+
+  // Save Backup (requestSnapshot), under a spinlock in ConfigManager.cpp.
+  uint8_t _snapState = 0;      // SnapState
+  uint32_t _snapTs = 0;
+  uint32_t _snapGen = 0;       // one per request: a run that sees a newer one starts over
+  size_t _snapNext = 0;        // the queued run's next entry
+  bool _snapPending = false;
+  bool _snapFailed = false;    // a copy of the queued run failed
+  int8_t snapshotNow();        // 1 done, 0 failed, -1 not run (lock or gate)
+  bool snapshotLocked();
+  bool snapshotSteps(uint32_t since);  // false: PowerGuard paused writes (still queued)
+  bool snapPending() const;
+  void snapFinish(uint32_t gen, bool ok);
 
   // Probe-mode setter — called from discoverSecretKeysFromForm to flip
   // the thread_local g_probing flag while the service's buildForm runs.

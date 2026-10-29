@@ -4,7 +4,6 @@
 #include <esp_app_desc.h>
 #include <esp_attr.h>
 #include <freertos/FreeRTOS.h>
-#include <freertos/semphr.h>
 #include <esp_rom_crc.h>
 #include <nvs.h>
 #include <stddef.h>
@@ -13,6 +12,8 @@
 #include "App.h"
 #include "ProblemJson.h"
 #include "WebManager.h"
+#include "power/FlashWriter.h"
+#include "power/WriteGate.h"
 #include "time/TimeSync.h"
 
 namespace ESPRack {
@@ -41,19 +42,19 @@ constexpr const char* kKey = "boot";
 
 Record s_rec{};
 BootInfo s_info{};
-bool s_begun = false;
+bool s_begun = false;  // begin() was called
+bool s_ready = false;  // begin() is done
 uint8_t s_limit = 4;
 uint32_t s_stableAfterMs = 120000;
 
-// markStable (loop task) vs clearSafeMode (admin action, async_tcp).
-StaticSemaphore_t s_mxBuf;
-SemaphoreHandle_t s_mx = nullptr;
+// markStable (loop task) vs clearSafeMode (admin action, async_tcp) vs the
+// FlashWriter task. A spinlock: only copies and flags under it (a few
+// hundred bytes at most), never a flash write or a log line, so nobody
+// waits on it longer than that.
+portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
 struct Lock {
-  Lock() {
-    if (!s_mx) s_mx = xSemaphoreCreateMutexStatic(&s_mxBuf);  // begin(): early boot, one task
-    xSemaphoreTake(s_mx, portMAX_DELAY);
-  }
-  ~Lock() { xSemaphoreGive(s_mx); }
+  Lock() { portENTER_CRITICAL(&s_mux); }
+  ~Lock() { portEXIT_CRITICAL(&s_mux); }
 };
 
 uint32_t crcOf(const Record& r) {
@@ -70,18 +71,21 @@ bool load(Record& r) {
   return ok;
 }
 
-void store() {
-  s_rec.magic = kMagic;
-  s_rec.crc = crcOf(s_rec);
+// One NVS blob: one bounded flash step (a page write, now and then a
+// sector erase).
+bool nvsPut(const char* key, const void* data, size_t len) {
   nvs_handle_t h;
-  if (nvs_open(kNs, NVS_READWRITE, &h) != ESP_OK) {
-    log_w("[boot] NVS open failed — boot record not saved");
-    return;
-  }
-  if (nvs_set_blob(h, kKey, &s_rec, sizeof(s_rec)) != ESP_OK || nvs_commit(h) != ESP_OK) {
-    log_w("[boot] NVS write failed — boot record not saved");
-  }
+  if (nvs_open(kNs, NVS_READWRITE, &h) != ESP_OK) return false;
+  const bool ok = nvs_set_blob(h, key, data, len) == ESP_OK && nvs_commit(h) == ESP_OK;
   nvs_close(h);
+  return ok;
+}
+
+// r: a copy, sealed here and written outside the lock.
+void store(Record& r) {
+  r.magic = kMagic;
+  r.crc = crcOf(r);
+  if (!nvsPut(kKey, &r, sizeof(r))) log_w("[boot] NVS write failed — boot record not saved");
 }
 
 BootClass classify(esp_reset_reason_t rr, const char* last) {
@@ -146,15 +150,11 @@ uint32_t previousUptime() {
   return ok ? r.upS : 0;
 }
 
-void storeHistory() {
-  s_hist.magic = kHistMagic;
-  s_hist.crc = esp_rom_crc32_le(0, reinterpret_cast<const uint8_t*>(&s_hist), offsetof(History, crc));
-  nvs_handle_t h;
-  if (nvs_open(kNs, NVS_READWRITE, &h) != ESP_OK) return;
-  if (nvs_set_blob(h, kHistKey, &s_hist, sizeof(s_hist)) != ESP_OK || nvs_commit(h) != ESP_OK) {
-    log_w("[boot] NVS write failed — boot history not saved");
-  }
-  nvs_close(h);
+// h: a copy, sealed here and written outside the lock.
+void storeHistory(History& h) {
+  h.magic = kHistMagic;
+  h.crc = esp_rom_crc32_le(0, reinterpret_cast<const uint8_t*>(&h), offsetof(History, crc));
+  if (!nvsPut(kHistKey, &h, sizeof(h))) log_w("[boot] NVS write failed — boot history not saved");
 }
 
 void loadHistory() {
@@ -168,6 +168,109 @@ void loadHistory() {
     nvs_close(h);
   }
   if (!ok) s_hist = History{};
+}
+
+// The writes after the boot's own go through the flash write gate
+// (power/WriteGate.h). A change bumps its blob's generation; a writer copies
+// the blob under the lock, writes the copy outside it and then marks that
+// generation saved. One writer at a time, so an older copy never lands
+// after a newer one. On the shared tasks (the loop: markStable, the boot's
+// time; async_tcp: clearSafeMode) a gate pass, never a wait: when the gate
+// says no, the FlashWriter job "bootguard" writes it, a slot per blob.
+// While PowerGuard pauses writes the change waits in RAM.
+struct Gen {
+  uint32_t now = 0;
+  uint32_t saved = 0;
+  bool dirty() const { return saved != now; }
+};
+Gen s_recGen, s_histGen;
+bool s_writing = false;
+uint32_t s_putOffAt = 0;  // gate clock: when the oldest pending write was put off; 0 = none
+int8_t s_job = -1;
+
+bool pending() {
+  Lock l;
+  return s_recGen.dirty() || s_histGen.dirty();
+}
+
+enum class Put : uint8_t { Nothing, Busy, Done };
+
+// One pending blob, written now: the caller holds a gate pass or slot.
+// A failed write is logged and not tried again (as at boot).
+Put writeOne() {
+  Record rec;
+  History hist;
+  bool isRec = false;
+  uint32_t gen = 0;
+  {
+    Lock l;
+    if (s_writing) return Put::Busy;
+    if (s_recGen.dirty()) {
+      isRec = true;
+      gen = s_recGen.now;
+      rec = s_rec;
+    } else if (s_histGen.dirty()) {
+      gen = s_histGen.now;
+      hist = s_hist;
+    } else {
+      s_putOffAt = 0;
+      return Put::Nothing;
+    }
+    s_writing = true;
+  }
+  if (isRec) store(rec);
+  else storeHistory(hist);
+  {
+    Lock l;
+    (isRec ? s_recGen : s_histGen).saved = gen;
+    s_writing = false;
+    if (!s_recGen.dirty() && !s_histGen.dirty()) s_putOffAt = 0;
+  }
+  return Put::Done;
+}
+
+// The FlashWriter task: what is pending, a gate slot per blob, on the wait
+// clock of the first write put off.
+uint32_t writeJob() {
+  for (;;) {
+    uint32_t since;
+    {
+      Lock l;
+      if (!s_recGen.dirty() && !s_histGen.dirty()) return FlashWriter::kDone;
+      since = s_putOffAt;
+    }
+    WriteSlot slot(0, nullptr, since ? since : WriteGate::now());
+    if (!slot.ok()) return FlashWriter::kOnPower;  // PowerGuard: the change waits in RAM
+    const Put p = writeOne();
+    if (p == Put::Busy) return 10;  // a pass on a shared task is writing: look again
+    if (p == Put::Nothing) return FlashWriter::kDone;
+  }
+}
+
+// After a change, on a shared task: never waits. true: written now.
+bool save() {
+  if (s_job < 0) {  // no FlashWriter job to be had: at once, as without the gate
+    while (writeOne() == Put::Done) {
+    }
+    return !pending();
+  }
+  uint32_t since;
+  {
+    Lock l;
+    since = s_putOffAt ? s_putOffAt : WriteGate::now();
+  }
+  {
+    // One NVS write per pass; a second blob pending goes to the job.
+    WritePass pass(since);
+    if (pass.ok() && writeOne() != Put::Busy && !pending()) return true;
+  }
+  {
+    Lock l;
+    if (!s_putOffAt) s_putOffAt = since;
+  }
+  WriteGate::noteDeferred();
+  FlashWriter::kick(s_job);
+  return false;
 }
 
 void publish() {
@@ -194,9 +297,12 @@ bool isCrash(BootClass c) {
 
 void begin(uint8_t limit, uint32_t windowMs, uint32_t stableAfterMs) {
   (void)windowMs;  // see BootGuard.h
-  Lock l;
-  if (s_begun) return;
-  s_begun = true;
+  {
+    Lock l;
+    if (s_begun) return;
+    s_begun = true;
+  }
+  // Early boot, one task: nobody else touches the state before s_ready.
   s_limit = limit ? limit : 1;
   s_stableAfterMs = stableAfterMs;
 
@@ -228,7 +334,9 @@ void begin(uint8_t limit, uint32_t windowMs, uint32_t stableAfterMs) {
     log_e("[boot] SAFE MODE: %u crash boots in a row (last: %s)", (unsigned)s_rec.quick, last);
   }
   s_rec.flags &= static_cast<uint8_t>(~kStable);
-  store();
+  // The boot's writes go at once: no module holds write windows yet.
+  Record rec = s_rec;
+  store(rec);
 
   // This boot into the history; the previous run's length from RTC memory.
   loadHistory();
@@ -239,7 +347,8 @@ void begin(uint8_t limit, uint32_t windowMs, uint32_t stableAfterMs) {
   h.prevUpS = (rr == ESP_RST_POWERON) ? 0 : previousUptime();
   h.cls = uint8_t(cls);
   strlcpy(h.reason, last, sizeof(h.reason));
-  storeHistory();
+  History hist = s_hist;
+  storeHistory(hist);
   storeUptime(0);
 
   s_info.reason = rr;
@@ -248,6 +357,15 @@ void begin(uint8_t limit, uint32_t windowMs, uint32_t stableAfterMs) {
   s_info.bootCount = s_rec.bootCount;
   s_info.stable = false;
   publish();
+  // The writes the gate puts off later (setup, the loop task).
+  if (s_job < 0) {
+    s_job = FlashWriter::add("bootguard", [] { return writeJob(); });
+    if (s_job < 0) log_w("[boot] no FlashWriter job left: boot record writes go at once");
+  }
+  {
+    Lock l;
+    s_ready = true;
+  }
   log_i("[boot] #%u %s (%s), crash run %u/%u%s", (unsigned)s_rec.bootCount, last, bootClassName(cls),
         (unsigned)s_rec.quick, (unsigned)s_limit, s_info.safeMode ? ", SAFE MODE" : "");
 }
@@ -256,6 +374,7 @@ const BootInfo& info() { return s_info; }
 
 size_t history(BootRecord* out, size_t max) {
   Lock l;
+  if (!s_ready) return 0;
   size_t n = 0;
   for (size_t i = 0; i < kBootHistory && n < max; ++i) {
     const HistRec& h = s_hist.rec[(s_hist.head + kBootHistory - i) % kBootHistory];
@@ -271,29 +390,44 @@ size_t history(BootRecord* out, size_t max) {
 }
 
 void markStable() {
-  Lock l;
-  if (!s_begun || s_info.stable) return;
-  s_info.stable = true;
-  s_rec.flags |= kStable;
-  s_rec.quick = 0;
-  memset(s_rec.sinceStable, 0, sizeof(s_rec.sinceStable));
-  store();
-  publish();
+  {
+    Lock l;
+    if (!s_ready || s_info.stable) return;
+    s_info.stable = true;
+    s_rec.flags |= kStable;
+    s_rec.quick = 0;
+    memset(s_rec.sinceStable, 0, sizeof(s_rec.sinceStable));
+    ++s_recGen.now;
+    publish();
+  }
   log_i("[boot] stable");
+  (void)save();
 }
 
-void clearSafeMode() {
-  Lock l;
-  if (!s_begun) return;
-  s_rec.flags &= static_cast<uint8_t>(~kSafe);
-  s_rec.quick = 0;
-  store();
-  publish();
+bool clearSafeMode() {
+  {
+    Lock l;
+    if (!s_ready) return false;
+    s_rec.flags &= static_cast<uint8_t>(~kSafe);
+    s_rec.quick = 0;
+    ++s_recGen.now;
+    publish();
+  }
   log_w("[boot] safe mode cleared");
+  return save();
+}
+
+bool savePending() { return pending(); }
+
+void flush(uint32_t boundMs) {
+  for (int i = 0; i < 2 && pending(); ++i) {  // two blobs at most
+    WriteSlot slot(boundMs);
+    if (!slot.ok() || writeOne() != Put::Done) return;  // PowerGuard, or the job is at it
+  }
 }
 
 void loop() {
-  if (!s_begun) return;
+  if (!s_ready) return;
   const uint32_t ms = millis();
   if (!s_info.stable && ms >= s_stableAfterMs) markStable();
   // The run's length for the next boot (RTC memory: no flash wear).
@@ -306,9 +440,12 @@ void loop() {
   if (!s_timed && TimeSync::instance().isValid()) {
     s_timed = true;
     const time_t now = time(nullptr);
-    Lock l;
-    s_hist.rec[s_hist.head].bootT = uint32_t(now) - upS;
-    storeHistory();
+    {
+      Lock l;
+      s_hist.rec[s_hist.head].bootT = uint32_t(now) - upS;
+      ++s_histGen.now;
+    }
+    (void)save();
   }
 }
 
@@ -324,8 +461,14 @@ void registerManifest(WebManager* web) {
   spec.confirm = "Leave safe mode? The code that crashed runs again.";
   spec.successMessage = "Safe mode cleared";
   spec.handler = [](AsyncWebServerRequest* r) {
-    clearSafeMode();
-    r->send(200, "application/json", "{\"ok\":true}");
+    // Cleared at once; saved now ("saved":true), or by the FlashWriter task
+    // once the write gate lets it (false; kept in RAM meanwhile).
+    if (!s_ready) {
+      r->send(503, "application/json", "{\"ok\":false,\"error\":\"boot guard not started\"}");
+      return;
+    }
+    const bool saved = clearSafeMode();
+    r->send(200, "application/json", saved ? "{\"ok\":true,\"saved\":true}" : "{\"ok\":true,\"saved\":false}");
   };
   web->registerAction(std::move(spec));
 }
