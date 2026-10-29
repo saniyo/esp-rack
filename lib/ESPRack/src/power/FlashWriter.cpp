@@ -31,6 +31,14 @@ std::atomic<bool> s_powerKick{false};  // PowerGuard allows writes again: run th
 bool s_listening = false;              // attach() got a PowerGuard listener
 constexpr uint32_t kPowerRetryMs = 1000;  // without one: a job PowerGuard held looks again this often
 
+struct FlushSlot {
+  FlashWriter::RestartFlush fn = nullptr;
+  FlashWriter::RestartFlushMs ms = nullptr;
+  void* ctx = nullptr;
+};
+FlushSlot s_flush[FlashWriter::kMaxRestartFlush];
+std::atomic<uint8_t> s_flushCount{0};
+
 uint32_t nowMs() { return static_cast<uint32_t>(esp_timer_get_time() / 1000); }
 
 void run(void*) {
@@ -127,6 +135,28 @@ void FlashWriter::retry() {
   if (!any) return;
   last = now;
   ensureTask();  // it runs every job still kicked
+}
+
+bool FlashWriter::addRestartFlush(RestartFlush fn, RestartFlushMs ms, void* ctx) {
+  const uint8_t i = s_flushCount.load();
+  if (!fn || i >= kMaxRestartFlush) return false;
+  s_flush[i].fn = fn;
+  s_flush[i].ms = ms;
+  s_flush[i].ctx = ctx;
+  s_flushCount = static_cast<uint8_t>(i + 1);
+  return true;
+}
+
+void FlashWriter::restartFlush(uint32_t boundMs) {
+  for (uint8_t i = 0, n = s_flushCount.load(); i < n; ++i) s_flush[i].fn(s_flush[i].ctx, boundMs);
+}
+
+uint32_t FlashWriter::restartFlushMs(uint32_t boundMs) {
+  uint32_t ms = 0;
+  for (uint8_t i = 0, n = s_flushCount.load(); i < n; ++i) {
+    if (s_flush[i].ms) ms += s_flush[i].ms(s_flush[i].ctx, boundMs);
+  }
+  return ms;
 }
 
 uint8_t FlashWriter::jobs() { return s_count.load(); }

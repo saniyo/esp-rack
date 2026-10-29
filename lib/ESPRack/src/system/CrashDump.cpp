@@ -14,7 +14,14 @@
 
 #include "WebManager.h"
 #include "power/FlashWriter.h"
+#include "power/PowerGuard.h"
 #include "power/WriteGate.h"
+
+// See CrashDump.h: IDF clears its "partition in use" flag only in its own
+// one-call erase, not in this one sector by sector.
+#if CONFIG_ESP_COREDUMP_FLASH_NO_OVERWRITE
+#warning "CrashDump: with CONFIG_ESP_COREDUMP_FLASH_NO_OVERWRITE a crash after erase() is saved only from the next boot on"
+#endif
 
 namespace ESPRack {
 namespace CrashDump {
@@ -47,6 +54,11 @@ portMUX_TYPE s_eraseMux = portMUX_INITIALIZER_UNLOCKED;
 EraseStatus s_erase;
 bool s_stepping = false;  // a sector is being erased
 int8_t s_job = -1;
+// Downloads under way (an erase waits for none: it is refused meanwhile,
+// and a download is refused while an erase runs).
+uint8_t s_downloads = 0;
+
+enum class Start : uint8_t { Started, NoPartition, NoJob, Paused, Downloading };
 
 const esp_partition_t* partition() {
   return esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_COREDUMP, nullptr);
@@ -133,7 +145,38 @@ void load(Info& i) {
 #endif
 }
 
+// A download under way, counted while its response lives (sent, or the
+// client gone): the erase is refused meanwhile.
+struct Download {
+  Download() = default;
+  ~Download() {
+    portENTER_CRITICAL(&s_eraseMux);
+    if (s_downloads) --s_downloads;
+    portEXIT_CRITICAL(&s_eraseMux);
+  }
+  Download(const Download&) = delete;
+  Download& operator=(const Download&) = delete;
+};
+
 void sendFile(AsyncWebServerRequest* r) {
+  // Not while an erase runs: the file would have erased sectors in it.
+  bool erasing;
+  portENTER_CRITICAL(&s_eraseMux);
+  erasing = s_erase.state == EraseState::Erasing;
+  if (!erasing) ++s_downloads;
+  portEXIT_CRITICAL(&s_eraseMux);
+  if (erasing) {
+    r->send(409, "application/json", "{\"error\":\"the crash dump is being erased\"}");
+    return;
+  }
+  std::shared_ptr<Download> dl(new (std::nothrow) Download());
+  if (!dl) {
+    portENTER_CRITICAL(&s_eraseMux);
+    --s_downloads;
+    portEXIT_CRITICAL(&s_eraseMux);
+    r->send(503, "application/json", "{\"error\":\"out of memory\"}");
+    return;
+  }
   size_t addr = 0, size = 0;
   const esp_partition_t* part =
       esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_COREDUMP, nullptr);
@@ -144,7 +187,7 @@ void sendFile(AsyncWebServerRequest* r) {
   }
   const size_t offset = addr - part->address;
   AsyncWebServerResponse* resp = r->beginResponse(
-      "application/octet-stream", size, [part, offset, size](uint8_t* buf, size_t maxLen, size_t index) -> size_t {
+      "application/octet-stream", size, [part, offset, size, dl](uint8_t* buf, size_t maxLen, size_t index) -> size_t {
         if (index >= size) return 0;
         const size_t n = maxLen < size - index ? maxLen : size - index;
         return esp_partition_read(part, offset + index, buf, n) == ESP_OK ? n : 0;
@@ -180,36 +223,50 @@ bool describe(char* out, size_t len) {
   return true;
 }
 
-bool erase() {
+namespace {
+Start startErase() {
   const esp_partition_t* part = partition();
   if (!part) {
     log_w("[coredump] no coredump partition");
-    return false;
+    return Start::NoPartition;
   }
   if (s_job < 0) {
     log_w("[coredump] no FlashWriter job: not erased");
-    return false;
+    return Start::NoJob;
   }
-  bool start = false;
+  const bool power = PowerGuard::writesAllowed();
+  bool start = false, busy = false;
   portENTER_CRITICAL(&s_eraseMux);
   if (s_erase.state != EraseState::Erasing) {
-    s_erase.state = EraseState::Erasing;
-    s_erase.done = 0;
-    s_erase.total = uint16_t(part->size / sectorOf(part));
-    start = true;
+    // Refused while a download reads it, and while PowerGuard pauses
+    // writes (as Factory Reset): one under way goes on once it allows them.
+    busy = s_downloads > 0;
+    if (!busy && power) {
+      s_erase.state = EraseState::Erasing;
+      s_erase.done = 0;
+      s_erase.total = uint16_t(part->size / sectorOf(part));
+      start = true;
+    }
   }
+  const bool under = s_erase.state == EraseState::Erasing;
   portEXIT_CRITICAL(&s_eraseMux);
-  if (!start) return true;  // under way
+  if (busy) return Start::Downloading;
+  if (!start) return under ? Start::Started : Start::Paused;
   // The first sector at once when the gate lets it (one bounded step; the
   // dump is invalid from then on), the rest in the job.
   bool more = true;
   {
     WritePass pass;
     if (pass.ok()) more = eraseStep();
-    else WriteGate::noteDeferred();
+    else if (PowerGuard::writesAllowed()) WriteGate::noteDeferred();
   }
   if (more) FlashWriter::kick(s_job);
-  return eraseStatus().state != EraseState::Failed;
+  return Start::Started;
+}
+}  // namespace
+
+bool erase() {
+  return startErase() == Start::Started && eraseStatus().state != EraseState::Failed;
 }
 
 EraseStatus eraseStatus() {
@@ -260,9 +317,19 @@ void registerManifest(WebManager* web) {
     spec.successMessage = "Erasing the crash dump";
     spec.handler = [](AsyncWebServerRequest* r) {
       // Never the whole partition here: a sector at most, the rest in the
-      // FlashWriter job. 202 while it runs, 200 once done.
-      const bool ok = erase();
+      // FlashWriter job. 202 while it runs, 200 once done; 409 while a
+      // download reads it, 503 while PowerGuard pauses writes.
+      const Start st = startErase();
+      if (st == Start::Downloading) {
+        r->send(409, "application/json", "{\"ok\":false,\"error\":\"the crash dump is being downloaded\"}");
+        return;
+      }
+      if (st == Start::Paused) {
+        r->send(503, "application/json", "{\"ok\":false,\"error\":\"flash writes paused\"}");
+        return;
+      }
       const EraseStatus s = eraseStatus();
+      const bool ok = st == Start::Started && s.state != EraseState::Failed;
       char body[96];
       snprintf(body, sizeof body, "{\"ok\":%s,\"state\":\"%s\",\"done\":%u,\"of\":%u}", ok ? "true" : "false",
                eraseStateName(s.state), unsigned(s.done), unsigned(s.total));

@@ -9,6 +9,8 @@
 
 #include <WebManager.h>
 
+#include "FsPromote.h"
+
 // mbedTLS shipped with Arduino-ESP32 2.x exposed the SHA-256 streaming
 // API as `_ret`-suffixed functions; mbedTLS ≥ 3 (used by Arduino 3.x /
 // IDF 5) drops the suffix. Bridge both via macros so the same source
@@ -485,7 +487,11 @@ void FileSystemService::handleUpload(AsyncWebServerRequest* request,
   }
 
   Upload* u = _upload.get();
-  if (!u || !_pump.owns(request) || u->sawFinal) return;  // a second file part: dropped
+  if (!u || !_pump.owns(request)) return;
+  if (u->sawFinal) {  // a second file part: not written, the answer says so
+    if (!index && u->extraParts < 255) ++u->extraParts;
+    return;
+  }
 
   if (len && u->hashEnabled) {
     if (u->sha256Init) COMPAT_SHA256_UPDATE(&u->sha256, data, len);
@@ -545,6 +551,17 @@ namespace {
 
 constexpr size_t kUploadFileBuf = 256;  // stdio buffer: the ring's steps are whole 4 KB, chunks 1.4 KB
 
+// FsPromote on the file manager (volume-rooted paths; a gate slot is held).
+struct PromoteIo {
+  using Str = String;
+  FileSystemManager* mgr;
+  bool replace;
+  bool replaces() const { return replace; }
+  bool exists(const String& p) { return mgr->exists(p); }
+  bool remove(const String& p) { return mgr->remove(p, false) == FsResult::OK; }
+  FsResult rename(const String& from, const String& to) { return mgr->renameOver(from, to); }
+};
+
 AsyncWebServerResponse* jsonResponse(AsyncWebServerRequest* request, int code, const JsonDocument& doc) {
   String body;
   serializeJson(doc, body);
@@ -582,36 +599,30 @@ ESPRack::UploadSink FileSystemService::uploadSink(Upload* u) {
     return false;
   };
   s.finish = [u]() -> int {
-    const String partial = u->target + ".partial";
-    switch (u->step++) {
-      case 0:
-        u->file.close();
-        if (u->incomplete) {
-          log_d("[upload] incomplete, kept %s", partial.c_str());
-          return ESPRack::UploadSink::kFailed;
-        }
-        return ESPRack::UploadSink::kMore;
-      case 1:
-        // Promote: <target>.partial -> <target>. Remove first: FAT (SD)
-        // refuses a rename onto an existing file. A hash mismatch clears
-        // any stale .corrupt from a prior attempt instead.
-        (void)u->mgr->remove(u->hashOk ? u->target : String(u->target + ".corrupt"), false);
-        return ESPRack::UploadSink::kMore;
-      default: {
-        if (!u->hashOk) {
-          // Preserve the corrupt upload for inspection rather than silently deleting.
-          (void)u->mgr->rename(partial, String(u->target + ".corrupt"));
-          return ESPRack::UploadSink::kFailed;
-        }
-        const FsResult pr = u->mgr->rename(partial, u->target);
-        if (pr != FsResult::OK) {
-          log_e("[upload] promote %s failed: %s", u->target.c_str(), FileSystemManager::resultString(pr));
-          u->err = pr;
-          return ESPRack::UploadSink::kFailed;
-        }
-        return ESPRack::UploadSink::kDone;
+    if (u->step++ == 0) {
+      u->file.close();
+      if (u->incomplete) {
+        log_d("[upload] incomplete, kept %s.partial", u->target.c_str());
+        return ESPRack::UploadSink::kFailed;
       }
+      return ESPRack::UploadSink::kMore;
     }
+    // Promote <target>.partial -> <target> (a hash mismatch: -> .corrupt,
+    // kept for inspection), one flash operation per call: never a moment
+    // with neither the old file nor the new one on the volume.
+    using P = FsPromote<PromoteIo>;
+    PromoteIo io{u->mgr, u->mgr->renameReplaces(u->target)};
+    FsResult err = FsResult::OK;
+    switch (P::step(io, u->promoteAt, u->target, u->hashOk, err)) {
+      case P::Next::More: return ESPRack::UploadSink::kMore;
+      case P::Next::Done: return ESPRack::UploadSink::kDone;
+      case P::Next::Failed: break;
+    }
+    if (err != FsResult::OK) {
+      log_e("[upload] promote %s failed: %s", u->target.c_str(), FileSystemManager::resultString(err));
+      u->err = err;
+    }
+    return ESPRack::UploadSink::kFailed;
   };
   s.abort = [u]() {
     // A client that went (or the upload stalled): the bytes stay in
@@ -632,6 +643,14 @@ AsyncWebServerResponse* FileSystemService::uploadResponse(AsyncWebServerRequest*
   using ESPRack::UploadResult;
   switch (r) {
     case UploadResult::Ok: {
+      if (u.extraParts) {  // the first file is in place, the others were not written
+        DynamicJsonDocument doc(256);
+        doc["ok"] = false;
+        doc["error"] = "one_file_per_request";
+        doc["saved"] = u.target;
+        doc["dropped"] = u.extraParts;
+        return jsonResponse(request, 400, doc);
+      }
       DynamicJsonDocument doc(64);
       doc["ok"] = true;
       return jsonResponse(request, 200, doc);
@@ -738,11 +757,16 @@ void FileSystemService::sendWriteResult(AsyncWebServerRequest* request, FsResult
 
 // --------- GET /write/status?op=N ----------
 // A write the gate put off: queued, running, done or error (with why).
+// 404: no such write (any more); 503 "busy": ask again.
 void FileSystemService::handleWriteStatus(AsyncWebServerRequest* request) {
   if (!request->hasParam("op")) { sendError(request, 400, "missing_op"); return; }
   const uint32_t id = (uint32_t)strtoul(request->getParam("op")->value().c_str(), nullptr, 10);
   FileSystemManager::WriteQueue::Status st;
-  if (!_manager->writeStatus(id, st)) { sendError(request, 404, "op_not_found"); return; }
+  switch (_manager->writeStatus(id, st)) {
+    case FileSystemManager::WriteQueue::Lookup::Found: break;
+    case FileSystemManager::WriteQueue::Lookup::Busy: sendError(request, 503, "busy"); return;
+    case FileSystemManager::WriteQueue::Lookup::Missing: sendError(request, 404, "op_not_found"); return;
+  }
   using S = FileSystemManager::WriteQueue::State;
   using K = FileSystemManager::WriteQueue::Kind;
   sendAdaptiveJson(request, [&st](JsonObject& root) {

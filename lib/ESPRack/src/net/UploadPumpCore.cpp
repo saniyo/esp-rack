@@ -4,7 +4,7 @@
 
 namespace ESPRack {
 
-bool UploadPumpCore::begin(uint32_t holdBelow, uint32_t now) {
+bool UploadPumpCore::begin(uint32_t holdBelow, uint32_t now, bool revocable) {
   if (!canBegin()) return false;
   // A ring nobody took back stays for this session.
   _phase = Phase::Running;
@@ -12,6 +12,7 @@ bool UploadPumpCore::begin(uint32_t holdBelow, uint32_t now) {
   _open = false;
   _live = true;
   _finishing = false;
+  _revocable = revocable;
   _final = false;
   _held = false;
   _rd = 0;
@@ -97,7 +98,7 @@ UploadPumpCore::Window UploadPumpCore::window() {
 
 bool UploadPumpCore::pending() const {
   if (_phase != Phase::Running || _busy) return false;
-  if (_finishing) return true;  // runs to its end, failed or not
+  if (_finishing && !(failed() && _revocable)) return true;  // runs to its end, failed or not
   if (failed()) return _live;
   // A write waits for a whole step (up to the next 4 KB boundary) unless
   // all is in: one slot per sector. While the window is held there always
@@ -105,19 +106,30 @@ bool UploadPumpCore::pending() const {
   return !_open || _final || _used >= FlashSteps::room(_written);
 }
 
+UploadPumpCore::Action UploadPumpCore::peek() const {
+  if (!pending()) return Action::None;
+  if (_finishing && !(failed() && _revocable)) return Action::Finish;
+  if (failed()) return Action::Abort;
+  if (!_open) return Action::Open;
+  if (!_used) return Action::Finish;  // all in, all written
+  return Action::Write;
+}
+
+UploadPumpCore::Action UploadPumpCore::confirm(Action a) const {
+  if (!failed() || _phase != Phase::Running) return a;
+  if (a == Action::Open || a == Action::Write || (a == Action::Finish && _revocable)) return Action::Abort;
+  return a;
+}
+
 UploadPumpCore::Action UploadPumpCore::next(Span out[2], uint32_t& len) {
   out[0] = Span{};
   out[1] = Span{};
   len = 0;
-  if (!pending()) return Action::None;
+  const Action a = peek();
+  if (a == Action::None) return a;
   _busy = true;
-  if (_finishing) return Action::Finish;
-  if (failed()) return Action::Abort;
-  if (!_open) return Action::Open;
-  if (!_used) {  // all in, all written
-    _finishing = true;
-    return Action::Finish;
-  }
+  if (a == Action::Finish) _finishing = true;
+  if (a != Action::Write) return a;
   len = FlashSteps::step(_written, _used);
   const uint32_t first = len < _size - _rd ? len : _size - _rd;
   out[0] = Span{_buf + _rd, first};
@@ -156,6 +168,9 @@ void UploadPumpCore::finished(int r) {
   if (r == UploadSink::kMore) return;  // the next call follows, whatever failed meanwhile
   _finishing = false;
   if (r == UploadSink::kDone) {
+    // A revocable sink after a failure (a client that left during the
+    // finish): not committed, the abort follows.
+    if (failed() && _revocable) return;
     // Committed: whatever happened meanwhile (a client that left during
     // the finish) there is nothing left to abort.
     _open = false;

@@ -195,7 +195,7 @@ void APSettingsService::reconfigureAP() {
 void APSettingsService::loop() {
   unsigned long currentMillis = millis();
   unsigned long manageElapsed = (unsigned long)(currentMillis - _lastManaged);
-  if (manageElapsed >= MANAGE_NETWORK_DELAY) {
+  if (manageElapsed >= MANAGE_NETWORK_DELAY || _reconfigureAp) {
     _lastManaged = currentMillis;
     manageAP();
   }
@@ -208,21 +208,28 @@ uint32_t APSettingsService::loopWaitMs(uint32_t nowMs) const {
   if (_dnsServer) return ESPRACK_LOOP_DEFAULT_WAIT_MS;
 #endif
   // ESP32: the captive DNS answers on its own (AsyncUDP), nothing to poll.
+  if (_reconfigureAp) return 0;
   return ESPRack::LoopWait::dueIn(nowMs, (uint32_t)_lastManaged, MANAGE_NETWORK_DELAY);
 }
 
 void APSettingsService::manageAP() {
+  // Take the request before the work, clearing only one that was seen: a
+  // request set meanwhile (async_tcp) stays for the next pass, never lost.
+  bool reconfigure = false;
+  if (_reconfigureAp) {
+    _reconfigureAp = false;
+    reconfigure = true;
+  }
   WiFiMode_t currentWiFiMode = WiFi.getMode();
   if (_state.provisionMode == AP_MODE_ALWAYS ||
       (_state.provisionMode == AP_MODE_DISCONNECTED && WiFi.status() != WL_CONNECTED)) {
-    if (_reconfigureAp || currentWiFiMode == WIFI_OFF || currentWiFiMode == WIFI_STA) {
+    if (reconfigure || currentWiFiMode == WIFI_OFF || currentWiFiMode == WIFI_STA) {
       startAP();
     }
   } else if ((currentWiFiMode == WIFI_AP || currentWiFiMode == WIFI_AP_STA) &&
-             (_reconfigureAp || !WiFi.softAPgetStationNum())) {
+             (reconfigure || !WiFi.softAPgetStationNum())) {
     stopAP();
   }
-  _reconfigureAp = false;
 }
 
 void APSettingsService::startAP() {

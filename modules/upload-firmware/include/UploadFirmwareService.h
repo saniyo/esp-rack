@@ -28,11 +28,13 @@ class WebManager;
 // async_tcp. With a free gate (no module holds windows) every chunk is
 // written as it comes, as before. The answer comes once the image is
 // written and checked (200, else 500 with the reason); the device restarts
-// when the client has gone after a 200. A client that leaves before the
-// last byte aborts the image (nothing is set to boot); one that leaves
-// while it is checked and set to boot: that completes, no restart. One
-// image at a time: 503 while auto-update, ArduinoOTA or another upload
-// holds the update (OtaWriter::reserve at the first chunk).
+// when the client has gone after a 200, and that restart sets the image to
+// boot (OtaWriter::restartInto: after the modules' shutdown, the buses
+// stopped). A client that leaves before the 200, or a request that ends
+// before its last byte, aborts the image (nothing is set to boot, no
+// restart). One image at a time: 503 while auto-update, ArduinoOTA or
+// another upload holds the update (OtaWriter::reserve at the first chunk;
+// an image that passed keeps it up to the restart).
 class UploadFirmwareService {
  public:
   UploadFirmwareService(AsyncWebServer* server, SecurityManager* securityManager);
@@ -47,7 +49,7 @@ class UploadFirmwareService {
  private:
   SecurityManager* _securityManager;
 #ifdef ESP32
-  ESPRack::OtaWriter _ota;    // reserved at the first chunk; then its sink is called by the pump only
+  ESPRack::OtaWriter _ota;    // reserved at the first chunk; then its sink is called by the pump only, up to restartInto
   ESPRack::UploadPump _pump;  // one upload at a time (503 for another)
 #else
   // The request whose authorised upload ended with a valid image. Only that

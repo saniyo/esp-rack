@@ -78,7 +78,8 @@ class StatefulService {
   // see LockWait.h). Busy: update() changes nothing and returns ERROR with
   // the reason "state busy" (the REST paths answer 400 with it), read()
   // does not run the reader and returns false (a JSON reader's object stays
-  // as the caller passed it). Logged on the 1st, 2nd, 4th... timeout.
+  // as the caller passed it; a feature's GETs answer 503 "state_busy").
+  // Check both results. Logged on the 1st, 2nd, 4th... timeout.
   StateUpdateResult update(std::function<StateUpdateResult(T&)> stateUpdater, const String& originId) {
     if (!beginTransaction()) return busyResult();
     StateUpdateResult result = stateUpdater(_state);
@@ -123,6 +124,17 @@ class StatefulService {
   bool read(JsonObject& jsonObject, JsonStateReader<T> stateReader) {
     if (!beginTransaction()) return false;
     stateReader(_state, jsonObject);
+    endTransaction();
+    return true;
+  }
+
+  // Runs fn with the state lock held, so the reads inside it (the lock is
+  // recursive) can't time out halfway: a response built from several reads
+  // is whole or not built. false: busy, fn did not run. Keep fn short and
+  // never send on the network inside it.
+  bool withLock(const std::function<void()>& fn) {
+    if (!beginTransaction()) return false;
+    fn();
     endTransaction();
     return true;
   }

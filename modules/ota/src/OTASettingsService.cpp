@@ -15,6 +15,7 @@ namespace {
 
 // ArduinoOTA's transfer holds the firmware update (the loop task only).
 bool s_otaOwn = false;
+const char kOtaSource[] = "ota";  // FirmwareUpdate's name for it: end() checks the pointer
 
 // ArduinoOTA's onStart: the update for this transfer, or false (another
 // writer has it: the upload page, auto-update; they share the next slot).
@@ -22,9 +23,9 @@ bool takeUpdate() {
 #ifdef ESP32
   // An OtaWriter takes its claim, then FirmwareUpdate: one that comes
   // between these two finds FirmwareUpdate taken and backs off.
-  if (ESPRack::OtaWriter::busy() || !ESPRack::FirmwareUpdate::tryBegin("ota")) return false;
+  if (ESPRack::OtaWriter::busy() || !ESPRack::FirmwareUpdate::tryBegin(kOtaSource)) return false;
 #else
-  ESPRack::FirmwareUpdate::begin("ota");
+  ESPRack::FirmwareUpdate::begin(kOtaSource);
 #endif
   return true;
 }
@@ -33,7 +34,7 @@ bool takeUpdate() {
 void giveUpdate(bool resumeWdt) {
   if (!s_otaOwn) return;
   s_otaOwn = false;
-  ESPRack::FirmwareUpdate::end();
+  (void)ESPRack::FirmwareUpdate::end(kOtaSource);  // ours only: a stale one may have been taken over
   if (resumeWdt) ESPRack::LoopWdt::resume();
 }
 

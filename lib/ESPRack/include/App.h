@@ -84,9 +84,13 @@ class HwRegistry;          // hw/HwRegistry.h — owned by App
 // module that persists state in onShutdown() can't resurrect the files.
 // It runs inside one write gate slot (power/WriteGate.h; a wait of
 // ESPRACK_SHUTDOWN_WRITE_WAIT_MS at most for a pause, then it goes), after
-// the config saves the gate put off. Callers refuse the request while
-// PowerGuard pauses writes (PowerGuard::writesAllowed()); a step already
-// confirmed still runs if writes were paused since (and logs it).
+// the writes the gate put off (config saves, a queued Save Backup, the boot
+// record, the FlashWriter jobs' restart flush: the file manager's), also
+// when a hook hangs and the caller finishes the restart.
+// Callers refuse the request while PowerGuard pauses writes
+// (PowerGuard::writesAllowed()); if writes were paused since, the step is
+// skipped (logged) and the files stay as they were: it is the step's flash
+// work, never done on a supply PowerGuard holds unsafe.
 [[noreturn]] void restartDevice(const char* reason,
                                 std::function<void()> afterShutdown = nullptr);
 
@@ -263,13 +267,16 @@ class App {
   bool runShutdownOnce(const char* reason);
   [[noreturn]] void finishAndRestart();    // hooks -> afterShutdown -> esp_restart
   void runAfterShutdownOnce();             // runs it, or waits for the task that does
+  void runFlushOnce();                     // the writes the gate put off; or waits for the task that runs them
   bool waitHooks(uint32_t ms) const;       // true when the hooks finished in time
   uint32_t loopWaitMs() const;             // App::loop's wait: modules + the core's deadlines
+  uint32_t flushAllowanceMs() const;       // runFlushOnce's bound now
   uint32_t shutdownGraceMs() const;
   uint32_t restartDeadlineMs() const;      // the hooks' share of the deadline
   static void onEspShutdown();             // esp_register_shutdown_handler hook
   std::function<void()> afterShutdown_;
   std::atomic<uint8_t> afterState_ {0};    // 0 not started, 1 running, 2 done
+  std::atomic<uint8_t> flushState_ {0};    // the same for runFlushOnce (claimed under a spinlock)
   std::atomic<bool> shutdownDone_ {false}; // the hooks have been claimed
   std::atomic<bool> hooksDone_ {false};    // ... and have finished
   std::atomic<bool> abandonHooks_ {false}; // the caller took over: stop between hooks

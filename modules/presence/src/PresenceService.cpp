@@ -1,5 +1,7 @@
 #include <PresenceService.h>
+#include <PresenceLogWriter.h>
 #include <power/FlashWriter.h>
+#include <power/PowerGuard.h>
 #include <power/WriteGate.h>
 
 namespace {
@@ -8,6 +10,44 @@ constexpr TickType_t kLogLockWait = pdMS_TO_TICKS(50);
 // A log line is written in one piece: no 4 KB stdio buffer per append.
 constexpr size_t kLogFileBuf = 128;
 }  // namespace
+
+// PresenceLogWriter's Io on the device.
+struct PresenceService::LogIo {
+  using Str = String;
+  PresenceService& s;
+
+  bool lock(uint32_t ms) { return s._logMx && xSemaphoreTake(s._logMx, pdMS_TO_TICKS(ms)) == pdTRUE; }
+  void unlock() { xSemaphoreGive(s._logMx); }
+  bool canDefer() const { return s._logJob >= 0 && s._logMx; }
+  void kick() { ESPRack::FlashWriter::kick(s._logJob); }
+  bool claim(bool wait) {
+    portENTER_CRITICAL(&s._logMux);
+    const bool ok = !s._logWriting;
+    s._logWriting = true;
+    if (!ok && wait) s._logWaits = true;
+    portEXIT_CRITICAL(&s._logMux);
+    return ok;
+  }
+  void release() {
+    portENTER_CRITICAL(&s._logMux);
+    s._logWriting = false;
+    const bool wake = s._logWaits;
+    s._logWaits = false;
+    portEXIT_CRITICAL(&s._logMux);
+    if (wake && s._logDone) xSemaphoreGive(s._logDone);
+  }
+  bool waitWriter(uint32_t ms) {
+    return s._logDone && ms && xSemaphoreTake(s._logDone, pdMS_TO_TICKS(ms) + 1) == pdTRUE;
+  }
+  bool overCap() { return s.logOverCap(); }
+  void roll() { s.logRoll(); }
+  bool append(const String& d) {
+    if (s.logAppend(d.c_str(), d.length())) return true;
+    log_w("[presence] log append failed");
+    return false;
+  }
+  void lost(size_t lines) { s.countLogLost(lines); }
+};
 
 PresenceService::PresenceService() {}
 
@@ -110,31 +150,22 @@ void PresenceService::setLogSink(fs::FS* fs, const char* path, size_t maxBytes) 
   _logFs       = fs;
   _logPath     = path ? path : "/logs/presence.log";
   _logMaxBytes = maxBytes;
-  // Setup: the queue lock and the FlashWriter job for the appends the
-  // write gate puts off. Without them the appends go at once, as before.
+  // Setup: the queue lock, the shutdown's wait for a writer and the
+  // FlashWriter job for the appends the write gate puts off. Without them
+  // an append goes only in a gate pass (else lost, counted).
   if (!_logMx) _logMx = xSemaphoreCreateMutex();
+  if (!_logDone) _logDone = xSemaphoreCreateBinary();
   if (_logJob < 0 && _logMx) {
-    _logJob = ESPRack::FlashWriter::add("presence", [this]() -> uint32_t { return drainLog(0); });
-    if (_logJob < 0) log_w("[presence] no FlashWriter job left: log appends go at once");
+    _logJob = ESPRack::FlashWriter::add("presence", [this]() -> uint32_t {
+      LogIo io{*this};
+      return PresenceLogWriter<LogIo>(io, _logQueue, LOG_BATCH_BYTES).job();
+    });
+    if (_logJob < 0) log_w("[presence] no FlashWriter job left: log appends only in a gate pass");
   }
 }
 
 void PresenceService::setLogEnabled(bool on) {
   _logEnabled = on;
-}
-
-bool PresenceService::claimLogWriter() {
-  portENTER_CRITICAL(&_logMux);
-  const bool ok = !_logWriting;
-  _logWriting = true;
-  portEXIT_CRITICAL(&_logMux);
-  return ok;
-}
-
-void PresenceService::releaseLogWriter() {
-  portENTER_CRITICAL(&_logMux);
-  _logWriting = false;
-  portEXIT_CRITICAL(&_logMux);
 }
 
 void PresenceService::countLogLost(size_t lines) {
@@ -176,104 +207,20 @@ void PresenceService::appendLog(const String& line) {
   row += line;
   row += "\r\n";
 
-  if (_logJob < 0) {  // no queue / job: at once, as without the gate
-    if (logOverCap()) logRoll();
-    (void)logAppend(row.c_str(), row.length());
-    return;
-  }
-
-  // At once when nothing is queued and nobody is writing, else behind the
-  // queued lines (the order stays; one writer of the file at a time).
-  if (xSemaphoreTake(_logMx, kLogLockWait) != pdTRUE) {
-    countLogLost(1);
-    return;
-  }
-  const bool direct = _logQueue.empty() && claimLogWriter();
-  if (!direct) _logQueue.push(std::move(row));
-  xSemaphoreGive(_logMx);
-  if (!direct) {
-    ESPRack::FlashWriter::kick(_logJob);
-    return;
-  }
-
-  // async_tcp: a gate pass, never a wait. One step: the append, or the
-  // roll-over (then the line goes to the job, a step of its own).
-  bool queue = true;
-  {
-    ESPRack::WritePass pass(ESPRack::WriteGate::now());
-    if (!pass.ok()) {
-      ESPRack::WriteGate::noteDeferred();
-    } else if (logOverCap()) {
-      logRoll();
-    } else {
-      if (!logAppend(row.c_str(), row.length())) countLogLost(1);
-      queue = false;
-    }
-  }
-  if (queue) {
-    if (xSemaphoreTake(_logMx, kLogLockWait) == pdTRUE) {
-      _logQueue.push(std::move(row));
-      xSemaphoreGive(_logMx);
-    } else {
-      countLogLost(1);
-      queue = false;
-    }
-  }
-  releaseLogWriter();
-  if (queue) ESPRack::FlashWriter::kick(_logJob);
-}
-
-uint32_t PresenceService::drainLog(uint32_t boundMs) {
-  if (!_logFs || !_logMx) return ESPRack::FlashWriter::kDone;
-  if (!claimLogWriter()) return 10;  // an append on async_tcp is at it: look again
-  // One wait clock for the run, so maxWaitMs bounds it, not each batch.
-  const uint32_t since = ESPRack::WriteGate::now();
-  uint32_t r = ESPRack::FlashWriter::kDone;
-  for (;;) {
-    if (xSemaphoreTake(_logMx, kLogLockWait) != pdTRUE) {
-      r = 10;
-      break;
-    }
-    const bool empty = _logQueue.empty();
-    xSemaphoreGive(_logMx);
-    if (empty) break;
-
-    ESPRack::WriteSlot slot(boundMs, nullptr, since);
-    if (!slot.ok()) {  // PowerGuard paused writes: the lines stay queued
-      r = ESPRack::FlashWriter::kOnPower;
-      break;
-    }
-    if (logOverCap()) {
-      logRoll();
-      if (!slot.again()) {
-        r = ESPRack::FlashWriter::kOnPower;
-        break;
-      }
-    }
-    // What this slot writes, taken now: lines that come meanwhile wait in
-    // the queue (bounded), not in a batch that could be lost.
-    String batch;
-    size_t n = 0;
-    if (xSemaphoreTake(_logMx, kLogLockWait) == pdTRUE) {
-      batch.reserve(LOG_BATCH_BYTES < _logQueue.bytes() ? LOG_BATCH_BYTES : _logQueue.bytes());
-      n = _logQueue.take(batch, LOG_BATCH_BYTES);
-      xSemaphoreGive(_logMx);
-    } else {
-      r = 10;
-      break;
-    }
-    if (n && !logAppend(batch.c_str(), batch.length())) {
-      log_w("[presence] log append failed: %u lines lost", unsigned(n));
-      countLogLost(n);
-    }
-  }
-  releaseLogWriter();
-  return r;
+  // async_tcp: a gate pass, never a wait; else the queue and the
+  // FlashWriter job (PresenceLogWriter.h).
+  LogIo io{*this};
+  PresenceLogWriter<LogIo>(io, _logQueue, LOG_BATCH_BYTES).append(std::move(row));
 }
 
 void PresenceService::flushLog(uint32_t boundMs) {
   if (_logJob < 0) return;
-  (void)drainLog(boundMs);  // the FlashWriter task at it: it finishes them
+  LogIo io{*this};
+  const size_t left = PresenceLogWriter<LogIo>(io, _logQueue, LOG_BATCH_BYTES).flush(boundMs);
+  if (left) {
+    log_w("[presence] %u log lines not written before the restart (%s)", unsigned(left),
+          ESPRack::PowerGuard::writesAllowed() ? "no write gate slot in time" : "flash writes paused");
+  }
 }
 
 size_t PresenceService::logPending() const {

@@ -8,42 +8,54 @@
 // one call at every 64 KB boundary (cache off ~0.15-1 s), which fits no
 // pause between a module's windows.
 //
-//   OtaWriter ota;
+//   OtaWriter ota;                                   (lives up to the restart)
+//   { WriteSlot slot(...) only if OtaWriter::beginWrites() }
 //   if (!ota.begin("auto-update", size, md5)) fail(ota.errorString());
 //   for each step (<= 4 KB, FlashSteps::step):
 //     WriteSlot slot; if (!slot.ok()) { ota.abort(); ... }   // PowerGuard
 //     if (!ota.write(buf, n)) fail(...);
-//   WriteSlot slot; ota.end() && slot.again() && ota.activate();
+//   { WriteSlot slot only if OtaWriter::endWrites() } if (!ota.end()) fail(...);
+//   ota.restartInto(ESPRack::kRestartAutoUpdate);   // sets it to boot, restarts
 //
 // From an UploadPump: ota.reserve("upload") first (the update is this
 // writer's from the first chunk, while open may wait for a slot), then
 // pump.begin(request, ota.sink("upload")), and ota.abort() if the pump
-// refuses (the pump gives every call its slot and ends a failed upload
-// with the sink's abort, net/UploadPump.h).
+// refuses (the pump gives every call that writes flash its slot and ends
+// a failed upload with the sink's abort, net/UploadPump.h); once the pump
+// says Ok, ota.restartInto(...).
 //
-// What each call does to the flash (IDF 5.4, checked):
+// What each call does to the flash (IDF 5.4, checked; 5.5 for begin):
 //   begin     esp_ota_begin(OTA_WITH_SEQUENTIAL_WRITES): erases nothing,
-//             writes nothing (no slot needed). Fails while the running
-//             image is still pending verification (rollback enabled).
+//             writes nothing up to IDF 5.4. From IDF 5.5 with rollback
+//             enabled it may erase the inactive otadata sector: then
+//             beginWrites() is true and it goes in a slot. Fails while the
+//             running image is still pending verification (rollback).
 //   write     esp_ota_write: the first write into a sector erases it, so
 //             a write of up to 4 KB erases one sector at most, and steps
 //             ending on 4 KB boundaries erase exactly one each. Longer
 //             writes are refused (several erases in one slot).
 //   end       checks the MD5 (when given), then esp_ota_end: reads the
-//             whole image to validate it (~0.1-0.3 s); writes only a
-//             <= 16 B tail with flash encryption. In a slot.
-//   activate  esp_ota_set_boot_partition: otadata, one sector erase and a
-//             32 B write. In a slot. The new image boots at the next
-//             restart (the caller restarts).
+//             whole image to validate it (~0.1-0.3 s, the caches stay on);
+//             writes a <= 16 B tail only with flash encryption: then
+//             endWrites() is true and it goes in a slot, else no slot.
+//   activate  esp_ota_set_boot_partition: reads and validates the whole
+//             image once more (~0.1-0.3 s), then erases the otadata sector
+//             and writes 32 B. The erase can't be placed in a pause
+//             between a module's windows: restartInto() runs it in the
+//             restart's afterShutdown step (App.h), after every module's
+//             onShutdown (the buses stopped), in the slot that step has.
+//             Without a restart nothing is set to boot.
 //   abort     esp_ota_abort: frees the handle, no flash write.
 // One image at a time on the device: begin() (or reserve()) takes the
-// update for this writer, activate(), abort() and a failed call give it
-// back. While another OtaWriter holds it, or another writer reports one
-// (FirmwareUpdate::tryBegin: ArduinoOTA, a consumer's), begin() and
-// reserve() fail (kErrBusy). The next slot is the same for every writer:
-// two images at once would erase each other's sectors.
+// update for this writer; abort() and a failed call give it back. An
+// ended image keeps it up to the restart (restartInto), so no other writer
+// overwrites the slot about to boot. While another OtaWriter holds it, or
+// another writer reports one (FirmwareUpdate::tryBegin: ArduinoOTA, a
+// consumer's), begin() and reserve() fail (kErrBusy). The next slot is the
+// same for every writer: two images at once would erase each other's
+// sectors.
 // FirmwareUpdate (system/FirmwareUpdate.h) is reported here: begin, each
-// write, and end when committed, failed or aborted.
+// write, and end when failed or aborted (an ended image: at the restart).
 // One user per writer (not thread-safe); ESP32 family only.
 
 #include <stddef.h>
@@ -83,17 +95,27 @@ class OtaWriter {
   bool reserve(const char* source);
   // In a slot. At most kStep bytes; erases one sector at most.
   bool write(const uint8_t* data, size_t len);
-  // In a slot. Checks and closes the image; false: it is no good (the
-  // writer is then idle, nothing to abort).
+  // In a slot when endWrites(). Checks and closes the image; false: it is
+  // no good (the writer is then idle, nothing to abort). The update stays
+  // this writer's (restartInto, or abort to drop the image).
   bool end();
-  // In a slot, after end(): boot it from the next restart.
+  // After end(): restarts the device (restartDevice) and sets the image to
+  // boot in the restart's afterShutdown step (see above); this writer must
+  // live up to the restart. Not ended: a plain restart. While PowerGuard
+  // holds writes the image is not set to boot (logged): the running one
+  // boots again.
+  [[noreturn]] void restartInto(const char* reason);
+  // After end(): esp_ota_set_boot_partition now. A full image read before
+  // its otadata erase: only where no module's windows run (restartInto
+  // calls it there).
   bool activate();
-  // Discards the image under way (none: nothing) and gives the update
-  // back. No flash write.
+  // Discards the image under way or ended (none: nothing) and gives the
+  // update back. No flash write.
   void abort();
 
   // UploadPump's sink: open = begin(source, sizeHint), write, finish =
-  // end, then activate (one call, one slot each), abort.
+  // end, abort. The calls that write no flash are marked so (no slot),
+  // and it is revocable (an ended image boots only by restartInto).
   UploadSink sink(const char* source, uint32_t sizeHint = 0);
 
   bool active() const { return _handle != 0; }
@@ -106,8 +128,12 @@ class OtaWriter {
 
   // The next update slot's size (0: none), for a size check before begin().
   static uint32_t freeSlotSize();
+  // begin() may erase (IDF >= 5.5 with rollback): take a slot for it.
+  static bool beginWrites();
+  // end() writes (flash encryption): take a slot for it.
+  static bool endWrites();
   // An OtaWriter holds the update (reserved, an image under way, or ended
-  // and not activated). Any task.
+  // and waiting for the restart). Any task.
   static bool busy();
 
  private:

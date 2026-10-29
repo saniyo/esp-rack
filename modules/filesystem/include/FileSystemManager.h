@@ -5,6 +5,7 @@
 #include <FS.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
+#include <esp_random.h>
 #include <vector>
 #include <memory>
 
@@ -28,6 +29,8 @@ class FsWriteIo {
   FsWriteIo();
   bool lock(uint32_t ms);
   void unlock();
+  bool stepLock(uint32_t ms);
+  void stepUnlock();
   bool canDefer() const { return _job >= 0; }
   void kick();
   void setJob(int8_t job) { _job = job; }
@@ -41,6 +44,7 @@ class FsWriteIo {
 
  private:
   SemaphoreHandle_t _mx = nullptr;
+  SemaphoreHandle_t _stepMx = nullptr;  // around steps: a restart takes it for good
   int8_t _job = -1;     // FlashWriter
 };
 
@@ -62,6 +66,8 @@ class FileSystemManager {
   FileSystemBackend* resolve(const String& absPath, String& relOut) const;
 
   bool isReadOnlyPath(const String& absPath) const;
+  // ... or a read-only path lies under it (a tree removed or moved whole).
+  bool coversReadOnlyPath(const String& absPath) const;
 
   // ---- operations (absolute paths starting with "/<volume>/...") ----
   FsResult list(const String& absPath, std::vector<FileSystemEntry>& out);
@@ -71,6 +77,12 @@ class FileSystemManager {
   FsResult mkdir(const String& absPath);
   FsResult remove(const String& absPath, bool recursive);
   FsResult rename(const String& fromAbs, const String& toAbs);
+  // An upload's promotion (the caller holds a gate slot). renameOver: onto
+  // an existing file too, where the volume does that in one atomic step
+  // (renameReplaces()); elsewhere as rename().
+  bool exists(const String& absPath);
+  bool renameReplaces(const String& absPath) const;
+  FsResult renameOver(const String& fromAbs, const String& toAbs);
 
   // ---- writes through the flash write gate (any task, never waits) ----
   // The result of mkdir()/remove()/rename() when the gate let the write go
@@ -83,9 +95,15 @@ class FileSystemManager {
   FsResult removeGated(const String& absPath, bool recursive, uint32_t* op = nullptr);
   FsResult renameGated(const String& fromAbs, const String& toAbs, uint32_t* op = nullptr);
   using WriteQueue = FsWriteQueue<FsWriteIo>;
-  // false: no such write (any more).
-  bool writeStatus(uint32_t op, WriteQueue::Status& out) { return _writes.status(op, out); }
+  // Missing: no such write (any more); Busy: ask again.
+  WriteQueue::Lookup writeStatus(uint32_t op, WriteQueue::Status& out) { return _writes.status(op, out); }
   uint8_t writesPending() const { return _writes.pending(); }
+  // A restart began (the module's onShutdown, never waits): no new write.
+  void close() { _writes.close(); }
+  // The restart's flush (FlashWriter::restartFlush, after every hook): the
+  // step under way ends, the kept writes go on for boundMs at most; what is
+  // left is logged (it goes with the restart).
+  void shutdown(uint32_t boundMs);
 
   // Open a file for reading; caller closes. Returns empty File on failure.
   File openRead(const String& absPath);
@@ -97,16 +115,21 @@ class FileSystemManager {
   // Recursively delete upload debris: files ending in ".partial" ONLY.
   // Uploads write <target>.partial and promote it on success, so an
   // aborted upload leaves nothing else; zero-byte files are legitimate.
+  // A volume that can't rename over a file (FAT) moves the old one to
+  // <target>.partial.old first: put back when <target> is missing (the
+  // promotion did not finish), else removed.
   // Called at boot for flash and after async SD mount.
   static void purgeUploadDebris(fs::FS& fs, const char* root = "/");
+  static constexpr const char* kOldSuffix = ".partial.old";
 
  private:
   std::vector<std::unique_ptr<FileSystemBackend>> _backends;
   std::vector<String> _readOnlyPrefixes;
 
   FsWriteIo _io;
-  WriteQueue _writes{_io};
+  WriteQueue _writes{_io, esp_random()};  // numbers differ across restarts
 
+  // "/a//b/./c/" -> "/a/b/c"; false for ".." or a relative path.
   static bool sanitize(const String& absPath, String& cleaned);
   // A volume the asker may write: OK and its fs and path, or why not.
   FsResult writable(const String& absPath, fs::FS*& fs, String& rel, FileSystemBackend** bOut = nullptr) const;

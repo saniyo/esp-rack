@@ -13,6 +13,8 @@
 //                   {"type":"p","ch":"<id>","origin_id":"...","p":{...}}   (state write)
 //   server->client: {"type":"id","id":"ws:<cid>"}                          (once on connect)
 //                   {"type":"p","ch":"<id>","origin_id":"...","p":{...}}    (push + snapshot)
+//                   {"type":"err","for":"<id>","detail":"..."}             (a refused write,
+//                                                followed by that channel's snapshot)
 // Resume = snapshot-on-(re)subscribe (server pushes current channel state when a
 // client subscribes); NO replay buffer.
 //
@@ -36,6 +38,7 @@
 #include <freertos/semphr.h>
 #include <freertos/event_groups.h>
 
+#include <atomic>
 #include <functional>
 #include <map>
 #include <memory>
@@ -50,6 +53,7 @@
 #include "LockWait.h"
 #include "StatefulService.h"
 #include "StateFace.h"
+#include "UpdateError.h"
 #include "WebAuth.h"
 
 namespace ESPRack {
@@ -66,11 +70,11 @@ void wakeLoop();  // App.h: ends the loop task's wait now
 #define WS_MUX_PATH "/ws/app"
 #endif
 
-// Device-wide cap on concurrent clients of the single multiplexed socket.
-// AsyncWebSocket::cleanupClients(n) CLOSES THE OLDEST client whenever more
-// than n are connected, so this is a hard limit on live browser tabs /
-// devices. It used to be a literal 2 applied per feature socket; with one
-// socket for everything that meant two clients per device. Each client
+// Device-wide cap on concurrent clients of the single multiplexed socket,
+// enforced at WS_EVT_CONNECT (below), so this is a hard limit on live
+// browser tabs / devices. It used to be a literal 2 applied per feature
+// socket; with one socket for everything that meant two clients per
+// device. Each client
 // holds one lwIP PCB (16-slot pool shared with HTTP and /ws/presence) plus
 // its AsyncWebSocket queue, so the no-PSRAM C3 gets a conservative default.
 // Override per consumer: -D ESPRACK_WS_MAX_CLIENTS=<n>.
@@ -90,7 +94,9 @@ void wakeLoop();  // App.h: ends the loop task's wait now
 //   4. else, all the others being in view: the newcomer itself is refused.
 // Closed with 1000 "evicted" / "busy", which Sockette does not retry: the
 // UI shows Busy and tries again when the tab is shown or used, or after a
-// minute. cleanupClients (one above the cap) only reaps closed clients.
+// minute. AsyncWebSocket::cleanupClients() is never called: it walks the
+// library's unlocked client list, which async_tcp changes, and the library
+// already frees a closed client at its disconnect (_handleDisconnect).
 #ifndef ESPRACK_WS_MAX_CLIENTS
 #if defined(CONFIG_IDF_TARGET_ESP32C3)
 #define ESPRACK_WS_MAX_CLIENTS 3
@@ -445,6 +451,9 @@ class WsManager {
     root["stuck_evictions"]          = _stuckEvictions;
     root["backpressure_max"]         = (uint32_t)WS_MAX_QUEUED_MESSAGES;
     root["lock_timeouts"]            = _lockTimeouts;
+    root["queue_capacity"]           = (uint32_t)_txQ.capacity();
+    root["rx_queue_dropped"]         = _rxQ.dropped();
+    root["tx_queue_dropped"]         = _txQ.dropped();
   }
 
   // Push current channel state to ALL its subscribers.
@@ -462,12 +471,12 @@ class WsManager {
   // Processing queues: the loop task only (App::loop). Events and
   // broadcasters queue and wake it; waitMs() says when it is due anyway.
   void processAllQueues() {
-    // Reap closed clients. The cap itself is WS_EVT_CONNECT's: one above it,
-    // so this can't close a second client while that one picks its victim.
-    if (_ws) _ws->cleanupClients(ESPRACK_WS_MAX_CLIENTS + 1);
+    // No cleanupClients() here (see the cap note at the top): the library
+    // frees closed clients itself; purgeGone drops their roster entries.
     purgeGone();
     processRx();
     processTx();
+    resendDropped();  // queued again: sent on the next pass (it woke the loop)
     // Keepalive, on the same task as the queue pump. Gated by interval.
     if (_pingIntervalSec &&
         (millis() - _lastPingTs >= (unsigned long)_pingIntervalSec * 1000UL)) {
@@ -519,11 +528,14 @@ class WsManager {
       }
     }
 
-    bool push(T* item) {
+    // Full: false, and the drop is counted; `dropsOut` gets the count so far.
+    bool push(T* item, uint32_t* dropsOut = nullptr) {
       if (!item || _cap == 0) return false;
       lock();
       if (_size >= _cap) {
+        const uint32_t n = ++_dropped;
         unlock();
+        if (dropsOut) *dropsOut = n;
         return false;
       }
       _buf[_tail] = item;
@@ -539,6 +551,15 @@ class WsManager {
       unlock();
       return e;
     }
+
+    uint32_t dropped() const {
+      lock();
+      const uint32_t n = _dropped;
+      unlock();
+      return n;
+    }
+
+    size_t capacity() const { return _cap; }
 
     bool pop(T*& out) {
       lock();
@@ -560,6 +581,7 @@ class WsManager {
     size_t _head{0};
     size_t _tail{0};
     size_t _size{0};
+    uint32_t _dropped{0};  // pushes refused: the queue was full
 
 #ifdef ESP32
     mutable portMUX_TYPE _mx = portMUX_INITIALIZER_UNLOCKED;
@@ -602,6 +624,9 @@ class WsManager {
     size_t jsonCapacity{MWS_DEFAULT_JSON_CAP};
     uint32_t droppedBroadcasts{0};            // skipped because no subscriber was ready
     uint32_t overflowFrames{0};               // dropped: the state didn't fit the frame doc
+    // A push to this channel found the tx queue full: the loop sends the
+    // current state again (processAllQueues). Load/store only, any task.
+    std::atomic<bool> resend{false};
 
     virtual ~ChannelBase() {}
     virtual bool readInto(JsonObject& out) = 0;  // false: state lock busy
@@ -1068,25 +1093,76 @@ class WsManager {
   }
 
   // Snapshot-on-subscribe: push the channel's current state to ONE client.
+  // Loop task only (processRx): sent here, not queued, so a full tx queue
+  // can't lose it. The frames queued before it go first, so an older state
+  // never follows the snapshot.
   void pushSnapshot(const String& channel, uint32_t cid) {
     ChannelBase* base = findChannel(channel);
-    if (!base) return;
+    if (!base || !_ws) return;
     String out;
     if (!buildStateFrame(base, "ws_sub", out, ESPRack::StateFace::WsSnapshot)) return;
-    sendTo(channel, cid, out, true);
+    processTx();
+    const WsTxItem item{channel, cid, out, true};
+    sendFrame(cid, item);
   }
 
-  // Both queues are pumped by the loop task: wake it.
+  // {"type":"err","for":<channel>,"detail":...} to one client, loop task
+  // only. No `ch` key: the page's channel handlers never see it.
+  void sendError(uint32_t cid, const String& channel, const char* detail) {
+    StaticJsonDocument<256> d;
+    d["type"] = "err";
+    d["for"] = channel;
+    d["detail"] = detail;
+    String s;
+    serializeJson(d, s);
+    const WsTxItem item{channel, cid, s, true};
+    sendFrame(cid, item);
+  }
+
+  // Both queues are pumped by the loop task: wake it. Queue full: counted
+  // (fillStats), logged 1st, 2nd, 4th...; a lost broadcast is sent again
+  // as the channel's current state (ChannelBase::resend).
   void enqueueTx(const String& channel, uint32_t cid, const String& payload, bool text) {
     auto* it = new WsTxItem{channel, cid, payload, text};
-    if (!_txQ.push(it)) delete it;
-    else ESPRack::wakeLoop();
+    uint32_t drops = 0;
+    if (_txQ.push(it, &drops)) {
+      ESPRack::wakeLoop();
+      return;
+    }
+    delete it;
+    if (ESPRack::logThisFail(drops)) {
+      log_w("[ws] tx queue full, frame for '%s' dropped (%u so far)", channel.c_str(), (unsigned)drops);
+    }
+    if (cid == 0) {
+      if (ChannelBase* base = findChannel(channel)) {
+        base->resend.store(true);
+        ESPRack::wakeLoop();
+      }
+    }
   }
 
-  void enqueueRx(uint32_t cid, const String& payload, bool text) {
+  // false: the queue was full (counted, logged); the caller closes the client.
+  bool enqueueRx(uint32_t cid, const String& payload, bool text) {
     auto* it = new WsRxItem{cid, payload, text};
-    if (!_rxQ.push(it)) delete it;
-    else ESPRack::wakeLoop();
+    uint32_t drops = 0;
+    if (_rxQ.push(it, &drops)) {
+      ESPRack::wakeLoop();
+      return true;
+    }
+    delete it;
+    if (ESPRack::logThisFail(drops)) {
+      log_w("[ws] rx queue full, frame from client %u dropped (%u so far)", (unsigned)cid, (unsigned)drops);
+    }
+    return false;
+  }
+
+  // Channels whose push found the tx queue full: their current state again.
+  void resendDropped() {
+    for (auto& ch : _channelList) {
+      if (!ch || !ch->resend.load()) continue;
+      ch->resend.store(false);  // a drop after this sets it again
+      broadcastCurrentState(ch->name, "");
+    }
   }
 
   // Per frame: the targets are copied under the roster lock; each send is
@@ -1203,7 +1279,7 @@ class WsManager {
                 }
               }
               evict(victim, victim == it->cid, "over the per-channel cap");
-              if (subbed && victim != it->cid) pushSnapshot(ch, it->cid);   // a unicast; processTx (below) sends it
+              if (subbed && victim != it->cid) pushSnapshot(ch, it->cid);   // sent now (see pushSnapshot)
             }
           } else if (strcmp(type, "unsub") == 0) {
             ClientsLock g(_clientsMx);
@@ -1222,7 +1298,16 @@ class WsManager {
               String origin = root["origin_id"] | "";
               if (origin.length() == 0) origin = String("ws:") + String(it->cid);
               JsonObject p = root["p"].as<JsonObject>();
-              (void)base->apply(p, origin);
+              ESPRack::clearUpdateError();
+              if (base->apply(p, origin) == StateUpdateResult::ERROR) {
+                // Rejected or state busy: tell the writer, and send it the
+                // device's state so its page stops showing the unsaved value.
+                char why[96];
+                if (!ESPRack::takeUpdateError(why, sizeof(why))) strlcpy(why, "rejected", sizeof(why));
+                log_w("[ws] write refused: cid=%u ch=%s: %s", (unsigned)it->cid, ch.c_str(), why);
+                sendError(it->cid, ch, why);
+                pushSnapshot(ch, it->cid);
+              }
             }
           }
         }
@@ -1286,7 +1371,11 @@ class WsManager {
         AwsFrameInfo* info = reinterpret_cast<AwsFrameInfo*>(a);
         if (info && info->final && info->index == 0 && info->opcode == WS_TEXT) {
           String s(reinterpret_cast<char*>(data), len);
-          enqueueRx(id, s, true);  // wakes the loop task
+          // Queue full: the frame (a sub, a write) is lost. Close the client
+          // with 1013 so the page reconnects (Sockette retries all codes but
+          // 1000, 1001 and 1005),
+          // subscribes again and gets each channel's real state.
+          if (!enqueueRx(id, s, true) && c->status() == WS_CONNECTED) c->close(1013, "overloaded");
         }
       } break;
 

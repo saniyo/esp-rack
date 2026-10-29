@@ -89,15 +89,21 @@ void ConfigManagerService::registerManifest(WebManager* web) {
   restore.confirm        = "Restore all settings from saved backup and reboot?";
   restore.successMessage = "Restoring snapshot, rebooting…";
   restore.handler        = [this](AsyncWebServerRequest* r) {
-    // Nothing to restore -> 500 without rebooting (snackbar says so).
-    bool anySnapshot = false;
-    if (_cfg) {
-      _cfg->forEachEntry([&](ConfigManager::IConfigEntry& e) {
-        if (!anySnapshot && _cfg->hasSnapshot(e.primary().c_str())) anySnapshot = true;
-      });
-    }
-    if (!anySnapshot) {
+    // Nothing to restore -> 500 without rebooting (snackbar says so). A
+    // backup file that fails to verify (torn by a power cut) -> 409, no
+    // restart: the restore would skip it anyway.
+    using C = ConfigManager::SnapCheck;
+    const C c = _cfg ? _cfg->checkSnapshots() : C::None;
+    if (c == C::None) {
       r->send(500);
+      return;
+    }
+    if (c == C::Bad) {
+      r->send(409, "application/json", "{\"ok\":false,\"error\":\"a backup file is damaged: Save Backup first\"}");
+      return;
+    }
+    if (c == C::Busy) {
+      r->send(503, "application/json", "{\"ok\":false,\"error\":\"config busy\"}");
       return;
     }
     // The restore writes the files: while PowerGuard pauses writes the
@@ -162,10 +168,28 @@ void ConfigManagerService::buildForm(JsonObject& root) {
     case ConfigManager::SnapState::Queued: lastSnap = "Queued (waiting for the flash)"; break;
     case ConfigManager::SnapState::Done:   lastSnap = "Saved"; break;
     case ConfigManager::SnapState::Failed: lastSnap = "Failed"; break;
+    case ConfigManager::SnapState::Interrupted:
+      lastSnap = "Cut short by a reset (files of two moments)";
+      break;
     default: break;
   }
   FormBuilder::addTextField(cm, "snap_last", AF::R, lastSnap, icon("Save"), label("Last backup"),
                             colorMap("Saved:success,Failed:error,Not this boot:info,default:warning"));
+
+  // Saves the write gate put off, and whether they fail (the flash writer
+  // tries those again, later each time).
+  String pending = "None";
+  if (const size_t n = _cfg->deferredCount()) {
+    const uint8_t tries = _cfg->saveRetries();
+    pending = String((unsigned)n);
+    if (tries) {
+      pending += String(" failing, tried ") + String((unsigned)tries) + " times";
+    } else {
+      pending += " waiting for the flash";
+    }
+  }
+  FormBuilder::addTextField(cm, "saves_pending", AF::R, pending.c_str(), icon("Schedule"), label("Pending saves"),
+                            colorMap("None:success,default:warning"));
 
   // Per-entry table — populated inline with current state.
   // Two distinct counters and two file-size columns:

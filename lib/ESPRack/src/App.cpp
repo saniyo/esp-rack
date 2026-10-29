@@ -162,11 +162,15 @@ constexpr EventBits_t kClaimed = 1u << 0;    // shutdownDone_
 constexpr EventBits_t kHooksDone = 1u << 1;  // hooksDone_
 constexpr EventBits_t kAfterDone = 1u << 2;  // afterState_ == 2
 constexpr EventBits_t kNever = 1u << 3;      // nobody sets it: a pause no event ends
+constexpr EventBits_t kFlushDone = 1u << 4;  // flushState_ == 2
+
+// Who runs the restart's flush (App::runFlushOnce): claimed under it.
+portMUX_TYPE s_flushMux = portMUX_INITIALIZER_UNLOCKED;
 
 void createWaits() {  // the App ctor (setup, one task)
   if (!s_wake) s_wake = xSemaphoreCreateBinaryStatic(&s_wakeBuf);
   if (!s_phase) s_phase = xEventGroupCreateStatic(&s_phaseBuf);
-  xEventGroupClearBits(s_phase, kClaimed | kHooksDone | kAfterDone);
+  xEventGroupClearBits(s_phase, kClaimed | kHooksDone | kAfterDone | kFlushDone);
 }
 
 TickType_t ticksFor(uint32_t ms) { return static_cast<TickType_t>(LoopWait::ticksFor(ms, configTICK_RATE_HZ)); }
@@ -800,8 +804,9 @@ void App::shutdown() {
 bool App::runShutdownOnce(const char* reason) {
   if (shutdownDone_.exchange(true)) return false;   // another path owns the hooks
   if (!begun_) {
+    flushState_ = 2;  // nothing begun: nothing to flush, as before
     hooksDone_ = true;
-    setPhase(kClaimed | kHooksDone);
+    setPhase(kClaimed | kHooksDone | kFlushDone);
     return true;
   }
   setPhase(kClaimed);
@@ -830,22 +835,59 @@ bool App::runShutdownOnce(const char* reason) {
   // The clock keeps running across a soft reset: note that it was valid
   // until now, so the next boot can hold it (RtcHold).
   TimeSync::instance().flushHold();
-  // Config saves the write gate put off (the hooks' own included): written
-  // now, after a short wait for a pause at most, or they'd go with the restart.
-  configManager_.flushDeferredNow(ESPRACK_SHUTDOWN_WRITE_WAIT_MS);
-  // The boot record writes put off the same way (clearSafeMode, markStable).
-  BootGuard::flush(ESPRACK_SHUTDOWN_WRITE_WAIT_MS);
+  // The writes the gate put off, unless a caller that gave up on the hooks
+  // has run them already (then they are done or under way there).
+  runFlushOnce();
   hooksDone_ = true;
   setPhase(kHooksDone);
   return true;
 }
 
+// Config saves the write gate put off (the hooks' own included) and a
+// queued Save Backup, then the boot record writes put off the same way
+// (clearSafeMode, markStable): written now, a short wait for a pause per
+// step at most, or they'd go with the restart. Once, by the task that gets
+// here first: the loop after the hooks, or a caller that gave up on them
+// (before afterShutdown, so e.g. a deferred save never lands after the
+// factory reset's wipe). From then on the config is written by that task
+// only (ConfigManager::closeForRestart). The other one waits for it,
+// bounded.
+void App::runFlushOnce() {
+  bool mine = false;
+  portENTER_CRITICAL(&s_flushMux);
+  if (flushState_.load() == 0) {
+    flushState_ = 1;
+    mine = true;
+  }
+  portEXIT_CRITICAL(&s_flushMux);
+  const uint32_t allowance = flushAllowanceMs();
+  if (!mine) {
+    if (!waitPhase(kFlushDone, allowance, [this] { return flushState_.load() == 2; })) {
+      log_w("[restart] the write flush on another task overran %u ms", (unsigned)allowance);
+    }
+    return;
+  }
+  // A caller that gave up on the hooks has used the restart's allowance.
+  if (abandonHooks_.load()) armRestartDeadline(allowance + ESPRACK_RESTART_DEADLINE_MS);
+  configManager_.flushDeferredNow(ESPRACK_SHUTDOWN_WRITE_WAIT_MS);
+  BootGuard::flush(ESPRACK_SHUTDOWN_WRITE_WAIT_MS);
+  FlashWriter::restartFlush(ESPRACK_SHUTDOWN_WRITE_WAIT_MS);  // the jobs' kept writes (the file manager's)
+  flushState_ = 2;
+  setPhase(kFlushDone);
+}
+
+uint32_t App::flushAllowanceMs() const {
+  // The config saves, a queued Save Backup, the boot record blobs (two at
+  // most) and the FlashWriter jobs' kept writes the write gate put off; a
+  // second for the rest.
+  return configManager_.restartFlushMs(ESPRACK_SHUTDOWN_WRITE_WAIT_MS) +
+         (BootGuard::savePending() ? 2u : 0u) * ESPRACK_SHUTDOWN_WRITE_WAIT_MS +
+         FlashWriter::restartFlushMs(ESPRACK_SHUTDOWN_WRITE_WAIT_MS) + 1000;
+}
+
 uint32_t App::shutdownGraceMs() const {
-  // ... and the config saves and boot record blobs (two at most) the write
-  // gate put off, written after the hooks.
-  return (uint32_t)modules_.size() * ESPRACK_SHUTDOWN_BUDGET_MS + 2000 +
-         ((uint32_t)configManager_.deferredCount() + (BootGuard::savePending() ? 2u : 0u)) *
-             ESPRACK_SHUTDOWN_WRITE_WAIT_MS;
+  // ... and the writes the gate put off, written after the hooks.
+  return (uint32_t)modules_.size() * ESPRACK_SHUTDOWN_BUDGET_MS + 1000 + flushAllowanceMs();
 }
 
 uint32_t App::restartDeadlineMs() const {
@@ -862,6 +904,9 @@ bool App::waitHooks(uint32_t ms) const {
 void App::runAfterShutdownOnce() {
   uint8_t expected = 0;
   if (afterState_.compare_exchange_strong(expected, 1)) {
+    // The writes the gate put off go first, whoever runs them (a caller
+    // that gave up on the hooks: here, now).
+    runFlushOnce();
     if (afterShutdown_) {
       armRestartDeadline(ESPRACK_RESTART_DEADLINE_MS);  // its own allowance
       // One write gate entry for the whole step (config.restore, Factory
@@ -869,13 +914,17 @@ void App::runAfterShutdownOnce() {
       // paused for the shutdown) or on the restartDevice caller (off the
       // task watchdog by then, e.g. async_tcp): a short wait for a pause,
       // then it goes anyway, the restart is coming. The callers refuse the
-      // request while PowerGuard pauses writes; one that paused them since
-      // doesn't drop a step already confirmed: it runs as without the gate
-      // (the config writes still ask PowerGuard themselves).
+      // request while PowerGuard pauses writes; when it paused them since
+      // (PowerFail, the latch), the step is skipped: the files stay as they
+      // were, nothing is written on that supply. Inside the step the config
+      // helpers and the wipe still ask PowerGuard before each write.
       WriteSlot slot(ESPRACK_SHUTDOWN_WRITE_WAIT_MS);
-      if (!slot.ok()) log_w("[restart] flash writes paused (PowerGuard): after-shutdown step runs anyway");
-      ConfigManager::GateHeld held;  // the config helpers take no slot of their own
-      afterShutdown_();
+      if (slot.ok()) {
+        ConfigManager::GateHeld held;  // the config helpers take no slot of their own
+        afterShutdown_();
+      } else {
+        log_e("[restart] flash writes paused (PowerGuard): after-shutdown step skipped, files kept");
+      }
     }
     afterState_ = 2;
     setPhase(kAfterDone);

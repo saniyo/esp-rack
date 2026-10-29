@@ -39,8 +39,8 @@ class PresenceModule : public ESPRack::Module {
   }
   void onShutdown() override {
     // Log lines the write gate put off: written now, a short wait for a
-    // pause at most (they are a log: within the hook's budget).
-    if (svc_) svc_->flushLog(300);
+    // pause at most (they are a log: 2 x 200 ms, within the hook's budget).
+    if (svc_) svc_->flushLog(200);
   }
  private:
   static constexpr uint32_t kPurgeMs = 30000;

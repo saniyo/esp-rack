@@ -2,11 +2,13 @@
 #ifndef ESPRACK_UPLOAD_SINK_H
 #define ESPRACK_UPLOAD_SINK_H
 
-// UploadSink: where an upload's bytes go (net/UploadPump.h). Every call is
-// one bounded flash operation run inside a write gate slot (a FlashWriter
-// step) or, while the gate is free, inside a pass on async_tcp: so on
-// either task, never two at once, never concurrently with another call of
-// the same sink.
+// UploadSink: where an upload's bytes go (net/UploadPump.h). Every call
+// that writes flash is one bounded flash operation run inside a write gate
+// slot (a FlashWriter step) or, while the gate is free, inside a pass on
+// async_tcp: so on either task, never two at once, never concurrently with
+// another call of the same sink. A call marked in noFlash writes none: it
+// runs without a slot (on the FlashWriter task, or on async_tcp while the
+// gate is free), also while PowerGuard holds writes.
 //
 //   open    before the first write (may be empty). false: failed.
 //   write   one step: at most 4 KB (FlashSteps::kSector), once or twice
@@ -18,6 +20,10 @@
 //           committed, kFailed. May be empty (= kDone).
 //   abort   the upload failed or its client went: discard what was
 //           written (may be empty). One flash operation at most.
+//   revocable  the finish commits nothing the abort can't take back (an
+//           image checked, set to boot only later): a failure during the
+//           finish (a client that went) ends it with the abort after the
+//           finish call under way. Else the finish runs to its end.
 //
 // A firmware image: OtaWriter::sink() (system/OtaWriter.h). A file:
 //   open    f = fs.open(path + ".partial", "w"); f.setBufferSize(0) (steps
@@ -39,11 +45,17 @@ struct UploadSink {
   static constexpr int kDone = 0;
   static constexpr int kMore = 1;
   static constexpr int kFailed = -1;
+  // noFlash bits: the calls that write no flash (no slot needed).
+  static constexpr uint8_t kOpenNoFlash = 1;
+  static constexpr uint8_t kFinishNoFlash = 2;
+  static constexpr uint8_t kAbortNoFlash = 4;
 
   std::function<bool()> open;
   std::function<bool(const uint8_t* data, size_t len)> write;
   std::function<int()> finish;
   std::function<void()> abort;
+  uint8_t noFlash = 0;
+  bool revocable = false;
 };
 
 }  // namespace ESPRack

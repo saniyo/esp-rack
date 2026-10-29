@@ -15,7 +15,9 @@
 // a client that vanished without an abort never blocks a restart for good.
 // One image at a time: a writer that must not overlap another one takes
 // the update with tryBegin() (false: another writer is active) and gives
-// it back with end().
+// it back with end(source): only its own (a stale one may have been taken
+// over by another writer meanwhile). source: the same pointer tryBegin()
+// got (a static string).
 // Any task.
 
 #include <stdint.h>
@@ -30,7 +32,8 @@ namespace FirmwareUpdate {
 void begin(const char* source);  // "upload", "ota", "auto-update", ...: a static string
 bool tryBegin(const char* source);  // begin() unless another writer is active()
 void progress();                 // each chunk written
-void end();                      // finished or failed; harmless when not begun
+void end();                      // finished or failed, whoever holds it; harmless when not begun
+bool end(const char* source);    // end() if source holds it; false: another writer's (or none)
 bool active();                   // begun, not ended, progress within the stall time
 const char* source();            // the writer while active(), else ""
 

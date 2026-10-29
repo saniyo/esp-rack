@@ -194,27 +194,37 @@ static void test_window_without_ring_never_holds(void) {
 }
 
 // lwIP's window model: the peer may have at most TCP_WND bytes the device
-// has not acknowledged (arrived, queued, or held by ackLater). Segments of
-// up to one MSS; the parser may miss one held segment per hold (acked
-// anyway); acks also come from a poll. The ring must never overflow.
-static void test_tcp_window_never_overflows(void) {
-  const uint32_t kWnd = 5760, kMss = 1436;
+// has not acknowledged (in flight, or held by the pump). Segments of up to
+// one MSS go through the multipart parser (ESPAsyncWebServer 3.7.10): its
+// 1460 B buffer is pushed when full and at the segment's end, unless the
+// segment ends in "\r", "\r\n" or a boundary prefix (slipPct of them,
+// at random): then its bytes wait in the buffer. Every segment that
+// arrives while the window is held stays unacknowledged, pushed or not
+// (UploadPump::packet); acks also come from a poll. The ring must never
+// overflow, whatever share of segments gives no push.
+static void runTcpWindow(uint32_t slipPct, uint32_t seed) {
+  c = UploadPumpCore{};
+  const uint32_t kWnd = 5760, kMss = 1436, kParserBuf = 1460;
   const uint32_t holdBelow = kWnd + 2 * kMss;
   const uint32_t size = FlashSteps::kSector + holdBelow;
   TEST_ASSERT_TRUE(c.begin(holdBelow, 0));
   useRing(size);
   c.opened(true);
-  uint32_t seed = 12345;
   auto rnd = [&](uint32_t n) {
     seed = seed * 1103515245u + 12345u;
     return (seed >> 8) % n;
   };
   std::deque<uint32_t> inFlight;  // sent, not yet processed
   uint32_t inFlightBytes = 0;
-  uint32_t unacked = 0;  // processed, held by ackLater
-  bool slipped = false;
+  uint32_t unacked = 0;  // processed, held
+  uint32_t parser = 0;   // bytes in the parser's buffer
   uint64_t sent = 0, drained = 0;
   uint32_t maxUsed = 0;
+  auto flush = [&]() {
+    TEST_ASSERT_TRUE_MESSAGE(push(parser), "ring overflow");
+    parser = 0;
+    if (c.window() == W::Reopen) unacked = 0;  // ack(all held)
+  };
   for (int it = 0; it < 400000; ++it) {
     const uint32_t r = rnd(100);
     if (r < 45) {  // the peer sends what the window allows
@@ -229,23 +239,17 @@ static void test_tcp_window_never_overflows(void) {
       const uint32_t seg = inFlight.front();
       inFlight.pop_front();
       inFlightBytes -= seg;
-      TEST_ASSERT_TRUE_MESSAGE(push(seg), "ring overflow");
-      const W w = c.window();
-      if (w == W::Hold) {
-        if (!slipped && rnd(50) == 0) {
-          slipped = true;  // the parser kept it: acknowledged anyway
-        } else {
-          unacked += seg;
-        }
-      } else {
-        if (w == W::Reopen) unacked = 0;
-        slipped = w == W::Hold ? slipped : false;
+      uint32_t left = seg;
+      while (left) {
+        const uint32_t take = left < kParserBuf - parser ? left : kParserBuf - parser;
+        parser += take;
+        left -= take;
+        if (parser == kParserBuf) flush();
       }
+      if (parser && rnd(100) >= slipPct) flush();
+      if (c.held()) unacked += seg;  // the packet handler: held, push or not
     } else if (r < 83) {  // the poll
-      if (c.window() == W::Reopen) {
-        unacked = 0;
-        slipped = false;
-      }
+      if (c.window() == W::Reopen) unacked = 0;
     } else if (r < 85u + uint32_t(it / 50000 % 2) * 10u) {  // the writer: slow, then fast
       if (c.pending()) drained += drainStep();
     }
@@ -254,7 +258,35 @@ static void test_tcp_window_never_overflows(void) {
   TEST_ASSERT_FALSE(c.failed());
   TEST_ASSERT_GREATER_THAN(10u, c.holds());
   TEST_ASSERT_GREATER_THAN(size - holdBelow, maxUsed);  // it did get full
-  TEST_ASSERT_TRUE(drained + c.used() + inFlightBytes == sent);
+  TEST_ASSERT_TRUE(drained + c.used() + parser + inFlightBytes == sent);
+}
+
+static void test_tcp_window_never_overflows(void) {
+  runTcpWindow(0, 12345);
+  runTcpWindow(3, 777);    // a binary image: a segment now and then
+  runTcpWindow(40, 4242);  // CRLF text: many
+  runTcpWindow(100, 99);   // none flushed at a segment's end: only full buffers
+}
+
+// What the pump did before every held segment was held: a segment that
+// gave no push was acknowledged, and three of them in one hold overflow
+// the ring (the model above, acking those).
+static void test_unheld_slips_would_overflow(void) {
+  const uint32_t kWnd = 5760, kMss = 1436;
+  const uint32_t holdBelow = kWnd + 2 * kMss;
+  TEST_ASSERT_TRUE(c.begin(holdBelow, 0));
+  useRing(FlashSteps::kSector + holdBelow);
+  c.opened(true);
+  // Fill up to the hold: room just under holdBelow.
+  TEST_ASSERT_TRUE(push(FlashSteps::kSector + 1));
+  TEST_ASSERT_TRUE(c.window() == W::Hold);
+  // The peer's window (TCP_WND) arrives and is held ...
+  TEST_ASSERT_TRUE(push(kWnd));
+  // ... plus three slipped segments it was given credit for meanwhile.
+  bool overflow = false;
+  for (int i = 0; i < 3 && !overflow; ++i) overflow = !push(kMss);
+  TEST_ASSERT_TRUE(overflow);
+  TEST_ASSERT_TRUE(c.result() == UploadResult::Overflow);
 }
 
 static void test_sink_failure_aborts(void) {
@@ -542,6 +574,144 @@ static void test_empty_upload(void) {
   TEST_ASSERT_EQUAL_UINT32(0, c.written());
 }
 
+// A revocable sink (OtaWriter: the image boots only by the restart): a
+// failure during the finish ends with the abort, even after kDone.
+static void test_revocable_finish_aborts_after_failure(void) {
+  TEST_ASSERT_TRUE(c.begin(1000, 0, true));
+  Span s[2];
+  uint32_t len;
+  TEST_ASSERT_TRUE(c.next(s, len) == A::Open);
+  c.opened(true);
+  c.done();
+  c.final();
+  TEST_ASSERT_TRUE(c.next(s, len) == A::Finish);  // end(): the image checked
+  c.fail(UploadResult::Aborted);                  // the client left meanwhile
+  c.finished(UploadSink::kDone);
+  c.done();
+  TEST_ASSERT_FALSE(c.settled());
+  TEST_ASSERT_TRUE(c.peek() == A::Abort);
+  TEST_ASSERT_TRUE(c.next(s, len) == A::Abort);
+  c.aborted();
+  c.done();
+  TEST_ASSERT_TRUE(c.settled());
+  TEST_ASSERT_TRUE(c.result() == UploadResult::Aborted);
+  TEST_ASSERT_FALSE(c.finishing());
+}
+
+static void test_revocable_failure_between_finish_calls_aborts(void) {
+  TEST_ASSERT_TRUE(c.begin(1000, 0, true));
+  Span s[2];
+  uint32_t len;
+  c.next(s, len);
+  c.opened(true);
+  c.done();
+  c.final();
+  TEST_ASSERT_TRUE(c.next(s, len) == A::Finish);
+  c.finished(UploadSink::kMore);
+  c.done();
+  c.fail(UploadResult::Stalled);
+  TEST_ASSERT_TRUE(c.next(s, len) == A::Abort);  // not the rest of the finish
+  c.aborted();
+  c.done();
+  TEST_ASSERT_TRUE(c.settled());
+  TEST_ASSERT_TRUE(c.result() == UploadResult::Stalled);
+}
+
+static void test_revocable_ok_settles(void) {
+  TEST_ASSERT_TRUE(c.begin(1000, 0, true));
+  Span s[2];
+  uint32_t len;
+  c.next(s, len);
+  c.opened(true);
+  c.done();
+  c.final();
+  TEST_ASSERT_TRUE(c.next(s, len) == A::Finish);
+  c.finished(UploadSink::kDone);
+  c.done();
+  TEST_ASSERT_TRUE(c.settled());
+  TEST_ASSERT_TRUE(c.result() == UploadResult::Ok);
+  c.fail(UploadResult::Aborted);  // the client leaves after the answer: nothing changes
+  TEST_ASSERT_TRUE(c.result() == UploadResult::Ok);
+  TEST_ASSERT_TRUE(c.next(s, len) == A::None);
+}
+
+// A step that waited for its slot while the session failed: the abort in
+// that slot instead (no write, no open, no revocable finish).
+static void test_confirm_after_slot_wait(void) {
+  TEST_ASSERT_TRUE(c.begin(1000, 0));
+  useRing(16384);
+  Span s[2];
+  uint32_t len;
+  A a = c.next(s, len);
+  TEST_ASSERT_TRUE(a == A::Open);
+  TEST_ASSERT_TRUE(c.confirm(a) == A::Open);  // nothing failed
+  c.opened(true);
+  c.done();
+  TEST_ASSERT_TRUE(push(5000));
+  a = c.next(s, len);
+  TEST_ASSERT_TRUE(a == A::Write);
+  c.fail(UploadResult::Aborted);  // async_tcp: the client left while it waited
+  TEST_ASSERT_TRUE(c.confirm(a) == A::Abort);
+  c.aborted();
+  c.done();
+  TEST_ASSERT_TRUE(c.settled());
+  TEST_ASSERT_EQUAL_UINT32(0, c.written());
+  // Open in hand: the abort too.
+  TEST_ASSERT_TRUE(c.begin(1000, 0));
+  a = c.next(s, len);
+  TEST_ASSERT_TRUE(a == A::Open);
+  c.fail(UploadResult::Aborted);
+  TEST_ASSERT_TRUE(c.confirm(a) == A::Abort);
+  c.aborted();
+  c.done();
+  TEST_ASSERT_TRUE(c.settled());
+  // A file's finish (not revocable) goes on.
+  TEST_ASSERT_TRUE(c.begin(1000, 0));
+  c.next(s, len);
+  c.opened(true);
+  c.done();
+  c.final();
+  a = c.next(s, len);
+  TEST_ASSERT_TRUE(a == A::Finish);
+  c.fail(UploadResult::Aborted);
+  TEST_ASSERT_TRUE(c.confirm(a) == A::Finish);
+  c.finished(UploadSink::kDone);
+  c.done();
+  TEST_ASSERT_TRUE(c.settled());
+  // A revocable one: the abort.
+  TEST_ASSERT_TRUE(c.begin(1000, 0, true));
+  c.next(s, len);
+  c.opened(true);
+  c.done();
+  c.final();
+  a = c.next(s, len);
+  c.fail(UploadResult::Aborted);
+  TEST_ASSERT_TRUE(c.confirm(a) == A::Abort);
+  c.aborted();
+  c.done();
+  TEST_ASSERT_TRUE(c.settled());
+}
+
+static void test_peek_takes_nothing(void) {
+  TEST_ASSERT_TRUE(c.begin(1000, 0));
+  useRing(16384);
+  TEST_ASSERT_TRUE(c.peek() == A::Open);
+  TEST_ASSERT_TRUE(c.peek() == A::Open);
+  TEST_ASSERT_FALSE(c.busy());
+  Span s[2];
+  uint32_t len;
+  TEST_ASSERT_TRUE(c.next(s, len) == A::Open);
+  TEST_ASSERT_TRUE(c.peek() == A::None);  // busy
+  c.opened(true);
+  c.done();
+  TEST_ASSERT_TRUE(push(4096));
+  TEST_ASSERT_TRUE(c.peek() == A::Write);
+  TEST_ASSERT_EQUAL_UINT32(4096, drainStep());
+  c.final();
+  TEST_ASSERT_TRUE(c.peek() == A::Finish);
+  TEST_ASSERT_FALSE(c.finishing());  // only next() starts it
+}
+
 static void test_stall_clock_wraps(void) {
   const uint32_t t0 = 0xFFFFF000u;
   TEST_ASSERT_TRUE(c.begin(1000, t0));
@@ -561,6 +731,7 @@ int main(int, char**) {
   RUN_TEST(test_window_holds_and_reopens);
   RUN_TEST(test_window_without_ring_never_holds);
   RUN_TEST(test_tcp_window_never_overflows);
+  RUN_TEST(test_unheld_slips_would_overflow);
   RUN_TEST(test_sink_failure_aborts);
   RUN_TEST(test_failure_before_open_still_aborts);
   RUN_TEST(test_client_gone_mid_step_aborts_after_it);
@@ -574,6 +745,11 @@ int main(int, char**) {
   RUN_TEST(test_overflow_fails_the_upload);
   RUN_TEST(test_begin_refused_while_running);
   RUN_TEST(test_empty_upload);
+  RUN_TEST(test_revocable_finish_aborts_after_failure);
+  RUN_TEST(test_revocable_failure_between_finish_calls_aborts);
+  RUN_TEST(test_revocable_ok_settles);
+  RUN_TEST(test_confirm_after_slot_wait);
+  RUN_TEST(test_peek_takes_nothing);
   RUN_TEST(test_stall_clock_wraps);
   return UNITY_END();
 }

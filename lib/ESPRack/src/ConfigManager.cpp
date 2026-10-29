@@ -58,10 +58,26 @@ portMUX_TYPE s_snapMux = portMUX_INITIALIZER_UNLOCKED;
 #define CFG_SNAP_UNLOCK()
 #endif
 
+// The restart closed the config writes to every task but its own
+// (ConfigManager::closeForRestart); under s_snapMux.
+#if CFGMGR_USE_FREERTOS
+void* s_closedFor = nullptr;
+#endif
+
+// Marks a Save Backup run under way: still there at boot, the run was cut
+// (a power cut, a crash) and the snapshots are of two moments.
+constexpr const char* kSnapRunMarker = "/config/snapshot.partial";
+
+// A failed deferred save is tried again after these (the last one repeats).
+constexpr uint32_t kFailRetryMs[] = {1000, 2000, 5000, 10000, 30000, 60000};
+constexpr uint8_t kFailRetrySteps = sizeof(kFailRetryMs) / sizeof(kFailRetryMs[0]);
+
 // One helper step (or a short run of them) through the write gate: nothing
 // to take when the task holds the gate already (GateHeld); otherwise a pass
 // of its own, never waiting, with the task marked for the nested helpers.
 // onlyFree: several flash operations, only while the gate is free.
+// PowerGuard decides either way: under GateHeld it is asked per step (writes
+// may have been paused since the caller got its slot).
 class GateStep {
  public:
   explicit GateStep(bool onlyFree)
@@ -71,7 +87,7 @@ class GateStep {
   ~GateStep() {
     if (_pass) ESPRack::WriteGate::leave(_at);
   }
-  bool ok() const { return !_own || _pass; }
+  bool ok() const { return _own ? _pass : ESPRack::PowerGuard::writesAllowed(); }
   GateStep(const GateStep&) = delete;
   GateStep& operator=(const GateStep&) = delete;
 
@@ -151,11 +167,23 @@ ConfigManager::ConfigManager(fs::FS* fs) : _fs(fs) {
 
 void ConfigManager::begin() {
   if (!_fs) return;
-  if (_writerJob < 0) _writerJob = ESPRack::FlashWriter::add("config", [this] { return writeDeferred(); });
+  if (_writerJob < 0) {
+    _writerJob = ESPRack::FlashWriter::add("config", [this] { return writeDeferred(); });
+    // Saves then go past a busy gate (saveStep); a queued Save Backup fails.
+    if (_writerJob < 0) log_e("[ConfigManager] no FlashWriter job left: saves go past the write gate");
+  }
 
   // Same-directory staging, whatever the housekeeping below manages.
   _tmpRoot = "/config";
   _bakRoot = "/config";
+
+  // A Save Backup run cut short by the last reset (a read: before the gate).
+  if (_fs->exists(kSnapRunMarker)) {
+    CFG_SNAP_LOCK();
+    _snapState = static_cast<uint8_t>(SnapState::Interrupted);
+    CFG_SNAP_UNLOCK();
+    log_w("[ConfigManager] the last Save Backup was cut short: the backup files are of two moments");
+  }
 
   // The housekeeping below writes (mkdir, rmdir, renames): one write gate
   // pass for it, while the gate is free (at boot, before any module holds
@@ -206,15 +234,22 @@ void ConfigManager::begin() {
   {
     // Listed by name (no File per entry: each open File costs a 4 KB
     // buffer in internal RAM), renamed after the listing is closed.
+    // Also the .tmp copies a power cut left (copyReplace, a restore):
+    // nothing writes them before begin().
     std::vector<String> bak;
+    std::vector<String> tmp;
     File dir = _fs->open("/config");
     if (dir && dir.isDirectory()) {
       bool isDir = false;
       for (String name = dir.getNextFileName(&isDir); name.length(); name = dir.getNextFileName(&isDir)) {
         if (!isDir && name.endsWith(".bak")) bak.push_back(name);
+        if (!isDir && name.endsWith(".tmp")) tmp.push_back(name);
       }
     }
     if (dir) dir.close();
+    for (const String& name : tmp) {
+      (void)removeIfExists((name.startsWith("/") ? name : (String("/config/") + name)).c_str());
+    }
     for (const String& name : bak) {
       // The listing may give bare names or full paths depending on the
       // littlefs version; normalise to absolute.
@@ -253,6 +288,41 @@ bool ConfigManager::tryLock(uint32_t ms) {
 #endif
   (void)ms;
   return true;
+}
+
+void ConfigManager::closeForRestart() {
+#if CFGMGR_USE_FREERTOS
+  CFG_SNAP_LOCK();
+  s_closedFor = xTaskGetCurrentTaskHandle();
+  CFG_SNAP_UNLOCK();
+#endif
+  // A step another task has under way ends first: each looks under the lock.
+  if (tryLock(CFGMGR_LOCK_WAIT_MS)) {
+    unlock();
+  } else {
+    log_w("[CFG] restart: a config step still holds the lock");
+  }
+}
+
+bool ConfigManager::restartClosed() const {
+#if CFGMGR_USE_FREERTOS
+  CFG_SNAP_LOCK();
+  void* t = s_closedFor;
+  CFG_SNAP_UNLOCK();
+  return t && t != static_cast<void*>(xTaskGetCurrentTaskHandle());
+#else
+  return false;  // one task: the restart's own
+#endif
+}
+
+uint32_t ConfigManager::restartFlushMs(uint32_t boundMs) const {
+  // Per save: the slot, the lock, the two files. A queued Save Backup: a
+  // slot and a flash step each for the copy and the rename per file and
+  // for the run's marker (in and out), and one wait for the lock.
+  constexpr uint32_t kFileMs = 500;
+  uint32_t ms = (uint32_t)deferredCount() * (boundMs + CFGMGR_LOCK_WAIT_MS + 2 * kFileMs);
+  if (snapPending()) ms += ((uint32_t)_entries.size() * 2 + 2) * (boundMs + kFileMs) + CFGMGR_LOCK_WAIT_MS;
+  return ms;
 }
 
 uint32_t ConfigManager::nowTs() const {
@@ -300,21 +370,28 @@ void ConfigManager::flushDeferred() {
 // The FlashWriter task: each deferred save in two steps, a gate slot each
 // (the backup copy, then the file), then a queued Save Backup. The config
 // lock is never held while waiting for a slot: a save from async_tcp
-// meanwhile isn't kept waiting. One wait clock for the whole run, so
-// maxWaitMs bounds it, not each step.
+// meanwhile isn't kept waiting. Each step waits on a clock of its own: only
+// a step that itself found no pause for maxWaitMs + maxWindowMs goes
+// forced, not every step after the first 12 s of a long run.
 uint32_t ConfigManager::writeDeferred() {
-  const uint32_t runSince = ESPRack::WriteGate::now();
   bool power = false;
+  bool failed = false;
   _busyRetry.store(false);
   for (auto& e : _entries) {
     if (!e || !e->deferred()) continue;
-    ESPRack::WriteSlot slot(0, nullptr, runSince);
-    if (!slot.ok()) {
+    if (restartClosed()) {  // the restart writes them (flushDeferredNow)
       power = true;
       break;
     }
-    IConfigEntry::Backup b;
-    {
+    // The backup copy, unless there is none to make (made already for this
+    // save, no file yet, or a stale primary): then no slot for it.
+    IConfigEntry::Backup b = IConfigEntry::Backup::Made;
+    if (e->backupDue(*this)) {
+      ESPRack::WriteSlot slot;
+      if (!slot.ok()) {
+        power = true;
+        break;
+      }
       GateHeld mark;  // the slot covers the backup copy's helpers
       b = e->backupForSave(*this);
     }
@@ -322,53 +399,71 @@ uint32_t ConfigManager::writeDeferred() {
       power = true;
       break;
     }
-    if (b == IConfigEntry::Backup::Made) {
-      if (!slot.again()) {
+    if (b == IConfigEntry::Backup::Failed) {  // no copy: the file is not rewritten in place
+      failed = true;
+      continue;
+    }
+    if (b != IConfigEntry::Backup::Made) continue;  // Unneeded, or Busy (noteBusy)
+    ESPRack::WriteSlot slot;
+    if (!slot.ok()) {
+      power = true;
+      break;
+    }
+    if (!e->saveStep(*this, "deferred", true, true) && e->deferred()) {
+      if (!ESPRack::PowerGuard::writesAllowed()) {
         power = true;
         break;
       }
-      (void)e->saveStep(*this, "deferred", true, true);
+      failed = true;
     }
   }
   _anyDeferred = deferredCount() > 0;
   // After the saves, so the snapshot freezes what they wrote (a save that
   // failed doesn't hold it up: it freezes what is on flash).
-  if (!power && snapPending()) power = !snapshotSteps(runSince);
-  // Left over: a service's state lock timed out (noteBusy): again in
-  // CFGMGR_BUSY_RETRY_MS. PowerGuard paused writes (before or during a step),
-  // or a save that failed: run again when PowerGuard allows writes (or on
-  // the next kick).
-  if (!_anyDeferred && !snapPending()) return ESPRack::FlashWriter::kDone;
-  if (!power && _busyRetry.load()) return CFGMGR_BUSY_RETRY_MS;
-  return ESPRack::FlashWriter::kOnPower;
+  // Stopped, not for the lock (noteBusy): PowerGuard or the restart.
+  if (!power && snapPending() && !snapshotSteps()) power = !_busyRetry.load();
+  if (!_anyDeferred && !snapPending()) {
+    _failStreak.store(0);
+    return ESPRack::FlashWriter::kDone;
+  }
+  // PowerGuard paused writes (before or during a step), or the restart
+  // took over: run again when PowerGuard allows writes (or on the next kick).
+  if (power) return ESPRack::FlashWriter::kOnPower;
+  // A service's state lock or the config lock timed out (noteBusy): again
+  // in CFGMGR_BUSY_RETRY_MS.
+  if (!failed && _busyRetry.load()) return CFGMGR_BUSY_RETRY_MS;
+  // A save that failed (a flash error, no internal RAM for a file buffer, a
+  // full file system) or left over: again later, each time a little later.
+  // No PowerGuard event would come for it.
+  const uint8_t n = _failStreak.load();
+  const uint32_t ms = kFailRetryMs[n < kFailRetrySteps ? n : kFailRetrySteps - 1];
+  if (n < 255) _failStreak.store(static_cast<uint8_t>(n + 1));
+  log_w("[CFG] %u deferred save(s) not written: try #%u in %u ms", (unsigned)deferredCount(), (unsigned)(n + 1),
+        (unsigned)ms);
+  return ms;
 }
 
 void ConfigManager::flushDeferredNow(uint32_t boundMs) {
+  // From here on only this task writes the config: the FlashWriter's run
+  // and a late save on another task stop (restartClosed()).
+  closeForRestart();
   for (auto& e : _entries) {
     if (!e || !e->deferred()) continue;
     ESPRack::WriteSlot slot(boundMs);
-    if (!slot.ok()) continue;  // PowerGuard: it stays deferred
-    (void)e->saveStep(*this, "deferred", true, false);  // makes its own backup copy
+    if (!slot.ok()) {  // PowerGuard: kept until it allows writes, which the restart won't wait for
+      log_w("[CFG] %s: deferred save not written before the restart (writes paused)", e->id().c_str());
+      continue;
+    }
+    if (!e->saveStep(*this, "deferred", true, false) && e->deferred()) {  // makes its own backup copy
+      log_w("[CFG] %s: deferred save not written before the restart", e->id().c_str());
+    }
   }
   _anyDeferred = deferredCount() > 0;
-  // A queued Save Backup: one bounded wait for the run, or it would go with
-  // the restart.
-  if (!snapPending()) return;
-  CFG_SNAP_LOCK();
-  const uint32_t gen = _snapGen;
-  CFG_SNAP_UNLOCK();
-  ESPRack::WriteSlot slot(boundMs);
-  if (!slot.ok() || !tryLock(CFGMGR_LOCK_WAIT_MS)) {
+  // A queued Save Backup: its remaining steps, a bounded wait each, or it
+  // would go with the restart.
+  if (snapPending() && !snapshotSteps(boundMs)) {
     log_w("[CFG] queued snapshot not written before the restart (writes paused or config busy)");
-    return;
   }
-  bool ok;
-  {
-    GateHeld mark;
-    ok = snapshotLocked();
-  }
-  unlock();
-  snapFinish(gen, ok);
 }
 
 bool ConfigManager::restoreFromBackup(const char* id) {
@@ -392,27 +487,53 @@ bool ConfigManager::snapshotEntry(const char* primaryPath) {
   if (!_fs || !primaryPath || !*primaryPath) return false;
   if (!fileExists(primaryPath)) return false;
 
+  // Through <snapshot>.tmp: a cut leaves the old snapshot or the new one.
   String snap = String(primaryPath) + ".snapshot";
-  (void)removeIfExists(snap.c_str());
-  bool ok = copyFile(primaryPath, snap.c_str());
+  bool ok = copyReplace(primaryPath, snap.c_str());
   if (!ok) {
     log_e("[CFG] snapshotEntry %s FAILED", primaryPath);
   }
   return ok;
 }
 
-bool ConfigManager::restoreEntryFromSnapshot(const char* primaryPath) {
+// Only from a snapshot that verifies (a torn or empty one is skipped), and
+// through <primary>.tmp, verified again, then renamed over the primary: the
+// primary is never removed before a verified copy is there.
+bool ConfigManager::restoreEntryFromSnapshot(const char* primaryPath, size_t bufferSize) {
   if (!_fs || !primaryPath || !*primaryPath) return false;
 
   String snap = String(primaryPath) + ".snapshot";
   if (!fileExists(snap.c_str())) return false;
-
-  (void)removeIfExists(primaryPath);
-  bool ok = copyFile(snap.c_str(), primaryPath);
+  if (!verifyFile(snap.c_str(), bufferSize)) {
+    log_e("[CFG] restore %s: the snapshot fails to verify — primary kept", primaryPath);
+    return false;
+  }
+  const String tmp = makeTmpPathFor(primaryPath);
+  bool ok = copyFile(snap.c_str(), tmp.c_str()) && verifyFile(tmp.c_str(), bufferSize) &&
+            replaceWith(tmp.c_str(), primaryPath);
   if (!ok) {
-    log_e("[CFG] restoreEntryFromSnapshot %s FAILED", primaryPath);
+    (void)removeIfExists(tmp.c_str());
+    log_e("[CFG] restoreEntryFromSnapshot %s FAILED — primary kept", primaryPath);
   }
   return ok;
+}
+
+ConfigManager::SnapCheck ConfigManager::checkSnapshots() {
+  if (!tryLock(CFGMGR_LOCK_WAIT_MS)) return SnapCheck::Busy;
+  bool any = false;
+  bool bad = false;
+  forEachEntry([&](IConfigEntry& e) {
+    const char* p = e.primary().c_str();
+    if (!p || !*p || !hasSnapshot(p)) return;
+    any = true;
+    const String snap = e.primary() + ".snapshot";
+    if (!verifyFile(snap.c_str(), e.bufferSize())) {
+      log_w("[CFG] %s fails to verify", snap.c_str());
+      bad = true;
+    }
+  });
+  unlock();
+  return !any ? SnapCheck::None : bad ? SnapCheck::Bad : SnapCheck::Ok;
 }
 
 bool ConfigManager::hasSnapshot(const char* primaryPath) const {
@@ -497,9 +618,11 @@ bool ConfigManager::snapshotLocked() {
   // Each successful copy bumps the per-entry snaps + lastSnapshotTs so
   // the Config Manager tab's Age column reflects "how fresh is THIS
   // entry's snapshot" rather than "how recently was THIS entry saved".
-  // The caller holds the lock and the write gate (GateHeld).
+  // The caller holds the lock and the write gate (GateHeld). The run's
+  // marker is there while it goes (a cut: the page says so after the boot).
   uint32_t now = nowTs();
   bool allOk = true;
+  (void)markSnapshotRun(true);
   forEachEntry([&](IConfigEntry& e) {
     const char* p = e.primary().c_str();
     if (!p || !*p) return;
@@ -516,6 +639,7 @@ bool ConfigManager::snapshotLocked() {
       allOk = false;
     }
   });
+  (void)markSnapshotRun(false);
   return allOk;
 }
 
@@ -597,16 +721,43 @@ ConfigManager::SnapState ConfigManager::requestSnapshot() {
   return SnapState::Queued;
 }
 
-// The queued Save Backup, on the FlashWriter task: per entry a gate slot for
-// each flash step (the old snapshot removed, the primary copied), each step
-// under the lock, which is never held while waiting for a slot. PowerGuard
-// pausing writes: false, it stays queued from the entry it stopped at.
-bool ConfigManager::snapshotSteps(uint32_t since) {
+// The queued Save Backup, on the FlashWriter task (or the restart's flush:
+// boundMs). Per entry two flash steps, a gate slot each: the primary copied
+// to <snapshot>.tmp, then renamed over the snapshot (a cut leaves the old
+// snapshot or the new one). One step more each for the run's marker, at the
+// start and the end. Each step under the lock, which is never held while
+// waiting for a slot. false: it stays queued from the entry it stopped at
+// (PowerGuard paused writes, the restart took over, or the lock was busy:
+// noteBusy).
+bool ConfigManager::snapshotSteps(uint32_t boundMs) {
+  // One step: 1 done, 0 failed, -1 not run (no slot, the restart, busy).
+  auto step = [&](auto fn) -> int8_t {
+    ESPRack::WriteSlot slot(boundMs);
+    if (!slot.ok()) return -1;
+    if (!tryLock(CFGMGR_LOCK_WAIT_MS)) {
+      noteBusy();
+      return -1;
+    }
+    if (restartClosed()) {
+      unlock();
+      return -1;
+    }
+    bool ok;
+    {
+      GateHeld mark;
+      ok = fn();
+    }
+    unlock();
+    return ok ? 1 : 0;
+  };
   for (;;) {
     CFG_SNAP_LOCK();
+    const bool pending = _snapPending;
     const uint32_t gen = _snapGen;
     size_t i = _snapNext;
     CFG_SNAP_UNLOCK();
+    if (!pending) return true;  // finished meanwhile (the restart's flush)
+    if (i == 0 && !fileExists(kSnapRunMarker) && step([&] { return markSnapshotRun(true); }) < 0) return false;
     bool newer = false;
     for (; i < _entries.size() && !newer; ++i) {
       IConfigEntry* e = _entries[i].get();
@@ -626,35 +777,23 @@ bool ConfigManager::snapshotSteps(uint32_t since) {
         continue;
       }
       const String snap = p + ".snapshot";
-      ESPRack::WriteSlot slot(0, nullptr, since);
-      bool ok = slot.ok();
-      if (ok && fileExists(snap.c_str())) {
-        lock();
-        {
-          GateHeld mark;
-          (void)removeIfExists(snap.c_str());
-        }
-        unlock();
-        ok = slot.again();
-      }
-      if (!ok) {  // PowerGuard: resume at this entry
+      const String tmp = snap + ".tmp";
+      int8_t r = step([&] { return fileExists(p.c_str()) && copyFile(p.c_str(), tmp.c_str()); });
+      if (r > 0) r = step([&] { return replaceWith(tmp.c_str(), snap.c_str()); });
+      if (r < 0) {  // resume at this entry
         CFG_SNAP_LOCK();
         if (gen == _snapGen) _snapNext = i;
         CFG_SNAP_UNLOCK();
         return false;
       }
-      lock();
-      bool copied;
-      {
-        GateHeld mark;
-        copied = fileExists(p.c_str()) && copyFile(p.c_str(), snap.c_str());
-      }
+      const bool copied = r > 0;
       if (copied) {
         e->stats().snaps++;
         e->stats().lastSnapshotTs = nowTs();
+      } else {
+        if (fileExists(tmp.c_str())) (void)step([&] { return removeIfExists(tmp.c_str()); });
+        log_e("[CFG] snapshotEntry %s FAILED", p.c_str());
       }
-      unlock();
-      if (!copied) log_e("[CFG] snapshotEntry %s FAILED", p.c_str());
       CFG_SNAP_LOCK();
       if (gen == _snapGen) {
         _snapNext = i + 1;
@@ -665,6 +804,7 @@ bool ConfigManager::snapshotSteps(uint32_t since) {
       CFG_SNAP_UNLOCK();
     }
     if (newer) continue;
+    if (fileExists(kSnapRunMarker) && step([&] { return markSnapshotRun(false); }) < 0) return false;
     CFG_SNAP_LOCK();
     const bool failed = _snapFailed;
     CFG_SNAP_UNLOCK();
@@ -698,7 +838,7 @@ bool ConfigManager::restoreAllFromSnapshot() {
       if (!p || !*p) return;
       if (!hasSnapshot(p)) return;
       anySnapshot = true;
-      if (!restoreEntryFromSnapshot(p)) allOk = false;
+      if (!restoreEntryFromSnapshot(p, e.bufferSize())) allOk = false;  // skipped: its primary stays
     });
   }
   unlock();
@@ -787,6 +927,47 @@ bool ConfigManager::copyFile(const char* src, const char* dst) {
 
   in.close();
   out.close();
+  return true;
+}
+
+// LittleFS renames over an existing file atomically (same directory): the
+// old dst or the new one is there after a cut, never neither.
+bool ConfigManager::replaceWith(const char* tmp, const char* dst) {
+  if (!_fs || !tmp || !dst) return false;
+  GateStep gate(false);  // a directory update
+  if (!gate.ok()) {
+    log_w("[CFG] rename to %s: flash busy (write gate)", dst);
+    return false;
+  }
+  if (_fs->rename(tmp, dst)) return true;
+  log_e("[CFG] rename %s -> %s failed", tmp, dst);
+  return false;
+}
+
+bool ConfigManager::copyReplace(const char* src, const char* dst) {
+  if (!src || !dst) return false;
+  const String tmp = String(dst) + ".tmp";
+  if (copyFile(src, tmp.c_str()) && replaceWith(tmp.c_str(), dst)) return true;
+  (void)removeIfExists(tmp.c_str());
+  return false;
+}
+
+bool ConfigManager::verifyFile(const char* path, size_t bufferSize) {
+  if (!fileExists(path)) return false;
+  DynamicJsonDocument doc(bufferSize);
+  if (doc.capacity() == 0) return false;  // no heap: not known to be good
+  VerifyInfo vi;
+  return readAndVerify(path, doc, vi) && vi.ok;
+}
+
+bool ConfigManager::markSnapshotRun(bool on) {
+  if (!on) return removeIfExists(kSnapRunMarker);
+  if (fileExists(kSnapRunMarker)) return true;
+  GateStep gate(false);  // an empty file
+  if (!gate.ok()) return false;
+  File f = _fs->open(kSnapRunMarker, "w");
+  if (!f) return false;
+  f.close();
   return true;
 }
 
@@ -1136,8 +1317,7 @@ bool ConfigManager::restoreBackupToPrimary(const char* primary, const char* back
 
   if (!copyFile(backup, tmpPath.c_str())) return false;
 
-  (void)removeIfExists(primary);
-
+  // Renamed over the primary (no remove first: a cut leaves one of them).
   bool ok = _fs->rename(tmpPath.c_str(), primary);
   if (!ok) {
     ok = copyFile(tmpPath.c_str(), primary);
@@ -1194,13 +1374,13 @@ ConfigManager::LoadResult ConfigManager::loadOrRecover(const char* primary,
   return LoadResult::NeedDefaults;
 }
 
-void ConfigManager::backupPrimary(const char* primary, const char* backup) {
-  if (!backup || !primary || !fileExists(primary)) return;
+bool ConfigManager::backupPrimary(const char* primary, const char* backup) {
+  if (!backup || !primary || !fileExists(primary)) return true;  // nothing to keep
   mkdirsForFile(backup);
-  (void)removeIfExists(backup);
-  if (!copyFile(primary, backup)) {
-    log_e("[CFG] backup copy %s -> %s failed (continuing)", primary, backup);
-  }
+  // Through <backup>.tmp: a failed or cut copy never costs the backup there is.
+  if (copyReplace(primary, backup)) return true;
+  log_e("[CFG] backup copy %s -> %s failed: %s not rewritten", primary, backup, primary);
+  return false;
 }
 
 bool ConfigManager::atomicWrite(const char* primary,
@@ -1208,7 +1388,9 @@ bool ConfigManager::atomicWrite(const char* primary,
                                 const char* /*tmp*/,
                                 JsonObjectConst data,
                                 size_t bufferSize,
-                                uint32_t* outCrc) {
+                                uint32_t* outCrc,
+                                bool* outBackupHeld) {
+  if (outBackupHeld) *outBackupHeld = false;
   if (!ESPRack::PowerGuard::writesAllowed()) {  // any other writer
     log_w("[CFG] write %s skipped: writes paused (PowerGuard)", primary ? primary : "?");
     return false;
@@ -1237,18 +1419,28 @@ bool ConfigManager::atomicWrite(const char* primary,
   // operators have at least one rollback file on disk. Atomicity is
   // weaker than the old design (a power loss mid-write loses the
   // current primary; the .bak is the recovery point), but it works on
-  // every LittleFS we target.
+  // every LittleFS we target. The backup is always there first (or there
+  // was no primary): backupPrimary goes through a .tmp and a rename.
 
   mkdirsForFile(primary);
 
-  // Best-effort backup of the previous primary BEFORE overwriting it
-  // (null: done already, as the FlashWriter's first step).
-  backupPrimary(primary, backup);
+  // The backup of the previous primary BEFORE overwriting it (null: done
+  // already, as the FlashWriter's first step). Without it the primary is
+  // not rewritten in place: a cut then would leave neither.
+  if (!backupPrimary(primary, backup)) return false;
+  // The copy is made (or there was nothing to copy): from here on a retry
+  // must not copy this primary over it again.
+  if (outBackupHeld && backup) *outBackupHeld = true;
+  if (!ESPRack::PowerGuard::writesAllowed()) {  // paused since: the backup copy is all
+    log_w("[CFG] write %s skipped: writes paused (PowerGuard)", primary);
+    return false;
+  }
 
   uint32_t crc = crc32OfJson(data);
   uint32_t ts  = nowTs();
 
   File f = _fs->open(primary, "w");
+  if (outBackupHeld) *outBackupHeld = true;  // the primary may be torn now
   if (!f) {
     log_e("[CFG] write open %s FAILED", primary);
     return false;

@@ -15,7 +15,9 @@
 //     with the abort, opened or not (the sink may hold something from
 //     before open). Once the first finish call ran, the finish runs to
 //     its end whatever fails meanwhile (a sink between two of its finish
-//     calls is in no state to abort); the failure stays the result.
+//     calls is in no state to abort); the failure stays the result. A
+//     revocable sink (UploadSink::revocable) is aborted instead, after
+//     the finish call under way, even when that one said kDone.
 // The caller serialises the calls. Clock: ms, wrapping. Arduino-free
 // (host-tested).
 
@@ -47,8 +49,9 @@ class UploadPumpCore {
 
   // ---- session ----
   // A new session (Idle or Settled, sink not in use). holdBelow: free ring
-  // bytes under which the producer holds the TCP window. false: busy.
-  bool begin(uint32_t holdBelow, uint32_t now);
+  // bytes under which the producer holds the TCP window. revocable: the
+  // sink's (UploadSink::revocable). false: busy.
+  bool begin(uint32_t holdBelow, uint32_t now, bool revocable = false);
   bool canBegin() const { return _phase != Phase::Running && !_busy && !_copying; }
   // The session's ring (none: the producer writes straight through only).
   void setRing(uint8_t* buf, uint32_t size);
@@ -89,7 +92,12 @@ class UploadPumpCore {
   // bytes in all, ending on a 4 KB boundary of the stream (a write waits
   // until the ring has that much, unless all is in).
   Action next(Span out[2], uint32_t& len);
+  Action peek() const;   // what next() would give, taking nothing
   bool pending() const;  // next() would give an action
+  // After a wait for a slot, the action next() gave: the abort instead
+  // when the session failed meanwhile (no step, open or revocable finish
+  // for a session that is over), else a.
+  Action confirm(Action a) const;
   // The producer writes its chunk itself (the ring is empty, nothing under
   // way): marks the sink in use until done().
   bool claim();
@@ -113,6 +121,7 @@ class UploadPumpCore {
   bool _open = false;
   bool _live = false;       // the sink is this session's: neither committed nor aborted
   bool _finishing = false;  // a finish sequence under way
+  bool _revocable = false;  // the sink's finish may be abandoned for the abort
   bool _final = false;
   bool _held = false;
   uint8_t* _buf = nullptr;

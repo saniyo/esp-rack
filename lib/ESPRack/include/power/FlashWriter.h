@@ -50,6 +50,19 @@ class FlashWriter {
   // writes will be put off; internal RAM is still to be had at setup).
   static void start();
 
+  // The restart's flush: what a job keeps is written by the task that runs
+  // the restart (App, after every onShutdown hook, so no module window is
+  // open any more), a WriteSlot per step with boundMs at most for a pause,
+  // or it goes with the restart. ms(ctx, boundMs): how long that may take
+  // now (0: nothing kept), counted in the restart's grace. At setup (the
+  // loop task); false when all kMaxRestartFlush are taken.
+  static constexpr uint8_t kMaxRestartFlush = 4;
+  using RestartFlush = void (*)(void* ctx, uint32_t boundMs);
+  using RestartFlushMs = uint32_t (*)(void* ctx, uint32_t boundMs);
+  static bool addRestartFlush(RestartFlush fn, RestartFlushMs ms, void* ctx);
+  static void restartFlush(uint32_t boundMs);       // App::runFlushOnce
+  static uint32_t restartFlushMs(uint32_t boundMs);  // App::flushAllowanceMs
+
   static uint8_t jobs();
   static const char* name(int8_t id);
   static bool waiting(int8_t id);  // kicked, on a retry or held by PowerGuard

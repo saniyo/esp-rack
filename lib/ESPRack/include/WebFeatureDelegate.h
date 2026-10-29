@@ -1,6 +1,7 @@
 #ifndef WebFeatureDelegate_h
 #define WebFeatureDelegate_h
 
+#include <atomic>
 #include <cstring>
 #include <memory>
 #include <utility>
@@ -90,19 +91,27 @@ class WebFeatureEntry : public IWebFeatureEntry {
     // Secret-aware faces (LIB-FIX-004). Readers: secrets masked (always for
     // echoes/WS, for non-admins on GETs). Updaters: a value equal to the mask
     // is dropped so a round-tripped form can't overwrite the stored secret.
+    // Secret keys unknown (see ensureSecretKeys; these run under the state
+    // lock, so only a heap too tight for the form tree keeps them unknown):
+    // a refused write and an empty push rather than a stored mask or an
+    // unmasked secret.
     _maskedEcho = [this](T& s, JsonObject& o) {
+      if (!ensureSecretKeys()) return;
       stateReaderRaw()(s, o);
       SecretFields::maskAll(o, _secretKeys);
     };
     _postUpdater = [this](JsonObject& in, T& s) {
+      if (!ensureSecretKeys()) return secretsUnknown();
       SecretFields::stripMasked(in, _secretKeys);
       return _restUpdater(in, s);
     };
     _wsOut = [this](T& s, JsonObject& o) {
+      if (!ensureSecretKeys()) return;
       _wsReader(s, o);
       SecretFields::maskAll(o, _secretKeys);
     };
     _wsIn = [this](JsonObject& in, T& s) {
+      if (!ensureSecretKeys()) return secretsUnknown();
       SecretFields::stripMasked(in, _secretKeys);
       return _wsUpdater(in, s);
     };
@@ -307,9 +316,12 @@ class WebFeatureEntry : public IWebFeatureEntry {
 
     // GET path — read into out_body with the face-appropriate reader.
     if (is_get) {
-      out_status = 200;
       JsonObject root = out_body.to<JsonObject>();
-      _service->read(root, match_form ? _restReader : stateReader);
+      if (!_service->read(root, match_form ? _restReader : stateReader)) {
+        writeStateBusy(out_status, out_body);
+        return true;
+      }
+      out_status = 200;
       return true;
     }
 
@@ -325,9 +337,13 @@ class WebFeatureEntry : public IWebFeatureEntry {
         ESPRack::writeUpdateRejected(out_body);
         return true;
       }
-      out_status = 200;
+      // The write is done; only its echo waits for the lock.
       JsonObject root = out_body.to<JsonObject>();
-      _service->read(root, stateReader);
+      if (!_service->read(root, stateReader)) {
+        writeStateBusy(out_status, out_body);
+        return true;
+      }
+      out_status = 200;
       return true;
     }
 
@@ -388,8 +404,9 @@ class WebFeatureEntry : public IWebFeatureEntry {
       // (save, apply, broadcast) run even when the echo had to be shed with a
       // 503: the client's retry then sees UNCHANGED and gets the echo. Skipping
       // them left the new value in RAM, unsaved and unapplied, until a reboot.
-      sendAdaptiveJson(r, [this](JsonObject& o) { _service->read(o, _maskedEcho); },
-                       _restBufferSize ? _restBufferSize : DEFAULT_BUFFER_SIZE);
+      // State lock busy: the same shed, a 503 "state_busy" (see sendLocked).
+      // The update ran, so the secret keys are known (_postUpdater).
+      sendLocked(r, [this](JsonObject& o) { _service->read(o, _maskedEcho); });
       if (outcome == StateUpdateResult::CHANGED) {
         _service->callUpdateHandlers(HTTP_ENDPOINT_ORIGIN_ID);
       }
@@ -409,9 +426,65 @@ class WebFeatureEntry : public IWebFeatureEntry {
 
   // the form without its values, static per firmware, so it
   // revalidates like the manifest (ETag = signature + id, 304).
+  // State lock busy: 503, never an empty schema under a cacheable ETag.
   void sendSchema(AsyncWebServerRequest* r) {
-    sendFormSchema(r, _spec.id, _restBufferSize ? _restBufferSize : DEFAULT_BUFFER_SIZE,
-                   [this](JsonObject& root) { _service->read(root, _restReader); });
+    const bool ran = _service->withLock([this, r] {
+      sendFormSchema(r, _spec.id, _restBufferSize ? _restBufferSize : DEFAULT_BUFFER_SIZE,
+                     [this](JsonObject& root) { _service->read(root, _restReader); });
+    });
+    if (!ran) sendStateBusy(r);
+  }
+
+  // A JSON response built from the state: the state lock is held across
+  // every build attempt (the reads inside take it again, recursively), so
+  // it is a whole state or a 503 "state_busy", never 200 with {}. The
+  // request is not paused, so send() only queues the response: its bytes
+  // go out after the handler returns, with no lock held.
+  void sendLocked(AsyncWebServerRequest* r, const std::function<void(JsonObject&)>& fill) {
+    const size_t size = _restBufferSize ? _restBufferSize : DEFAULT_BUFFER_SIZE;
+    const bool ran = _service->withLock([r, &fill, size] { sendAdaptiveJson(r, fill, size); });
+    if (!ran) sendStateBusy(r);
+  }
+
+  static void sendStateBusy(AsyncWebServerRequest* r) {
+    sendProblem(r, 503, "state_busy", "The state is locked by other work, try again", 1);
+  }
+
+  // rest.proxy flavour of sendStateBusy.
+  static void writeStateBusy(int& out_status, JsonVariant out_body) {
+    out_status = 503;
+    JsonObject err = out_body.to<JsonObject>();
+    err["error"] = "state_busy";
+    err["retryAfter"] = 1;
+  }
+
+  // The secret keys come from the boot probe (probeForm). When its read
+  // found the state lock busy they are collected here, on first use, under
+  // the state lock (every user of _secretKeys runs under it: the masking
+  // readers and the stripping updaters). false: still unknown (lock busy or
+  // no heap for the form tree); the caller fails closed.
+  bool ensureSecretKeys() {
+    if (_secretsKnown.load()) return true;
+    if (!_service || !_restReader) return false;
+    DynamicJsonDocument doc(_restBufferSize ? _restBufferSize : DEFAULT_BUFFER_SIZE);
+    if (doc.capacity() == 0) return false;
+    JsonObject root = doc.to<JsonObject>();
+    if (root.isNull()) return false;
+    _service->read([this, &root](T& s) {
+      if (_secretsKnown.load()) return;
+      _restReader(s, root);
+      std::vector<String> keys;
+      SecretFields::collectFromForm(JsonObjectConst(root), keys);
+      _secretKeys.swap(keys);
+      _hasSecrets.store(!_secretKeys.empty());
+      _secretsKnown.store(true);
+    });
+    return _secretsKnown.load();
+  }
+
+  static StateUpdateResult secretsUnknown() {
+    ESPRack::setUpdateError("state busy");
+    return StateUpdateResult::ERROR;
   }
 
   // GET for the form or state face. Secrets are masked unless the caller is
@@ -424,19 +497,23 @@ class WebFeatureEntry : public IWebFeatureEntry {
         sendSchema(r);
         return;
       }
+      // Secret keys still unknown (ensureSecretKeys): a non-admin gets a
+      // 503 "state_busy", never an unmasked secret.
+      const bool known = ensureSecretKeys();
       bool mask = false;
-      if (!_secretKeys.empty() && sm) {
+      if ((!known || _hasSecrets.load()) && sm) {
         Authentication a = sm->authenticateRequest(r);
         mask = !(a.authenticated && a.user && a.user->admin);
       }
+      if (mask && !known) {
+        sendStateBusy(r);
+        return;
+      }
       const JsonStateReader<T>& reader = formFace ? _restReader : stateReaderRaw();
-      sendAdaptiveJson(
-          r,
-          [this, &reader, mask](JsonObject& root) {
-            _service->read(root, reader);
-            if (mask) SecretFields::maskAll(root, _secretKeys);
-          },
-          _restBufferSize ? _restBufferSize : DEFAULT_BUFFER_SIZE);
+      sendLocked(r, [this, &reader, mask](JsonObject& root) {
+        _service->read(root, reader);
+        if (mask) SecretFields::maskAll(root, _secretKeys);
+      });
     };
     server->on(path.c_str(), HTTP_GET, sm ? sm->wrapRequest(handler, predicate) : handler);
   }
@@ -454,10 +531,18 @@ class WebFeatureEntry : public IWebFeatureEntry {
     if (probe.capacity() == 0) return kFallback;            // boot heap too tight
     JsonObject root = probe.to<JsonObject>();
     if (root.isNull()) return kFallback;
-    _service->read(root, _restReader);
+    // State lock busy: nothing from an empty tree. The key map stays unbuilt
+    // (fails closed) and the secret keys are collected on first use.
+    if (!_service->read(root, _restReader)) {
+      log_e("[webfeature:%s] state busy at boot: secret keys deferred, write levels fail closed",
+            _spec.id ? _spec.id : "?");
+      return kFallback;
+    }
     {
       JsonObjectConst rootC = root;
       SecretFields::collectFromForm(rootC, _secretKeys);
+      _hasSecrets.store(!_secretKeys.empty());
+      _secretsKnown.store(true);
       // An overflowed probe has a truncated tree: leave the key map unbuilt
       // so registerEndpoints fails it closed.
       if (!probe.overflowed()) {
@@ -513,7 +598,11 @@ class WebFeatureEntry : public IWebFeatureEntry {
 
   // Secret handling (LIB-FIX-004): keys found by probeForm(), plus the
   // masking/stripping wrappers built from them in registerEndpoints.
+  // After the boot probe, _secretKeys is touched under the state lock only;
+  // the flags (load/store only) can be read anywhere.
   std::vector<String> _secretKeys;
+  std::atomic<bool> _secretsKnown{false};  // probed (boot or ensureSecretKeys)
+  std::atomic<bool> _hasSecrets{false};    // _secretKeys not empty
   JsonStateReader<T>  _maskedEcho;   // POST /state echo
   JsonStateUpdater<T> _postUpdater;  // POST /state + rest.proxy writes
   JsonStateReader<T>  _wsOut;        // WS pushes / snapshots

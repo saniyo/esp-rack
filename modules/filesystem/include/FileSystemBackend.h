@@ -22,6 +22,9 @@ class FileSystemBackend {
   // Writes here stop the CPU caches (the chip's own flash): they go through
   // the flash write gate (power/WriteGate.h). An SD card does not.
   virtual bool onCodeFlash() const { return false; }
+  // A rename onto an existing file replaces it in one atomic step (LittleFS).
+  // FAT refuses it: the old file has to step aside first.
+  virtual bool renameReplaces() const { return false; }
   virtual bool canFormat() const { return false; }
   virtual bool format() { return false; }
 

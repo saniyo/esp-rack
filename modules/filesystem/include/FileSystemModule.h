@@ -41,6 +41,12 @@ class FileSystemModule : public ESPRack::Module {
 #endif
     manager_->addReadOnlyPrefix("/flash/config");
   }
+  // No new write from here on (never waits). The writes the gate put off
+  // (answered 202) go in the restart's flush, after every module's hook has
+  // stopped its windows (FileSystemManager registers it with FlashWriter).
+  void onShutdown() override {
+    if (manager_) manager_->close();
+  }
  private:
   // The SD card's pins are the framework's: keep external HW modules off
   // them (LIB-FEAT-001). Only pins the board defines explicitly.

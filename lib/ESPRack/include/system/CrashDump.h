@@ -22,7 +22,15 @@
 // ~0.4 s each, fit no pause between a module's windows and would stall
 // async_tcp past its watchdog), in the FlashWriter job "coredump". The
 // first sector goes first: the dump is invalid from then on. eraseStatus()
-// tells how far it got.
+// tells how far it got. The download and the erase exclude each other: a
+// download is refused (409) while an erase runs, an erase while a download
+// reads the partition. While PowerGuard pauses writes a new erase is
+// refused (503); one under way waits and goes on once writes are allowed.
+//
+// CONFIG_ESP_COREDUMP_FLASH_NO_OVERWRITE (off by default): IDF marks the
+// partition free again only in its own one-call erase, which this one by
+// sectors can't be. With the option on, a crash after erase() is saved only
+// from the next boot on (a build warning says so).
 
 #include <stddef.h>
 #include <stdint.h>
@@ -58,7 +66,8 @@ struct EraseStatus {
 };
 // Starts the erase (any task, never waits for the gate): true when it is
 // under way (or already was) or done, false when there is no coredump
-// partition or no FlashWriter job.
+// partition or no FlashWriter job, a download is under way, PowerGuard
+// pauses writes, or the first sector failed.
 bool erase();
 EraseStatus eraseStatus();
 const char* eraseStateName(EraseState s);  // "idle", "erasing", "done", "failed"

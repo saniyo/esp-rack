@@ -12,6 +12,7 @@
 #include <esp_heap_caps.h>
 #include <esp_ota_ops.h>
 #include <esp_partition.h>
+#include <lwip/sockets.h>
 #include <power/WriteGate.h>
 #include <system/OtaWriter.h>
 #elif defined(ESP8266)
@@ -180,11 +181,15 @@ void AutoUpdateService::loop() {
 
     uint32_t timeoutMs = (uint32_t)_state.updateTimeoutSec * 1000UL;
 #ifdef ESP32
-    // The task stops by itself at the deadline (between 4 KB steps, each
-    // bounded: an HTTP read timeout, a write gate slot). Killing it is the
-    // last resort: a task deleted while it waits in the write gate leaves
-    // its place there until the restart below.
-    timeoutMs += AUTO_UPDATE_KILL_GRACE_MS;
+    // The task stops by itself at the deadline: it checks it while it
+    // reads, once each slot is granted and before the image check, so
+    // past it at most one write gate slot wait (maxWaitMs + maxWindowMs,
+    // then the write goes; two with flash encryption) remains. Killing it is the last resort: a task deleted while
+    // it waits in the write gate leaves its place there until the restart
+    // below.
+    const ESPRack::WriteGateConfig gate = ESPRack::WriteGate::config();
+    const uint32_t tail = gate.maxWaitMs + gate.maxWindowMs + 5000;
+    timeoutMs += tail > AUTO_UPDATE_KILL_GRACE_MS ? tail : (uint32_t)AUTO_UPDATE_KILL_GRACE_MS;
 #endif
     if (elapsed >= timeoutMs) {
       log_d("[AutoUpdate] TIMEOUT — killing OTA task, rebooting...");
@@ -378,6 +383,40 @@ bool AutoUpdateService::otaPastDeadline() const {
   return millis() - _otaStartMs >= (uint32_t)_state.updateTimeoutSec * 1000UL;
 }
 
+bool AutoUpdateService::readStep(NetworkClient* tcp, uint8_t* buf, size_t n) {
+  // NetworkClient::readBytes polls with delay(2) and restarts its timeout
+  // at every byte; here the step has one timeout and the wait is select().
+  const uint32_t t0 = millis();
+  const uint32_t limitMs = (uint32_t)_state.updateTimeoutSec * 1000UL;
+  size_t got = 0;
+  while (got < n) {
+    const int r = tcp->read(buf + got, n - got);  // what is there, no wait
+    if (r < 0) return false;
+    if (r > 0) {
+      got += (size_t)r;
+      continue;
+    }
+    const uint32_t now = millis();
+    const uint32_t spent = now - t0;
+    const uint32_t elapsed = now - (uint32_t)_otaStartMs;
+    if (spent >= AUTO_UPDATE_HTTP_TIMEOUT_MS || elapsed >= limitMs) return false;
+    uint32_t waitMs = AUTO_UPDATE_HTTP_TIMEOUT_MS - spent;
+    if (limitMs - elapsed < waitMs) waitMs = limitMs - elapsed;
+    const int fd = tcp->fd();
+    if (fd < 0) return false;
+    fd_set rd;
+    FD_ZERO(&rd);
+    FD_SET(fd, &rd);
+    timeval tv;
+    tv.tv_sec = waitMs / 1000;
+    tv.tv_usec = (waitMs % 1000) * 1000;
+    const int s = select(fd + 1, &rd, nullptr, nullptr, &tv);
+    if (s < 0) return false;
+    if (s > 0 && !tcp->available()) return false;  // readable, nothing to read: the peer closed
+  }
+  return true;
+}
+
 t_httpUpdate_return AutoUpdateService::otaFailed(int err, const String& msg) {
   _otaErr = err;
   _otaErrStr = msg;
@@ -468,7 +507,7 @@ t_httpUpdate_return AutoUpdateService::downloadImage(const String& url) {
     return otaFailed(ESP_ERR_NO_MEM, "Update error: no memory for a 4 KB buffer");
   }
   NetworkClient* tcp = http.getStreamPtr();
-  ESPRack::OtaWriter ota;
+  ESPRack::OtaWriter& ota = _ota;  // kept up to the restart once it passed
   t_httpUpdate_return ret = HTTP_UPDATE_OK;
   const size_t total = (size_t)len;
   size_t done = 0;
@@ -480,8 +519,13 @@ t_httpUpdate_return AutoUpdateService::downloadImage(const String& url) {
       break;
     }
     const size_t n = total - done < kStep ? total - done : kStep;
-    if (!tcp || tcp->readBytes(buf, n) != n) {
-      ret = otaFailed(HTTPC_ERROR_READ_TIMEOUT, "Update error: stream read timeout");
+    if (!tcp || !readStep(tcp, buf, n)) {
+      if (otaPastDeadline()) {
+        _otaTimedOut = true;
+        ret = otaFailed(HTTPC_ERROR_READ_TIMEOUT, "timeout");
+      } else {
+        ret = otaFailed(HTTPC_ERROR_READ_TIMEOUT, "Update error: stream read timeout");
+      }
       break;
     }
     if (!done) {
@@ -489,8 +533,21 @@ t_httpUpdate_return AutoUpdateService::downloadImage(const String& url) {
         ret = otaFailed(HTTP_UE_BIN_VERIFY_HEADER_FAILED, "Verify Bin Header Failed");
         break;
       }
-      // No flash write yet (sequential mode erases as it goes).
-      if (!ota.begin("auto-update", (uint32_t)total, md5.length() ? md5.c_str() : nullptr)) {
+      // Sequential mode erases as it goes: no flash write up to IDF 5.4;
+      // from 5.5 (rollback) maybe an otadata sector: a slot of its own.
+      const char* md5Hex = md5.length() ? md5.c_str() : nullptr;
+      bool begun;
+      if (ESPRack::OtaWriter::beginWrites()) {
+        ESPRack::WriteSlot beginSlot;
+        if (!beginSlot.ok()) {
+          ret = otaFailed(ESP_ERR_INVALID_STATE, "Update error: flash writes paused (power)");
+          break;
+        }
+        begun = ota.begin("auto-update", (uint32_t)total, md5Hex);
+      } else {
+        begun = ota.begin("auto-update", (uint32_t)total, md5Hex);
+      }
+      if (!begun) {
         ret = ota.error() == ESPRack::OtaWriter::kErrBadMd5
                   ? otaFailed(HTTP_UE_SERVER_FAULTY_MD5, "Wrong MD5")
                   : otaFailed(ota.error(), String("Update error: ") + ota.errorString());
@@ -498,6 +555,11 @@ t_httpUpdate_return AutoUpdateService::downloadImage(const String& url) {
       }
     }
     ESPRack::WriteSlot slot;
+    if (otaPastDeadline()) {  // the wait for the slot took us past it
+      _otaTimedOut = true;
+      ret = otaFailed(HTTPC_ERROR_READ_TIMEOUT, "timeout");
+      break;
+    }
     if (!slot.ok()) {
       ret = otaFailed(ESP_ERR_INVALID_STATE, "Update error: flash writes paused (power)");
       break;
@@ -510,17 +572,28 @@ t_httpUpdate_return AutoUpdateService::downloadImage(const String& url) {
     done += n;
     if (_progressCallback) _progressCallback((int)done, len);
   }
-  if (ret == HTTP_UPDATE_OK) {
-    // Check and close the image, then set it to boot: one slot each.
-    ESPRack::WriteSlot slot;
-    if (!slot.ok()) {
-      ret = otaFailed(ESP_ERR_INVALID_STATE, "Update error: flash writes paused (power)");
-    } else if (!ota.end() || !slot.again() || !ota.activate()) {
-      ret = ota.error() ? otaFailed(ota.error(), String("Update error: ") + ota.errorString())
-                        : otaFailed(ESP_ERR_INVALID_STATE, "Update error: flash writes paused (power)");
-    }
+  if (ret == HTTP_UPDATE_OK && otaPastDeadline()) {
+    _otaTimedOut = true;
+    ret = otaFailed(HTTPC_ERROR_READ_TIMEOUT, "timeout");
   }
-  ota.abort();  // nothing once activated
+  if (ret == HTTP_UPDATE_OK) {
+    // Check and close the image: a read of the whole image, a slot only
+    // when it writes (flash encryption). Set to boot by the restart
+    // (handleOtaResult: OtaWriter::restartInto, the buses stopped).
+    bool ended = false;
+    if (ESPRack::OtaWriter::endWrites()) {
+      ESPRack::WriteSlot slot;
+      if (!slot.ok()) {
+        ret = otaFailed(ESP_ERR_INVALID_STATE, "Update error: flash writes paused (power)");
+      } else {
+        ended = ota.end();
+      }
+    } else {
+      ended = ota.end();
+    }
+    if (ret == HTTP_UPDATE_OK && !ended) ret = otaFailed(ota.error(), String("Update error: ") + ota.errorString());
+  }
+  if (ret != HTTP_UPDATE_OK) ota.abort();  // an image that passed stays this writer's up to the restart
   heap_caps_free(buf);
   http.end();
   return ret;
@@ -662,7 +735,11 @@ void AutoUpdateService::handleOtaResult(t_httpUpdate_return ret, const char* ser
       // Exception (the update task, its last step): a second for "success"
       // to reach the page, as a wait on the task's own notification.
       ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1000));
+#ifdef ESP32
+      _ota.restartInto(ESPRack::kRestartAutoUpdate);  // sets the image to boot, the buses stopped
+#else
       ESPRack::restartDevice(ESPRack::kRestartAutoUpdate);
+#endif
       break;
   }
 }

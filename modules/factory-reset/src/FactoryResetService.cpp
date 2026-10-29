@@ -46,7 +46,8 @@ void FactoryResetService::handleRequest(AsyncWebServerRequest* request) {
  * (restartDevice's afterShutdown step, LIB-FIX-006), so a module that
  * persists state on shutdown can't resurrect config files on a reset device.
  * Delete function assumes that all files are stored flat, within the config
- * directory. The restart holds one write gate slot around that step.
+ * directory. The restart holds one write gate slot around that step (none
+ * and no wipe while PowerGuard pauses writes).
  */
 void FactoryResetService::factoryReset() {
   FS* f = fs;
@@ -62,7 +63,13 @@ void FactoryResetService::factoryReset() {
       }
     }
     if (root) root.close();
+    // PowerGuard may pause writes since the request was taken: asked before
+    // each remove; paused, the rest stays (the device restarts unreset).
     for (const String& path : files) {
+      if (!ESPRack::PowerGuard::writesAllowed()) {
+        log_e("[factoryReset] flash writes paused (PowerGuard): wipe stopped, settings kept");
+        break;
+      }
       if (!f->remove(path)) log_w("[factoryReset] remove %s failed", path.c_str());
     }
   });

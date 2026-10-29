@@ -26,7 +26,9 @@
 // at once; the later ones go through the flash write gate
 // (power/WriteGate.h): a gate pass on the loop / async_tcp, else the
 // FlashWriter job "bootguard" writes them (the change is in effect in RAM
-// at once; while PowerGuard pauses writes it waits there).
+// at once; while PowerGuard pauses writes it waits there). Without a job
+// (all FlashWriter jobs taken) only gate passes write them, never past
+// the gate.
 //
 // History: the last kBootHistory boots with their reason, class, the time
 // of the boot and how long the run before it lasted (NVS key "boots": one
@@ -92,7 +94,8 @@ const BootInfo& info();
 bool isCrash(BootClass c);
 void markStable();
 // true: cleared and saved; false: cleared, the save put off by the write
-// gate (or not begun). Never waits.
+// gate or failed (logged; the admin action answers 500), or not begun.
+// Never waits.
 bool clearSafeMode();
 
 // Framework plumbing (App).
@@ -103,8 +106,10 @@ uint32_t loopWaitMs(uint32_t nowMs);
 void registerManifest(WebManager* web);  // admin action system.clearSafeMode
 // A write the gate put off is still in RAM.
 bool savePending();
-// Shutdown: writes what is pending now, waiting for a gate slot boundMs at
-// most per blob (not on async_tcp or the loop task outside shutdown).
+// Shutdown: writes what is pending now, 2 x boundMs at most for both blobs
+// (gate slots, and a write under way on another task, whose end it waits
+// for); the FlashWriter job takes no new blob meanwhile. Not on async_tcp
+// or the loop task outside shutdown.
 void flush(uint32_t boundMs);
 
 }  // namespace BootGuard

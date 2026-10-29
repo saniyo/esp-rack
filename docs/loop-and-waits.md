@@ -20,7 +20,10 @@ Everything runs under FreeRTOS, and nothing sleeps to wait for something:
   an event group, with the same timeout the sleep had. The waiter can then be
   woken at once: stop, new settings, the write gate.
 - **Socket polling** becomes `select()` with a timeout, or a callback.
-- **Long work cut into chunks** yields through an event, not a sleep.
+- **Long work cut into chunks** in a module's own low-priority task gives the
+  CPU away with a one-tick wait on its own notification (`yieldStep()`), so
+  IDLE and lower priorities run (`taskYIELD()` only reaches equal priority).
+  That is a one-tick sleep; each such task is listed in section 4.1.
 - **Every wait on a lock or an event in a shared context** has a timeout and
   an error path. Shared contexts: `loopTask`, `async_tcp`, `tcpip`,
   `arduino_events`, `sys_evt`.
@@ -46,7 +49,13 @@ until the first of:
 - the smallest `loopWaitMs()` of all modules;
 - the core's own deadlines: TimeSync, BootGuard, a requested restart, and the
   WebSocket manager (`WsManager::waitMs`: 0 while frames are queued, else the
-  next heartbeat (5 s) or ping (20 s));
+  next heartbeat (5 s) or ping (20 s)). Its rx/tx queues (16 each) are pumped
+  by the loop task only. A full queue never drops a frame silently: drops are
+  counted (`rx_queue_dropped` / `tx_queue_dropped` in the WS stats) and logged
+  1st, 2nd, 4th...; a lost broadcast is sent again as the channel's current
+  state; a lost incoming frame (a sub, a write) closes that client with 1013,
+  so the page reconnects and subscribes again; a snapshot-on-subscribe is
+  sent by the loop at once, not queued;
 - half the loop watchdog's timeout, while it is armed;
 - `ESPRACK_LOOP_MAX_WAIT_MS`;
 - an `ESPRack::wakeLoop()`.
@@ -153,7 +162,14 @@ digital-io devices would let them sleep longer.
     (1 s); the backup step answers `Backup::Busy`; the CRC cache keeps its
     old value;
   - the MQTT message handler (`async_tcp`) drops that seen-topics row update
-    when `beginTransaction()` times out.
+    when `beginTransaction()` times out;
+  - a feature's GET `/form` and `/state`, its `?schema=1` and the POST echo
+    (and the same over rest.proxy) answer 503 `state_busy` with Retry-After,
+    never 200 with `{}`: the response is built under one hold of the state
+    lock (`StatefulService::withLock`), so it is whole or not sent;
+  - a WS write (`{type:"p"}`) the updater refuses, or that finds the state
+    busy, gets `{type:"err",for,detail}` and that channel's snapshot, so the
+    page shows the device's value again.
 - **A mutex with `portMAX_DELAY`.**
   - The mutex is taken with a timeout longer than the longest hold.
   - Error path:
@@ -166,11 +182,14 @@ digital-io devices would let them sleep longer.
 
 ## 4. What remains
 
-Found with this grep (comments and `delayMicroseconds` left out):
+Found with this grep, in both repos (comment lines left out):
 
 ```
-grep -rnE "\bdelay\(|vTaskDelay|portMAX_DELAY" --include=*.cpp --include=*.h --include=*.hpp lib modules
+grep -rnE "\bdelay\(|vTaskDelay|portMAX_DELAY|delayMicroseconds|esp_rom_delay_us|ets_delay_us|pauseMs\(|yieldStep\(|ulTaskNotifyTake\(|WiFi\.disconnect\(" --include=*.cpp --include=*.h --include=*.hpp lib modules
 ```
+
+A grep does not see a wait inside a library call. Those found by reading the
+Arduino core (3.x) are in section 4.3.
 
 ### 4.1 Exceptions: they stay
 
@@ -181,18 +200,37 @@ grep -rnE "\bdelay\(|vTaskDelay|portMAX_DELAY" --include=*.cpp --include=*.h --i
 | esp-rack-modules `inverter-link/include/InverterLink/InverterCanTransport.h:95` | hv-inverter-can link task | `vTaskDelay` | Fallback only when the transport's `_wake` semaphore could not be created at all. The normal path waits on `_wake`. |
 | esp-rack-modules `jk-bus/src/JkBusModuleService.cpp:113` | jk-dz01 bus task | `vTaskDelay(1)` | Same fallback for `CanPortTransport::_wake`. |
 | esp-rack-modules `rs485-port/src/Rs485PortService.cpp` `run()` | rs485 port task (own) | `ulTaskNotifyTake` with 100 ms (open, no deadline) or 1 s (closed) | The task's own notifications: ISR, `send()`, stop, new settings. The timeouts are housekeeping only. Not a sleep. |
+| esp-rack `lib/ESPRack/src/App.cpp:441` | loop task (`App::begin`, setup) | `pauseMs(50)` between two LittleFS mount attempts | A wait on `kNever`, a bit nobody sets: a 50 ms sleep no event ends. Boot only, before any module runs; a retry has nothing to wait for. |
+| esp-rack `lib/ESPRack/src/App.cpp:935` | the second caller of `restartDevice()` (any task, `async_tcp` too; it left the task watchdog first) | `pauseMs(hooks + ESPRACK_RESTART_DEADLINE_MS + 1 s)` on `kNever`, then `esp_restart()` | A backstop: the restart deadline timer resets the chip before it ends. It runs out only when that timer is missing. The task has nothing else to do: a restart is under way. |
+| esp-rack `modules/wifi/src/WiFiSettingsService.cpp:599` (`reconfigureWiFiConnection`) | loop task (`begin()`, and a Wi-Fi settings save) | `WiFi.disconnect(false, true)`: Arduino's `STAClass::disconnect` polls `delay(5)` while connected, 100 ms at most | The erase (`esp_wifi_set_config`) fails while the link is still up, so the link must be down first. Settings save only, never in steady state. To convert: `disconnectAsync(false, false)`, then the erase and the reconnect from `ARDUINO_EVENT_WIFI_STA_DISCONNECTED` (with care for a connect `manageSTA` already started). |
+| esp-rack `modules/filesystem/src/FileSystemService.cpp:943` (`yieldStep`) | archive and hash tasks (own, priority 1) | `ulTaskNotifyTake(pdTRUE, 1)`, nobody gives it | A one-tick sleep between steps of a long walk, so IDLE (the task watchdog) and lower priorities run. |
+| esp-rack `modules/filesystem/include/FileSystemSd.h:187` (`yieldStep`), `:197` | SD job task, SD mount watcher (own, one-shot) | the same one-tick step; 150·i ms (150..750) between 5 mount attempts | Card power-up has no event. The watcher ends after the 5th try. |
+| esp-rack own-task cadences: `auto-update/src/AutoUpdateService.cpp:664` (1 s for "success" to reach the page, then the restart), `cert-manager/src/CertManagerService.cpp:537` (enrol retry; Wi-Fi up or a save ends it), `:1409, :1416` (recovery poll; a new trigger ends it), `discovery/src/DiscoveryService.cpp:319, 323, 342` (link re-check; GOT_IP ends it), `history/src/HistoryService.cpp:620` (1 s tick), `mothership/src/MothershipService.cpp:419, 441` (check-in cadence, 5 s at most; `setCadence` ends it), `:1382` (500 ms before a restore restart), `telegram/src/TelegramService.cpp:671, 708, 730` (offline re-check, retry pause, the send interval; a save ends it), `ble/src/BleService.cpp:987, 1208, 1324` (disconnect 2 s at most, 200 ms peer settle, 200 ms idle) | each module's own task | a timed wait on the task's own notification (or a semaphore it owns) | Each is the cadence of that task's work, and the events that matter end it early. None runs on a shared context. |
+| esp-rack-modules `pack-switch/src/PackSwitchRackService.cpp:645` | pack-switch step task (own) | `ulTaskNotifyTake(pdTRUE, kStepMs)` | The 50 ms step; a command ends it early. |
+| esp-rack-modules `i2c-bus/src/I2cBusService.cpp:474-497` (`clearLines`) | loop task (`apply`, bus recovery) | `delayMicroseconds(5)` per half clock, 9 clocks and a STOP at most: about 100 µs | Bit timing of the recovery clocks; no event times a 5 µs edge. Only when a device holds SDA low. Not in the gateway. |
+| esp-rack-modules `onewire-temp/src/EspOneWireBus.cpp:63-100` | loop task (the engine's bus slices) | `esp_rom_delay_us`: reset 480 + 70 + 410 µs, a bit slot about 70 µs, under the bus `portMUX` | 1-Wire slot timing. The engine cuts a conversion into slices, so the loop is held about 1 ms per slice. Not in the gateway. |
+| esp-rack-modules `dht-sensor/src/EspDhtLine.cpp:63, 76` | loop task (a read) | `esp_rom_delay_us`: the 1.1 ms start pulse | AM2302 start timing; the answer is then read by edge timestamps. Not in the gateway. |
+| esp-rack-modules `can-mcp2515/src/CanMcp2515Service.cpp:576, 578` (`openBus`), `src/Mcp2515Driver.cpp:75, 196` | see 4.2 | `delayMicroseconds(10)` RESET pulse, `delay(1)` oscillator start, 5 / 20 ms mode settle | Listed in 4.2: the restart should leave the loop task. |
 
 ### 4.2 Still to convert: not exceptions
 
 | File:line | Task | What | Note |
 |---|---|---|---|
-| esp-rack `lib/ESPRack/src/ConfigManager.cpp:242` | any (`ConfigManager::lock()`) | mutex `portMAX_DELAY` | Review item 24. Core work; `tryLock(ms)` exists next to it. |
+| esp-rack `lib/ESPRack/src/ConfigManager.cpp` (`ConfigManager::lock()`) | any | mutex `portMAX_DELAY` | Review item 24. Core work; `tryLock(ms)` exists next to it. |
 | esp-rack `modules/history/include/HistoryService.h:119`, `src/HistSeriesImpl.cpp:33` | loop, `async_tcp`, producers | RAII `Lock` with `portMAX_DELAY` | Data sections of microseconds. |
 | esp-rack `modules/telegram/src/TelegramService.cpp:813` (`publishCommands`), `:869` (`pollCommands`) | Telegram worker (own) | `_cmdMx` `portMAX_DELAY` | Own task. Becomes a timeout if any shared context takes `_cmdMx`. |
 | esp-rack `modules/ble/src/BleService.cpp:157` (`RadioLock`), `:192, 962, 978, 1101, 1255` (`writeMx`) | BLE task, loop, `async_tcp` | `mx` / `writeMx` `portMAX_DELAY` | ble is not in the gateway; listed for completeness. (`end()`'s wait, the disconnect wait and the pause are event waits now.) |
 | esp-rack-modules `can-mcp2515/include/CanMcp2515Service.h:127` (`Lock`, on `_mx` and `_chip`) | loop (`apply`, `pollChip`), consumer task (read/write, begin/end) | RAII `Lock` with `portMAX_DELAY` | Not in the gateway. Same treatment as can-twai: a timed `Lock` with `ok` and an error path per site. |
 | esp-rack-modules `can-mcp2515/src/CanMcp2515Service.cpp:578` (`openBus`), `src/Mcp2515Driver.cpp:75` (`sleepMs`), `:196` (mode-change poll) | loop (`apply`) or the consumer's task (`begin`) | `delay(1)` after RESET, `vTaskDelay` 5 / 20 ms settle | Hardware settle times; the chip has no event for them. Bounded at 25 ms, but on the loop task when `apply()` restarts the chip. Move the restart to the consumer's / a module task, or keep and list it as an exception. |
-| esp-rack-modules `inverter-link/include/InverterLinkRackService.h:111`, `jk-ble/include/JkBleService.h:74`, `jk-bus/include/JkBusModuleService.h:147` | loop, `async_tcp` (page), consumer and library tasks | RAII `Lock` with `portMAX_DELAY` | Sections of microseconds (copies, posts to the library's queue), about 40 sites. Converting them needs one framework-wide decision on the error path of such locks (skip with a default value, or log and reboot past a long timeout). The same applies to core `HwRegistry::lock` and `LoopWdt::Lock`. |
+| esp-rack-modules `inverter-link/include/InverterLinkRackService.h:111`, `jk-ble/include/JkBleService.h:74`, `jk-bus/include/JkBusModuleService.h:147` | loop, `async_tcp` (page), consumer and library tasks | RAII `Lock` with `portMAX_DELAY` | Sections of microseconds (copies, posts to the library's queue), about 40 sites. Converting them needs one framework-wide decision on the error path of such locks (skip with a default value, or log and reboot past a long timeout). Core `HwRegistry::lock` already waits `ESPRACK_HW_LOCK_WAIT_MS` (500 ms) with an error path per caller; `LoopWdt` has no lock wait left (a spinlock on the pause count, never skipped). |
+
+### 4.3 Waits inside Arduino calls
+
+| Call | Where it is called | The wait | Note |
+|---|---|---|---|
+| `WiFi.disconnect(wifioff, eraseap)` (default timeout 100) | wifi module, loop task (4.1) | `delay(5)` while connected, 100 ms at most | The event-driven form is `WiFi.disconnectAsync()` (timeout 0); the wifi event handlers use it. |
+| `WiFi.begin()`, `WiFi.softAP()`, `WiFi.softAPConfig()` (through `STAClass::begin` / `APClass::begin`) | wifi `manageSTA`, ap `startAP`: loop task | an event-group wait for `ESP_NETIF_STARTED_BIT`, 1 s at most | Only while the interface is not started yet: `App::begin` starts both (`WiFi.mode(WIFI_AP_STA)`). A timed event wait, no polling. |
+| `WiFiClient` / `NetworkClient` reads with a timeout | modules' own tasks (MQTT TLS, Telegram, mothership) | `delay(2)` between empty reads | Never on a shared context. `PersistentTlsClient` waits with `select()` instead. |
 
 ---
 
@@ -204,3 +242,4 @@ grep -rnE "\bdelay\(|vTaskDelay|portMAX_DELAY" --include=*.cpp --include=*.h --i
 - [ ] Work longer than a few ms runs in the module's own task, which is notified.
 - [ ] Every lock or event wait in a shared context has a timeout and an error path.
 - [ ] A deliberate wait in the module's own task is an event wait (a stop ends it) and is listed in section 4.1.
+- [ ] An Arduino call that waits inside (section 4.3) on a shared context has a row in section 4.1.

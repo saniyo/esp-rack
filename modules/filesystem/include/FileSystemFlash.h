@@ -12,6 +12,8 @@ class FileSystemFlash : public FileSystemBackend {
 
   bool isMounted() const override { return _mounted; }
   bool onCodeFlash() const override { return true; }
+  // esp_littlefs: lfs_rename, which replaces an existing file atomically.
+  bool renameReplaces() const override { return true; }
 
   bool mount() override {
     if (_mounted) return true;

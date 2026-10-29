@@ -143,16 +143,24 @@ class ConfigManager {
     // deferredSince: when it was first put off (WriteGate::now()).
     virtual bool deferred() const { return false; }
     virtual uint32_t deferredSince() const { return 0; }
+    // The JSON document size for this entry's file (reads that verify it).
+    virtual size_t bufferSize() const { return 4096; }
     // Loaded from the backup while the primary on flash failed to verify
     // and is not rewritten yet: never copy that primary over the backup.
     virtual bool primaryStale() const { return false; }
     // FlashWriter, the first step of a deferred save: the backup copy of
     // the file on flash. Unneeded: nothing to save any more (the state is
     // the saved one again; no longer deferred). Paused: PowerGuard paused
-    // writes, no copy made (it stays deferred). Busy: the service's state
-    // lock timed out, no copy made (it stays deferred, tried again soon).
-    enum class Backup : uint8_t { Unneeded, Made, Paused, Busy };
+    // writes (or the restart took over), no copy made (it stays deferred).
+    // Busy: the service's state lock or the config lock timed out, no copy
+    // made (it stays deferred, tried again soon). Failed: the copy failed;
+    // the file is not rewritten in place without it (it stays deferred,
+    // tried again later).
+    enum class Backup : uint8_t { Unneeded, Made, Paused, Busy, Failed };
     virtual Backup backupForSave(ConfigManager&) { return Backup::Made; }
+    // That first step has a copy to make: not made for this save yet, a
+    // file on flash, and one that verified.
+    virtual bool backupDue(const ConfigManager&) const { return true; }
     // A save whose caller holds a gate slot (slotHeld: no gate here) and
     // has made the backup copy already (backupDone). saveIfChanged() is
     // saveStep(mgr, origin, false, false).
@@ -283,7 +291,15 @@ class ConfigManager {
   // restart. flushDeferred() kicks that job. flushDeferredNow() (the
   // restart path) waits for the gate at most boundMs per save, then writes
   // anyway: a save left waiting would be lost with the restart. A queued
-  // Save Backup (requestSnapshot) follows the saves, one wait for its run.
+  // Save Backup (requestSnapshot) follows the saves, a bounded wait per step.
+  // Each step waits on a clock of its own (WriteSlot): only one that found
+  // no pause itself goes forced.
+  //
+  // A save that fails (a flash error, no internal RAM for a file buffer)
+  // stays deferred too: the FlashWriter tries it again after 1, 2, 5, 10,
+  // 30, 60 s (saveRetries() counts the tries; the Config Manager page shows
+  // it). No FlashWriter job (its table was full at begin()): a save goes past
+  // a busy gate rather than wait in RAM.
   void markDeferred() {
     _anyDeferred = true;
     ESPRack::FlashWriter::kick(_writerJob);
@@ -293,11 +309,26 @@ class ConfigManager {
   // event: nothing paused the writes).
   void noteBusy() { _busyRetry.store(true); }
   bool hasDeferred() const { return _anyDeferred.load(); }
+  bool hasWriter() const { return _writerJob >= 0; }
   size_t deferredCount() const;
+  uint8_t saveRetries() const { return _failStreak.load(); }  // failed tries in a row, 0: none
   void flushDeferred();
+  // The restart path: the saves still deferred and a queued Save Backup, a
+  // wait of boundMs at most per step. It closes the config writes to every
+  // other task first (closeForRestart).
   void flushDeferredNow(uint32_t boundMs);
-  // The previous file to <backup> (best effort): atomicWrite's first step.
-  void backupPrimary(const char* primary, const char* backup);
+  // How long flushDeferredNow(boundMs) may take now (the restart's grace).
+  uint32_t restartFlushMs(uint32_t boundMs) const;
+  // From now on only the calling task writes the config: the FlashWriter's
+  // run and a save on any other task stop at their next step (a save then
+  // is logged, not written). Waits CFGMGR_LOCK_WAIT_MS at most for a step
+  // under way. restartClosed(): this task is one of those others.
+  void closeForRestart();
+  bool restartClosed() const;
+  // The previous file to <backup> through <backup>.tmp: atomicWrite's
+  // first step. false: the copy failed, the primary must not be rewritten
+  // in place. true also when there is nothing to copy.
+  bool backupPrimary(const char* primary, const char* backup);
   bool restoreFromBackup(const char* id);
   bool resetToDefaults(const char* id);
 
@@ -351,15 +382,25 @@ class ConfigManager {
   //     Manager tab forces snapshot = primary across every registered
   //     entry in one gesture via snapshotAll().
   // hasSnapshot tells the UI whether a row's `Snap` column should show ✓.
+  // A snapshot (and the auto-rotated backup) is written through
+  // <snapshot>.tmp and renamed over the old one: a cut never leaves a torn
+  // or empty one.
   // restoreAllFromSnapshot() is non-destructive to the snapshot itself —
   // it copies snapshot → primary and leaves snapshot in place; caller
   // (action handler) reboots so each service's begin() picks up the
-  // restored primary cleanly. It runs under the lock (at most
-  // CFGMGR_LOCK_WAIT_MS to get it) and the write gate: the restart's
-  // after-shutdown step holds a slot for it (GateHeld).
+  // restored primary cleanly. Only a snapshot that verifies (CRC) is
+  // restored, through <primary>.tmp (verified again) renamed over the
+  // primary; one that doesn't is skipped and its primary stays. It runs
+  // under the lock (at most CFGMGR_LOCK_WAIT_MS to get it) and the write
+  // gate: the restart's after-shutdown step holds a slot for it (GateHeld).
+  // checkSnapshots(): before a restore is accepted (any task, reads only,
+  // the lock at most CFGMGR_LOCK_WAIT_MS): None (no snapshot), Ok, Bad (one
+  // fails to verify), Busy (the lock).
   bool snapshotEntry(const char* primaryPath);
-  bool restoreEntryFromSnapshot(const char* primaryPath);
+  bool restoreEntryFromSnapshot(const char* primaryPath, size_t bufferSize = 4096);
   bool hasSnapshot(const char* primaryPath) const;
+  enum class SnapCheck : uint8_t { None, Ok, Bad, Busy };
+  SnapCheck checkSnapshots();
   // Now, any task, never waits for the gate: under the lock (at most
   // CFGMGR_LOCK_WAIT_MS) with one write gate pass for the run, only while
   // the gate is free. false: a copy failed, or the lock / gate said no.
@@ -371,7 +412,9 @@ class ConfigManager {
   // for the FlashWriter job, a gate slot per file step, after the deferred
   // saves (so it freezes what they write). PowerGuard pausing writes keeps
   // it queued; the restart path (flushDeferredNow) writes it at the latest.
-  enum class SnapState : uint8_t { None, Queued, Done, Failed };
+  // Interrupted (at boot): the last run was cut short (a power cut, a
+  // crash) and its snapshots are of two moments; the next run clears it.
+  enum class SnapState : uint8_t { None, Queued, Done, Failed, Interrupted };
   SnapState requestSnapshot();
   SnapState snapshotState() const;  // the last request's outcome so far
   uint32_t snapshotStateTs() const;  // when it got there (nowTs() secs)
@@ -384,7 +427,8 @@ class ConfigManager {
   // gate says no (the caller keeps what it has). A task that holds a slot
   // or pass for its config work already (a save, the FlashWriter job, the
   // restart's after-shutdown step) says so with a GateHeld for that scope:
-  // the helpers then take none (no second entry into the gate).
+  // the helpers then take none (no second entry into the gate), but still
+  // ask PowerGuard before each write (it may pause writes after the slot).
   class GateHeld {
    public:
     explicit GateHeld(bool on = true);
@@ -409,6 +453,9 @@ class ConfigManager {
   bool removeIfExists(const char* path);
   bool mkdirsForFile(const char* filePath);
   bool copyFile(const char* src, const char* dst);
+  bool replaceWith(const char* tmp, const char* dst);  // tmp renamed over dst
+  bool copyReplace(const char* src, const char* dst);  // via <dst>.tmp
+  bool verifyFile(const char* path, size_t bufferSize);  // reads and checks the CRC
 
   bool readJsonFile(const char* path, DynamicJsonDocument& doc);
 
@@ -457,7 +504,8 @@ class ConfigManager {
                    const char* tmp,
                    JsonObjectConst data,
                    size_t bufferSize,
-                   uint32_t* outCrc);
+                   uint32_t* outCrc,
+                   bool* outBackupHeld = nullptr);  // set once the backup is made or the primary opened
 
   uint32_t nowTs() const;
 
@@ -471,21 +519,36 @@ class ConfigManager {
     const String& primary() const override { return _primary; }
     EntryStats& stats() override { return _stats; }
     const EntryStats& stats() const override { return _stats; }
-    bool deferred() const override { return _deferred; }
+    bool deferred() const override { return _deferred || _lateSave.load(); }
     uint32_t deferredSince() const override { return _deferredSince; }
+    size_t bufferSize() const override { return _d.bufferSize; }
     bool primaryStale() const override { return _primaryStale; }
+    bool backupDue(const ConfigManager& mgr) const override {
+      return !_backupHeld && !_primaryStale && mgr.fileExists(_primary.c_str());
+    }
     bool _deferred = false;
     uint32_t _deferredSince = 0;
     bool _primaryStale = false;  // under the manager's lock
+    // The backup copy for the pending save is made: until a save succeeds,
+    // never copied again (a failed write may have torn the primary).
+    bool _backupHeld = false;
+    // A save whose caller didn't get the config lock in time: the FlashWriter
+    // writes it. Set outside the lock, cleared under it before the state is
+    // read (load/store only).
+    std::atomic<bool> _lateSave{false};
 
     Backup backupForSave(ConfigManager& mgr) override {
       if (!_d.service) return Backup::Unneeded;
       ensurePaths(mgr);
-      mgr.lock();
-      if (!ESPRack::PowerGuard::writesAllowed()) {
+      if (!mgr.tryLock(CFGMGR_LOCK_WAIT_MS)) {
+        mgr.noteBusy();
+        return Backup::Busy;
+      }
+      if (!ESPRack::PowerGuard::writesAllowed() || mgr.restartClosed()) {
         mgr.unlock();
         return Backup::Paused;
       }
+      _lateSave.store(false);  // the state read below has it
       DynamicJsonDocument dataDoc(_d.bufferSize);
       JsonObject data = dataDoc.to<JsonObject>();
       if (!_d.service->read(data, _d.reader)) {
@@ -499,7 +562,11 @@ class ConfigManager {
         return Backup::Unneeded;
       }
       // A primary that failed to verify is no backup: the good one stays.
-      if (!_primaryStale) mgr.backupPrimary(_primary.c_str(), _backup.c_str());
+      if (!_primaryStale && !_backupHeld && !mgr.backupPrimary(_primary.c_str(), _backup.c_str())) {
+        mgr.unlock();
+        return Backup::Failed;
+      }
+      _backupHeld = true;
       mgr.unlock();
       return Backup::Made;
     }
@@ -623,7 +690,23 @@ class ConfigManager {
 
       ensurePaths(mgr);
 
-      mgr.lock();
+      // Never an unbounded wait: async_tcp and the loop save here, and the
+      // FlashWriter holds the lock through a flash step. Not in time: the
+      // FlashWriter writes it (or, its own run, tries again soon).
+      if (!mgr.tryLock(CFGMGR_LOCK_WAIT_MS)) {
+        _lateSave.store(true);
+        log_w("[CFG] %s: config busy — save deferred", _id.c_str());
+        if (slotHeld) mgr.noteBusy();
+        else mgr.markDeferred();
+        return false;
+      }
+      // After the restart's flush (another task's): too late to write.
+      if (mgr.restartClosed()) {
+        mgr.unlock();
+        log_w("[CFG] %s: save after the restart's flush — not written", _id.c_str());
+        return false;
+      }
+      _lateSave.store(false);  // the state read below has it
 
       DynamicJsonDocument dataDoc(_d.bufferSize);
       JsonObject data = dataDoc.to<JsonObject>();
@@ -638,7 +721,11 @@ class ConfigManager {
         return false;
       }
 
+      // An invalid state is not written; retrying wouldn't change that
+      // (the next change saves again).
       if (_d.validate && !_d.validate(data)) {
+        if (_deferred) log_e("[CFG] %s: deferred save dropped: the state fails validation", _id.c_str());
+        _deferred = false;
         mgr.unlock();
         return false;
       }
@@ -674,7 +761,11 @@ class ConfigManager {
         ~GatePass() { release(); }
       } gate{false, 0};
       if (!held) gate.on = ESPRack::WriteGate::tryEnter(_deferredSince, true, &gate.at);
-      if (!held && !gate.on) {
+      // No FlashWriter job to hand it to: written now, past the busy gate
+      // (PowerGuard still decides: atomicWrite asks it).
+      const bool noWriter = !held && !gate.on && !mgr.hasWriter() && ESPRack::PowerGuard::writesAllowed();
+      if (noWriter) log_w("[CFG] %s: no FlashWriter job — written past the write gate", _id.c_str());
+      if (!held && !gate.on && !noWriter) {
         if (!_deferred) {
           _stats.deferred++;
           ESPRack::WriteGate::noteDeferred();
@@ -691,6 +782,8 @@ class ConfigManager {
       // that doesn't fit the buffer would leave a null in the document:
       // never write that (the previous file stays).
       if (!ConfigManager::encryptSecretsInPlace(data, _d.secretKeys)) {
+        if (_deferred) log_e("[CFG] %s: deferred save dropped: a secret doesn't fit", _id.c_str());
+        _deferred = false;  // the same state never fits: no retry
         mgr.unlock();
         return false;
       }
@@ -704,13 +797,28 @@ class ConfigManager {
       bool primaryExisted = !_primaryStale && mgr.fileExists(_primary.c_str());
 
       uint32_t written = 0;
+      bool backupHeld = false;
       bool ok;
       {
         ConfigManager::GateHeld mark;  // the pass or the caller's slot covers atomicWrite's steps
-        ok = mgr.atomicWrite(_primary.c_str(), (backupDone || _primaryStale) ? nullptr : _backup.c_str(),
-                             _tmp.c_str(), data, _d.bufferSize, &written);
+        ok = mgr.atomicWrite(_primary.c_str(), (backupDone || _primaryStale || _backupHeld) ? nullptr : _backup.c_str(),
+                             _tmp.c_str(), data, _d.bufferSize, &written, &backupHeld);
       }
       gate.release();
+      // A failed write (flash error, no RAM for the file buffer, PowerGuard)
+      // keeps the save: the FlashWriter tries it again (a run of its own
+      // reports it itself). Past the backup copy (or into the primary) the
+      // primary may be torn: no retry copies it over the backup.
+      if (!ok) {
+        if (backupHeld) _backupHeld = true;
+        if (!_deferred) _deferredSince = ESPRack::WriteGate::now();
+        _deferred = true;
+        if (!slotHeld) {
+          mgr.unlock();
+          mgr.markDeferred();
+          return false;
+        }
+      }
 
       std::vector<std::pair<ListenerId, GenericListener>> snap;
       if (ok) {
@@ -720,6 +828,7 @@ class ConfigManager {
         _hasLastSavedCrc = true;
         _deferred = false;
         _primaryStale = false;
+        _backupHeld = false;
 
         uint32_t now = mgr.nowTs();
         _stats.saves++;
@@ -771,7 +880,10 @@ class ConfigManager {
     bool resetToDefaults(ConfigManager& mgr) override {
       if (!_d.service) return false;
 
-      mgr.lock();
+      if (!mgr.tryLock(CFGMGR_LOCK_WAIT_MS)) {  // any task: never an unbounded wait
+        log_e("[CFG] %s: reset — config busy, nothing changed", _id.c_str());
+        return false;
+      }
 
       // Member defaults first: updaters treat absent keys as "unchanged"
       // (partial UI saves), so an empty-doc pass alone would reset nothing.
@@ -796,7 +908,10 @@ class ConfigManager {
     bool restoreFromBackup(ConfigManager& mgr) override {
       ensurePaths(mgr);
 
-      mgr.lock();
+      if (!mgr.tryLock(CFGMGR_LOCK_WAIT_MS)) {  // any task: never an unbounded wait
+        log_e("[CFG] %s: restore — config busy, not restored", _id.c_str());
+        return false;
+      }
 
       bool ok = mgr.restoreBackupToPrimary(_primary.c_str(), _backup.c_str(), _tmp.c_str());
       if (!ok) {
@@ -875,6 +990,7 @@ class ConfigManager {
   std::vector<std::unique_ptr<IConfigEntry>> _entries;
   std::atomic<bool> _anyDeferred{false};  // marked from any task
   std::atomic<bool> _busyRetry{false};    // noteBusy(), load/store only
+  std::atomic<uint8_t> _failStreak{0};    // writeDeferred's failed tries in a row (load/store)
   int8_t _writerJob = -1;                 // FlashWriter: writeDeferred()
   uint32_t writeDeferred();
 
@@ -887,7 +1003,8 @@ class ConfigManager {
   bool _snapFailed = false;    // a copy of the queued run failed
   int8_t snapshotNow();        // 1 done, 0 failed, -1 not run (lock or gate)
   bool snapshotLocked();
-  bool snapshotSteps(uint32_t since);  // false: PowerGuard paused writes (still queued)
+  bool snapshotSteps(uint32_t boundMs = 0);  // false: stopped, still queued
+  bool markSnapshotRun(bool on);  // the run's marker file (SnapState::Interrupted)
   bool snapPending() const;
   void snapFinish(uint32_t gen, bool ok);
 

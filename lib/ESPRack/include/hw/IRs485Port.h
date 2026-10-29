@@ -22,9 +22,18 @@
 //   * Listen: the transmitter is locked (DE never active); send() fails.
 //     With autoDetect the port finds the baud rate, parity and stop bits
 //     by CRC validity (parity/framing errors rule a setting out at once).
+//   * lastBeginWhy() says why begin() failed. The port's own settings
+//     (pins, UART, enabled) belong to the device, not to the owner: when
+//     they change, a running port reopens on the new ones with the line in
+//     effect, or stops (running() false, no end() needed: the next begin()
+//     reads them again). A send the change cut, or one not yet started,
+//     comes back as kTxDone | kTxDropped; records already queued stay.
+//   * setSignal(): the owner's wake-up for what it did not do itself (new
+//     settings applied, a refused begin() that may now succeed), so it waits
+//     on its own task notification instead of calling begin() on a timer.
 //
-// Threads: begin/end/claim/release from the loop task or the owner's task;
-// read/send from the owner's task only.
+// Threads: begin/end/claim/release/setSignal from the loop task or the
+// owner's task; read/send from the owner's task only.
 
 #include <stddef.h>
 #include <stdint.h>
@@ -53,6 +62,10 @@ enum Rs485RxFlag : uint16_t {
   kRxJunkPrefix = 1u << 4, // 0xFF before a frame whose CRC holds without it
   kTxDone = 1u << 5,       // a send finished: data/len = what went out, tFirst/tLast = DE on/off
   kRxCollision = 1u << 6,  // the echo differed from what was sent
+  // With kTxDone: the send did not go out whole. New settings reopened or
+  // stopped the port before it started or while it was on the line (DE
+  // dropped mid-frame); data/len = the frame, tFirst/tLast = when dropped.
+  kTxDropped = 1u << 7,
 };
 
 struct Rs485Frame {
@@ -77,25 +90,62 @@ struct Rs485Stats {
   uint32_t parityErrors = 0;
   uint32_t junkPrefix = 0;
   uint32_t txBusy = 0;         // send() refused: busy, listen or not running
+  uint32_t txDropped = 0;      // sends handed back with kTxDropped
+  uint32_t restarts = 0;       // the port reopened or stopped on new settings
   uint8_t autodetect = 0;      // 0 off, 1 searching, 2 found
   // Interrupt -> port task latency: < 50, 100, 200, 500 µs, 1, 2, 5 ms, more.
   uint32_t latencyUs[8] = {0, 0, 0, 0, 0, 0, 0, 0};
 };
+
+// Why begin() did not start the port.
+enum class Rs485Begin : uint8_t {
+  Ok = 0,
+  Busy,         // another begin()/end() or the settings held a lock past its bound: retry after a timeout
+  Off,          // role Off, or the port is switched off in its settings
+  HwNotReady,   // pins not set, or in conflict (the port's page says why)
+  StartFailed,  // the UART did not open (memory, the interrupt), or new settings closed it meanwhile
+};
+
+// The owner's wake-up: only wake (xTaskNotifyGive, an event bit), never
+// block or call the port. Any task may call it, the port's task included.
+using Rs485Signal = void (*)(void* ctx);
 
 class IRs485Port {
  public:
   static constexpr const char* kIfaceId = "rs485Port.v1";
   virtual ~IRs485Port() = default;
 
+  // true: the port runs. false: lastBeginWhy() says why.
   virtual bool begin(const Rs485Config& cfg) = 0;
+  // Why the last begin() did not start the port (Ok after a success; a port
+  // that does not tell says Ok). Busy: retry after a timeout of the owner's
+  // own (a lock was held past its bound; one held by another begin()/end()
+  // is also signalled when it finishes). Off, HwNotReady, StartFailed:
+  // begin() again on the signal (setSignal) - new settings, or settings that
+  // came in during this begin(). Without a signal the owner retries on a
+  // timeout. Read it from the task that called begin(), right after it.
+  virtual Rs485Begin lastBeginWhy() const { return Rs485Begin::Ok; }
+  // Stops the port; a send not yet out is dropped without a record.
   virtual void end() = 0;
+  // begin() succeeded and the UART is open now: false after end(), and
+  // while new settings keep the port closed (the owner is signalled).
   virtual bool running() const = 0;
   // The line settings in effect (after auto-detection in listen).
   virtual Rs485Config config() const = 0;
 
   virtual bool claim(const char* user) = 0;
+  // Also clears the signal (setSignal).
   virtual void release(const char* user) = 0;
   virtual const char* claimedBy() const = 0;
+
+  // fn(ctx) when new settings were applied (running() may have changed:
+  // reopened or stopped) or a refused begin() may now succeed. nullptr
+  // clears it. false: the port has no signal (retry on a timeout).
+  virtual bool setSignal(Rs485Signal fn, void* ctx) {
+    (void)fn;
+    (void)ctx;
+    return false;
+  }
 
   // The next record (a frame, or a kTxDone), waiting up to timeoutMs.
   virtual bool read(Rs485Frame& f, uint32_t timeoutMs) = 0;

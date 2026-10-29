@@ -28,15 +28,19 @@
 //     ending on a 4 KB boundary of the stream (system/FlashSteps.h: one
 //     sector erase at most; a step waits until the ring holds a whole
 //     one, unless all is in). Open, each finish call and the abort take a
-//     slot of their own. Once the gate is free again, due steps run from
-//     async_tcp in a WritePass (a few per chunk), the rest on the job.
-//     PowerGuard holding writes: the job waits (FlashWriter::kOnPower)
-//     and the data stays in the ring.
+//     slot of their own, unless the sink marks them as writing no flash
+//     (UploadSink::noFlash): those run on the job without a slot. Once
+//     the gate is free again, due steps run from async_tcp in a WritePass
+//     (a few per chunk), the rest on the job. PowerGuard holding writes:
+//     the job waits (FlashWriter::kOnPower) and the data stays in the
+//     ring; a call without flash writes (an image's abort) still runs. A
+//     session that failed while its step waited for a slot gets its abort
+//     in that slot instead of the step.
 //   - No FlashWriter job (attach() found the table full): uploads still
 //     run while the gate is free; a chunk that would have to wait fails
 //     the upload (NoWriter), and a call that waits (finish, the abort)
 //     runs from the pump's poll, or the next begin(), once the gate is
-//     free.
+//     free (one without flash writes at once, on async_tcp).
 //   - The ring: ESPRACK_UPLOAD_RING_PSRAM bytes from PSRAM when there is
 //     some, else kRingMin from internal RAM (one 4 KB step + TCP_WND + 2
 //     MSS: 12.7 KB with the default lwIP settings). Taken at the first
@@ -44,13 +48,19 @@
 //
 // TCP back-pressure (AsyncTCP 3.4.5, ESPAsyncWebServer 3.7.10, checked):
 //   - The upload callback runs inside the request's onData (AsyncClient::
-//     _recv -> request->_onData -> multipart parser -> handleUpload), once
-//     per received segment that carries file data (the parser flushes its
-//     1460 B buffer on the segment's last byte). When less than
-//     holdBelow = TCP_WND + 2 MSS is free after a push, push() calls
-//     client->ackLater() for that segment and every later one while held:
-//     the peer can send at most TCP_WND more, which fits (one MSS spare
-//     for a segment the parser didn't flush).
+//     _recv -> request->_onData -> multipart parser -> handleUpload) for
+//     the segments that carry file data: the parser flushes its 1460 B
+//     buffer when it is full or on the segment's last byte if that is a
+//     data byte. A segment that ends in "\r", "\r\n" or a boundary
+//     prefix gives no call (its bytes wait in the parser's buffer). When
+//     less than holdBelow = TCP_WND + 2 MSS is free after a push, push()
+//     calls client->ackLater() for that segment, and from then on every
+//     segment goes through the pump's packet handler (client->onPacket):
+//     it hands the segment to the request's onData as AsyncClient would
+//     and leaves it unacknowledged while the window is held, push or not.
+//     A push empties the parser's buffer, so after the one that started
+//     the hold at most TCP_WND more can come, and at least TCP_WND + 2 MSS
+//     - 1460 B is free.
 //   - ack() is not thread-safe (_rx_ack_len races _recv; a freed client
 //     after a disconnect), so the window opens again only on async_tcp:
 //     in push() (a later segment) or in the pump's poll callback (every
@@ -63,7 +73,9 @@
 //     once the pump has sent the answer its poll does what _onPoll did
 //     (more of the response when it can send, close() once it is
 //     finished). So: once begin() returned true, answer only through
-//     finish(). onData, onAck, onTimeout and onError stay the request's.
+//     finish(). The packet handler (set with the poll) hands every
+//     segment to the request's onData; onAck, onTimeout and onError stay
+//     the request's.
 //   - Liveness: begin() takes request->onDisconnect() (the request calls
 //     it before it deletes itself and its client); the pump forgets the
 //     request and client there and never touches them after, and its poll
@@ -74,10 +86,16 @@
 //     a write for up to ~12 s before it forces it). The pump sets it to 0
 //     when it first holds the window and watches the upload itself: no
 //     progress (data in, a step written) for ESPRACK_UPLOAD_STALL_MS fails
-//     it (Stalled) and gives the timeout back. When the request ends
-//     before the flash work does, finish() pauses it (request->pause():
-//     no rx timeout, no automatic 501) and the pump answers from its poll
-//     once the result is known (a failure: at once, the abort may follow).
+//     it (Stalled). Once the body is no longer kept (any failure, all in)
+//     and the window is open, the poll gives the timeout back: a client
+//     that went silent is closed. When the request ends before the flash
+//     work does, finish() pauses it (request->pause(): no rx timeout, no
+//     automatic 501) and the pump answers from its poll once the result
+//     is known (a failure: at once, the abort may follow). A request that
+//     ends before its last chunk came (finish() without a final push)
+//     fails the upload (Aborted).
+//   - The answer: a response whose source is not valid (a file or stream
+//     response without data) is replaced by a 500 before it is sent.
 //
 // A failure (the sink, overflow, no memory, stall) drops the rest of the
 // body (the window opens again), aborts the sink (opened or not) and is
@@ -85,7 +103,9 @@
 // or straight away while the gate is free); closed() gets Aborted. A
 // failure once the sink's finish has begun (a client that goes, a stall
 // between two finish calls): the finish runs to its end (a file is put in
-// place, an image set to boot), the result stays the failure.
+// place), the result stays the failure; a revocable sink (a firmware
+// image, set to boot only by the restart) is aborted after the finish
+// call under way instead.
 // ESP32 family only (AsyncTCP, IDF heap caps).
 
 #include <ESPAsyncWebServer.h>
@@ -155,7 +175,10 @@ class UploadPump {
   };
 
   static void pollThunk(void* arg, AsyncClient* c);
+  static void packetThunk(void* arg, AsyncClient* c, struct pbuf* b);
   void poll(AsyncClient* c);
+  void packet(AsyncClient* c, struct pbuf* b);
+  bool needsSlot(UploadPumpCore::Action a) const;
   void gone(uint32_t gen);
   uint32_t run();
   void act(UploadPumpCore::Action a, UploadPumpCore::Span s[2], uint32_t len);
@@ -177,7 +200,7 @@ class UploadPump {
   Respond _respond;
   Closed _closed;
   uint32_t _gen = 0;
-  uint32_t _rxTimeout = 0;  // the client's before the pump turned it off
+  uint32_t _rxTimeout = 0;  // the client's before the pump turned it off (0: given back)
   bool _finishCalled = false;
   bool _watching = false;
 };

@@ -162,9 +162,11 @@ void UploadFirmwareService::handleUpload(AsyncWebServerRequest* request,
 void UploadFirmwareService::uploadComplete(AsyncWebServerRequest* request) {
   // handleUpload already answered with its error
   if (request->_tempObject) return;
-  // The pump answers once the image is written, checked and set to boot
-  // (at once, or from its poll while the gate holds writes); the device
-  // restarts once that client has gone.
+  // The pump answers once the image is written and checked (at once, or
+  // from its poll while the gate holds writes); the device restarts once
+  // that client has gone, and the restart sets the image to boot (after
+  // the modules' shutdown: OtaWriter::restartInto). A failure: the pump
+  // aborts the image (the update is given back).
   const bool mine = _pump.finish(
       request,
       [this](AsyncWebServerRequest* req, ESPRack::UploadResult r) -> AsyncWebServerResponse* {
@@ -174,8 +176,8 @@ void UploadFirmwareService::uploadComplete(AsyncWebServerRequest* request) {
         log_e("[upload] firmware: %s", why);
         return req->beginResponse(500, "text/plain", why);
       },
-      [](ESPRack::UploadResult r) {
-        if (r == ESPRack::UploadResult::Ok) ESPRack::restartDevice(ESPRack::kRestartUpload);
+      [this](ESPRack::UploadResult r) {
+        if (r == ESPRack::UploadResult::Ok) _ota.restartInto(ESPRack::kRestartUpload);
       });
   if (mine) return;
   // Only a finished, authorised upload restarts the device. A POST without a

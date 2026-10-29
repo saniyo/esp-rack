@@ -2,13 +2,18 @@
 
 #include <Arduino.h>
 #include <esp_err.h>
+#include <esp_flash_encrypt.h>
+#include <esp_idf_version.h>
 #include <esp_ota_ops.h>
 #include <esp_partition.h>
 #include <esp_rom_md5.h>
+#include <sdkconfig.h>
 #include <string.h>
 
 #include <atomic>
 
+#include "App.h"
+#include "power/PowerGuard.h"
 #include "system/FirmwareUpdate.h"
 
 namespace ESPRack {
@@ -49,6 +54,18 @@ uint32_t OtaWriter::freeSlotSize() {
 
 bool OtaWriter::busy() { return s_owner.load() != nullptr; }
 
+bool OtaWriter::beginWrites() {
+  // IDF 5.5 esp_ota_begin: esp_ota_invalidate_inactive_ota_data_slot()
+  // with rollback enabled (an otadata sector erase); 5.4 has no such call.
+#if defined(CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE) && ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 5, 0)
+  return true;
+#else
+  return false;
+#endif
+}
+
+bool OtaWriter::endWrites() { return esp_flash_encryption_enabled(); }
+
 bool OtaWriter::claim(const char* source) {
   if (_source) return true;  // held already
   const OtaWriter* none = nullptr;
@@ -64,8 +81,9 @@ bool OtaWriter::claim(const char* source) {
 
 void OtaWriter::unclaim() {
   if (!_source) return;
+  const char* src = _source;
   _source = nullptr;
-  FirmwareUpdate::end();
+  FirmwareUpdate::end(src);  // only if still ours (another writer may have taken a stale one)
   s_owner.store(nullptr);  // ours: nobody else changes it while held
 }
 
@@ -138,11 +156,24 @@ bool OtaWriter::activate() {
   if (!_ended || !_part) return fail(kErrNotBegun);
   const esp_err_t e = esp_ota_set_boot_partition(static_cast<const esp_partition_t*>(_part));
   if (e != ESP_OK) return fail(e);
-  _ended = false;
-  unclaim();  // the next restart boots it; another update may follow
+  // The update stays this writer's: the restart that follows boots it, no
+  // other writer may take the slot meanwhile.
   log_i("[ota] %u B written (%u sector erases): boots at the next restart", (unsigned)_written,
         (unsigned)_erases);
   return true;
+}
+
+void OtaWriter::restartInto(const char* reason) {
+  if (!_ended) restartDevice(reason);
+  restartDevice(reason, [this]() {
+    // The buses are stopped (every onShutdown ran): the image check and
+    // the otadata erase hold up nobody here.
+    if (!PowerGuard::writesAllowed()) {
+      log_e("[ota] flash writes paused (power): the new image is not set to boot");
+      return;
+    }
+    (void)activate();
+  });
 }
 
 void OtaWriter::abort() {
@@ -163,11 +194,14 @@ UploadSink OtaWriter::sink(const char* source, uint32_t sizeHint) {
   UploadSink s;
   s.open = [this, source, sizeHint]() { return begin(source, sizeHint); };
   s.write = [this](const uint8_t* data, size_t len) { return write(data, len); };
-  s.finish = [this]() -> int {
-    if (!_ended) return end() ? UploadSink::kMore : UploadSink::kFailed;  // its own slot
-    return activate() ? UploadSink::kDone : UploadSink::kFailed;
-  };
+  // Checked and closed; set to boot only by restartInto (the caller, once
+  // the pump says Ok): a failure meanwhile aborts it.
+  s.finish = [this]() -> int { return end() ? UploadSink::kDone : UploadSink::kFailed; };
   s.abort = [this]() { abort(); };
+  s.noFlash = UploadSink::kAbortNoFlash;
+  if (!beginWrites()) s.noFlash |= UploadSink::kOpenNoFlash;
+  if (!endWrites()) s.noFlash |= UploadSink::kFinishNoFlash;
+  s.revocable = true;
   return s;
 }
 

@@ -231,11 +231,24 @@ void SystemStatus::buildForm(JsonObject& root,
   }
 
   // The last crash dump (panic / watchdog): a summary, download and erase.
+  // While it is being erased: how far (no buttons: both are refused then);
+  // a failed erase shows, with the button to try again.
   {
+    using ESPRack::CrashDump::EraseState;
+    const ESPRack::CrashDump::EraseStatus es = ESPRack::CrashDump::eraseStatus();
     char line[200];
-    if (ESPRack::CrashDump::describe(line, sizeof line)) {
+    if (es.state == EraseState::Erasing) {
+      snprintf(line, sizeof line, "erasing: %u of %u sectors%s", unsigned(es.done), unsigned(es.total),
+               ESPRack::PowerGuard::writesAllowed() ? "" : " (paused: flash writes off)");
+      sta.add(web::Text("crash", line).readOnly().label("Last crash dump").icon("ReportProblem").color("info"));
+    } else if (ESPRack::CrashDump::describe(line, sizeof line)) {
+      if (es.state == EraseState::Failed) strlcat(line, " · erase failed", sizeof line);
       sta.add(web::Text("crash", line).readOnly().label("Last crash dump").icon("ReportProblem").color("warning"));
       sta.add(web::Action("a_coredump").ref("system.coredump"));
+      sta.add(web::Action("a_erase_coredump").ref("system.eraseCoredump"));
+    } else if (es.state == EraseState::Failed) {
+      snprintf(line, sizeof line, "erase failed after %u of %u sectors", unsigned(es.done), unsigned(es.total));
+      sta.add(web::Text("crash", line).readOnly().label("Last crash dump").icon("ReportProblem").color("error"));
       sta.add(web::Action("a_erase_coredump").ref("system.eraseCoredump"));
     } else {
       sta.add(web::Text("crash", "none").readOnly().label("Last crash dump").icon("ReportProblem"));

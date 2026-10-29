@@ -148,38 +148,81 @@ export interface FsWriteStatus {
   error?: string;
 }
 
-export function writeStatus(op: number): AxiosPromise<FsWriteStatus> {
-  return AXIOS.get(toAxiosPath(FS_PATHS.writeStatus), { params: { op } });
+export function writeStatus(op: number, signal?: AbortSignal): AxiosPromise<FsWriteStatus> {
+  return AXIOS.get(toAxiosPath(FS_PATHS.writeStatus), { params: { op }, signal });
 }
 
-const WRITE_POLL_MS = 500;
-const WRITE_WAIT_MS = 120000;
+export const WRITE_POLL_MS = 500;
+export const WRITE_SLOW_MS = 120000;  // then: "still running" once, and polls less often
+const WRITE_SLOW_POLL_MS = 2000;
+
+// settleWrite() rejections that are not the device's error code.
+export const WRITE_STATE_UNKNOWN = 'write_state_unknown';  // the device no longer has it (404)
+export const WRITE_ABANDONED = 'write_abandoned';          // the page stopped waiting (signal)
+
+export interface SettleOpts {
+  onQueued?: () => void;
+  // Once, after WRITE_SLOW_MS: the device is still at it (the steps done so far).
+  onSlow?: (st: FsWriteStatus) => void;
+  // The page went away: stop polling (rejects with WRITE_ABANDONED).
+  signal?: AbortSignal;
+}
+
+function pause(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal?.aborted) {
+      resolve();
+      return;
+    }
+    const t = setTimeout(done, ms);
+    function done() {
+      clearTimeout(t);
+      signal?.removeEventListener('abort', done);
+      resolve();
+    }
+    signal?.addEventListener('abort', done);
+  });
+}
 
 // Resolves when the write is done: at once for a 200, after polling the
-// write status for a queued one (onQueued is called first). Rejects with
-// the device's error code, or 'still_queued' after WRITE_WAIT_MS. A status
-// the device no longer has (404: e.g. dropped as old) counts as done; the
-// listing reloaded afterwards shows what is there.
-export async function settleWrite(reply: AxiosPromise<FsWriteReply>, onQueued?: () => void): Promise<void> {
+// write status for a queued one (onQueued is called first). The device
+// keeps a queued write until it is done, however long that takes: past
+// WRITE_SLOW_MS onSlow says so once and the polls go on, less often.
+// Rejects with the device's error code; WRITE_STATE_UNKNOWN when the
+// device no longer knows the write (404: dropped as old, or a restart):
+// reload the listing to see what is there; WRITE_ABANDONED when signal
+// aborts. A 503 (the device was busy) is asked again.
+export async function settleWrite(
+  reply: AxiosPromise<FsWriteReply>,
+  opts: SettleOpts | (() => void) = {}
+): Promise<void> {
+  const o: SettleOpts = typeof opts === 'function' ? { onQueued: opts } : opts;
   const res = await reply;
   const op = res.data?.op;
   if (res.status !== 202 || res.data?.status !== 'queued' || op === undefined) return;
-  if (onQueued) onQueued();
+  if (o.onQueued) o.onQueued();
   const t0 = Date.now();
+  let slow = false;
   for (;;) {
     // eslint-disable-next-line no-await-in-loop
-    await new Promise((resolve) => setTimeout(resolve, WRITE_POLL_MS));
+    await pause(slow ? WRITE_SLOW_POLL_MS : WRITE_POLL_MS, o.signal);
+    if (o.signal?.aborted) throw new Error(WRITE_ABANDONED);
     let st: FsWriteStatus;
     try {
       // eslint-disable-next-line no-await-in-loop
-      st = (await writeStatus(op)).data;
+      st = (await writeStatus(op, o.signal)).data;
     } catch (e: any) {
-      if (e?.response?.status === 404) return;
+      if (o.signal?.aborted) throw new Error(WRITE_ABANDONED);
+      if (e?.response?.status === 503) continue;
+      if (e?.response?.status === 404) throw new Error(WRITE_STATE_UNKNOWN);
       throw e;
     }
     if (st.state === 'done') return;
     if (st.state === 'error') throw new Error(st.error || 'write_failed');
-    if (Date.now() - t0 > WRITE_WAIT_MS) throw new Error('still_queued');
+    if (!slow && Date.now() - t0 > WRITE_SLOW_MS) {
+      slow = true;
+      if (o.onSlow) o.onSlow(st);
+    }
   }
 }
 

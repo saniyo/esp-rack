@@ -3,34 +3,34 @@
 #include <Arduino.h>  // enableLoopWDT / disableLoopWDT
 #include <esp_task_wdt.h>
 #include <freertos/FreeRTOS.h>
-#include <freertos/semphr.h>
+#include <freertos/portmacro.h>
 
 namespace ESPRack {
 namespace LoopWdt {
 
 namespace {
-// The enable/disable transitions are serialised: a pause on one task and a
-// resume on another must not leave the watchdog on while paused.
-StaticSemaphore_t s_mxBuf;
-SemaphoreHandle_t s_mx = nullptr;
-bool s_armed = false;
-int s_paused = 0;
+// The pause count under a spinlock (a few loads/stores); the TWDT calls run
+// outside it (see Settle in the header).
+portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
+Settle s_st;
 uint32_t s_timeoutMs = CONFIG_ESP_TASK_WDT_TIMEOUT_S * 1000;
 
-// Held for an esp_task_wdt add/delete (microseconds); a wait this long
-// means something is stuck: the call is skipped (logged).
-constexpr TickType_t kLockWait = pdMS_TO_TICKS(500);
-struct Lock {
-  explicit Lock(const char* who) {
-    if (!s_mx) s_mx = xSemaphoreCreateMutexStatic(&s_mxBuf);  // first call: early boot, one task
-    ok = xSemaphoreTake(s_mx, kLockWait) == pdTRUE;
-    if (!ok) log_e("[wdt] %s: lock not had in 500 ms — skipped", who);
+// Brings the watchdog in line with armed/paused. Never waits: a transition
+// under way on another task is finished, and looked at again, by that task.
+void settle() {
+  for (;;) {
+    portENTER_CRITICAL(&s_mux);
+    const int step = s_st.begin();
+    portEXIT_CRITICAL(&s_mux);
+    if (step == 0) return;
+    if (step > 0) enableLoopWDT();
+    else disableLoopWDT();
+    portENTER_CRITICAL(&s_mux);
+    const bool again = s_st.end();
+    portEXIT_CRITICAL(&s_mux);
+    if (!again) return;
   }
-  ~Lock() {
-    if (ok) xSemaphoreGive(s_mx);
-  }
-  bool ok;
-};
+}
 }  // namespace
 
 // The TWDT with a new timeout; the idle tasks sdkconfig subscribes stay as
@@ -51,31 +51,37 @@ void reconfigure(uint32_t ms) {
   }
 }
 
+// Once, at start (the timeout is not changed under a running pause).
 void arm(uint32_t timeoutMs) {
-  Lock l("arm");
-  if (!l.ok) return;
   if (timeoutMs && timeoutMs != s_timeoutMs) reconfigure(timeoutMs);
-  if (s_armed) return;
-  s_armed = true;
-  if (s_paused == 0) enableLoopWDT();
+  portENTER_CRITICAL(&s_mux);
+  s_st.armed = true;
+  portEXIT_CRITICAL(&s_mux);
+  settle();
 }
 
 void pause() {
-  Lock l("pause");  // skipped: the watchdog stays on (the safe side)
-  if (!l.ok) return;
-  if (s_paused++ == 0 && s_armed) disableLoopWDT();
+  portENTER_CRITICAL(&s_mux);
+  ++s_st.paused;
+  portEXIT_CRITICAL(&s_mux);
+  settle();
 }
 
 void resume() {
-  Lock l("resume");
-  if (!l.ok) return;
-  if (s_paused == 0) return;  // unbalanced: ignore
-  if (--s_paused == 0 && s_armed) enableLoopWDT();
+  portENTER_CRITICAL(&s_mux);
+  const bool balanced = s_st.paused > 0;
+  if (balanced) --s_st.paused;
+  portEXIT_CRITICAL(&s_mux);
+  if (!balanced) {
+    log_w("[wdt] resume without a pause: ignored");
+    return;
+  }
+  settle();
 }
 
-bool armed() { return s_armed; }
+bool armed() { return s_st.armed; }
 uint32_t timeoutMs() { return s_timeoutMs; }
-bool paused() { return s_paused > 0; }
+bool paused() { return s_st.paused > 0; }
 
 }  // namespace LoopWdt
 }  // namespace ESPRack

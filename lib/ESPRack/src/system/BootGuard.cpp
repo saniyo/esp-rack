@@ -4,6 +4,7 @@
 #include <esp_app_desc.h>
 #include <esp_attr.h>
 #include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 #include <esp_rom_crc.h>
 #include <nvs.h>
 #include <stddef.h>
@@ -13,6 +14,7 @@
 #include "ProblemJson.h"
 #include "WebManager.h"
 #include "power/FlashWriter.h"
+#include "power/PowerGuard.h"
 #include "power/WriteGate.h"
 #include "system/LoopWait.h"
 #include "time/TimeSync.h"
@@ -82,11 +84,13 @@ bool nvsPut(const char* key, const void* data, size_t len) {
   return ok;
 }
 
-// r: a copy, sealed here and written outside the lock.
-void store(Record& r) {
+// r: a copy, sealed here and written outside the lock. false: not saved (logged).
+bool store(Record& r) {
   r.magic = kMagic;
   r.crc = crcOf(r);
-  if (!nvsPut(kKey, &r, sizeof(r))) log_w("[boot] NVS write failed — boot record not saved");
+  if (nvsPut(kKey, &r, sizeof(r))) return true;
+  log_w("[boot] NVS write failed — boot record not saved");
+  return false;
 }
 
 BootClass classify(esp_reset_reason_t rr, const char* last) {
@@ -151,11 +155,13 @@ uint32_t previousUptime() {
   return ok ? r.upS : 0;
 }
 
-// h: a copy, sealed here and written outside the lock.
-void storeHistory(History& h) {
+// h: a copy, sealed here and written outside the lock. false: not saved (logged).
+bool storeHistory(History& h) {
   h.magic = kHistMagic;
   h.crc = esp_rom_crc32_le(0, reinterpret_cast<const uint8_t*>(&h), offsetof(History, crc));
-  if (!nvsPut(kHistKey, &h, sizeof(h))) log_w("[boot] NVS write failed — boot history not saved");
+  if (nvsPut(kHistKey, &h, sizeof(h))) return true;
+  log_w("[boot] NVS write failed — boot history not saved");
+  return false;
 }
 
 void loadHistory() {
@@ -178,7 +184,10 @@ void loadHistory() {
 // after a newer one. On the shared tasks (the loop: markStable, the boot's
 // time; async_tcp: clearSafeMode) a gate pass, never a wait: when the gate
 // says no, the FlashWriter job "bootguard" writes it, a slot per blob.
-// While PowerGuard pauses writes the change waits in RAM.
+// While PowerGuard pauses writes the change waits in RAM, and the wait
+// clock stops (it starts again when the job runs again). Without a job
+// (FlashWriter full) only gate passes write: the next save(), loop() or
+// flush() tries again, never past the gate.
 struct Gen {
   uint32_t now = 0;
   uint32_t saved = 0;
@@ -188,24 +197,34 @@ Gen s_recGen, s_histGen;
 bool s_writing = false;
 uint32_t s_putOffAt = 0;  // gate clock: when the oldest pending write was put off; 0 = none
 int8_t s_job = -1;
+// Shutdown: flush() writes what is left, the job takes no new blob; a
+// writer at it when flush() comes gives s_done once it is done.
+bool s_flushing = false;
+bool s_flushWaits = false;
+StaticSemaphore_t s_doneBuf;
+SemaphoreHandle_t s_done = nullptr;
 
 bool pending() {
   Lock l;
   return s_recGen.dirty() || s_histGen.dirty();
 }
 
-enum class Put : uint8_t { Nothing, Busy, Done };
+enum class Put : uint8_t { Nothing, Busy, Done, Failed };
 
 // One pending blob, written now: the caller holds a gate pass or slot.
-// A failed write is logged and not tried again (as at boot).
-Put writeOne() {
+// A failed write is logged, reported (Failed) and not tried again (as at
+// boot). wait: on Busy, the writer at it gives s_done once it is done.
+Put writeOne(bool wait = false) {
   Record rec;
   History hist;
   bool isRec = false;
   uint32_t gen = 0;
   {
     Lock l;
-    if (s_writing) return Put::Busy;
+    if (s_writing) {
+      if (wait) s_flushWaits = true;
+      return Put::Busy;
+    }
     if (s_recGen.dirty()) {
       isRec = true;
       gen = s_recGen.now;
@@ -219,59 +238,76 @@ Put writeOne() {
     }
     s_writing = true;
   }
-  if (isRec) store(rec);
-  else storeHistory(hist);
+  const bool ok = isRec ? store(rec) : storeHistory(hist);
+  bool wake;
   {
     Lock l;
     (isRec ? s_recGen : s_histGen).saved = gen;
     s_writing = false;
     if (!s_recGen.dirty() && !s_histGen.dirty()) s_putOffAt = 0;
+    wake = s_flushWaits;
+    s_flushWaits = false;
   }
-  return Put::Done;
+  if (wake && s_done) xSemaphoreGive(s_done);
+  return ok ? Put::Done : Put::Failed;
 }
 
 // The FlashWriter task: what is pending, a gate slot per blob, on the wait
 // clock of the first write put off.
 uint32_t writeJob() {
   for (;;) {
+    const uint32_t t = WriteGate::now();
     uint32_t since;
     {
       Lock l;
-      if (!s_recGen.dirty() && !s_histGen.dirty()) return FlashWriter::kDone;
+      // Shutdown: flush() writes the rest.
+      if (s_flushing || (!s_recGen.dirty() && !s_histGen.dirty())) return FlashWriter::kDone;
+      if (!s_putOffAt) s_putOffAt = t;  // put off while PowerGuard paused writes: the clock starts now
       since = s_putOffAt;
     }
-    WriteSlot slot(0, nullptr, since ? since : WriteGate::now());
-    if (!slot.ok()) return FlashWriter::kOnPower;  // PowerGuard: the change waits in RAM
+    WriteSlot slot(0, nullptr, since);
+    if (!slot.ok()) {  // PowerGuard: the change waits in RAM, the wait clock stops
+      Lock l;
+      s_putOffAt = 0;
+      return FlashWriter::kOnPower;
+    }
     const Put p = writeOne();
     if (p == Put::Busy) return 10;  // a pass on a shared task is writing: look again
     if (p == Put::Nothing) return FlashWriter::kDone;
   }
 }
 
-// After a change, on a shared task: never waits. true: written now.
-bool save() {
-  if (s_job < 0) {  // no FlashWriter job to be had: at once, as without the gate
-    while (writeOne() == Put::Done) {
-    }
-    return !pending();
-  }
+enum class Saved : uint8_t { Now, PutOff, Failed };
+
+// After a change, on a shared task: never waits. retry: a change put off
+// before (no job), not counted again.
+Saved save(bool retry = false) {
   uint32_t since;
   {
     Lock l;
     since = s_putOffAt ? s_putOffAt : WriteGate::now();
   }
-  {
-    // One NVS write per pass; a second blob pending goes to the job.
+  bool failed = false;
+  // One NVS write per pass. A second blob pending goes to the job, or
+  // without one takes a pass of its own (the gate may say no to it).
+  for (int i = 0; i < 2; ++i) {
     WritePass pass(since);
-    if (pass.ok() && writeOne() != Put::Busy && !pending()) return true;
+    if (!pass.ok()) break;
+    const Put p = writeOne();
+    if (p == Put::Failed) failed = true;
+    if (p == Put::Busy || p == Put::Nothing || s_job >= 0) break;
   }
+  if (!pending()) return failed ? Saved::Failed : Saved::Now;
+  // Put off. While PowerGuard pauses writes the wait clock doesn't run
+  // (writeJob starts it) and nothing is counted as put off.
+  const bool power = PowerGuard::writesAllowed();
   {
     Lock l;
-    if (!s_putOffAt) s_putOffAt = since;
+    if (!s_putOffAt && power) s_putOffAt = since;
   }
-  WriteGate::noteDeferred();
-  FlashWriter::kick(s_job);
-  return false;
+  if (power && !retry) WriteGate::noteDeferred();
+  if (s_job >= 0) FlashWriter::kick(s_job);
+  return failed ? Saved::Failed : Saved::PutOff;
 }
 
 void publish() {
@@ -359,9 +395,10 @@ void begin(uint8_t limit, uint32_t windowMs, uint32_t stableAfterMs) {
   s_info.stable = false;
   publish();
   // The writes the gate puts off later (setup, the loop task).
+  if (!s_done) s_done = xSemaphoreCreateBinaryStatic(&s_doneBuf);
   if (s_job < 0) {
     s_job = FlashWriter::add("bootguard", [] { return writeJob(); });
-    if (s_job < 0) log_w("[boot] no FlashWriter job left: boot record writes go at once");
+    if (s_job < 0) log_w("[boot] no FlashWriter job left: boot record writes only in a gate pass");
   }
   {
     Lock l;
@@ -405,7 +442,9 @@ void markStable() {
   (void)save();
 }
 
-bool clearSafeMode() {
+namespace {
+// Clears safe mode in RAM and saves it; out: how (the admin action tells).
+bool clearSafe(Saved& out) {
   {
     Lock l;
     if (!s_ready) return false;
@@ -415,15 +454,57 @@ bool clearSafeMode() {
     publish();
   }
   log_w("[boot] safe mode cleared");
-  return save();
+  out = save();
+  return true;
+}
+}  // namespace
+
+bool clearSafeMode() {
+  Saved s = Saved::PutOff;
+  return clearSafe(s) && s == Saved::Now;
 }
 
 bool savePending() { return pending(); }
 
 void flush(uint32_t boundMs) {
-  for (int i = 0; i < 2 && pending(); ++i) {  // two blobs at most
-    WriteSlot slot(boundMs);
-    if (!slot.ok() || writeOne() != Put::Done) return;  // PowerGuard, or the job is at it
+  {
+    Lock l;
+    s_flushing = true;  // the job takes no new blob from here on
+  }
+  // Two blobs at most, in 2 x boundMs (App::shutdownGraceMs). A writer at
+  // it (the job, a pass on async_tcp) is waited for, its end signalled,
+  // then the rest is written here.
+  const uint32_t start = WriteGate::now();
+  auto left = [&]() -> uint32_t {
+    const uint32_t gone = WriteGate::now() - start;
+    return gone < 2 * boundMs ? 2 * boundMs - gone : 0;
+  };
+  for (int i = 0; i < 4 && pending(); ++i) {
+    uint32_t bound = 0;  // boundMs 0: the gate's rules
+    if (boundMs) {
+      bound = left() < boundMs ? left() : boundMs;
+      if (!bound) break;
+    }
+    WriteSlot slot(bound);
+    if (!slot.ok()) break;  // PowerGuard: kept in RAM
+    const Put p = writeOne(true);
+    if (p == Put::Nothing) break;
+    if (p != Put::Busy) continue;
+    slot.release();
+    const uint32_t w = boundMs ? left() : 1000;
+    if (!s_done || !w || xSemaphoreTake(s_done, pdMS_TO_TICKS(w) + 1) != pdTRUE) break;
+  }
+  bool rest;
+  {
+    Lock l;
+    s_flushing = false;
+    s_flushWaits = false;
+    rest = s_recGen.dirty() || s_histGen.dirty();
+  }
+  if (rest) {
+    log_w("[boot] boot record not saved before the restart (%s)",
+          PowerGuard::writesAllowed() ? "no write gate slot in time" : "flash writes paused");
+    if (s_job >= 0) FlashWriter::kick(s_job);  // still in RAM: the job goes on if no restart comes
   }
 }
 
@@ -431,6 +512,8 @@ void loop() {
   if (!s_ready) return;
   const uint32_t ms = millis();
   if (!s_info.stable && ms >= s_stableAfterMs) markStable();
+  // No FlashWriter job: a change the gate put off, in a pass once it lets.
+  if (s_job < 0 && PowerGuard::writesAllowed() && pending()) (void)save(true);
   // The run's length for the next boot (RTC memory: no flash wear).
   const uint32_t upS = ms / 1000;
   if (upS - s_lastUpS >= 10) {
@@ -473,13 +556,19 @@ void registerManifest(WebManager* web) {
   spec.successMessage = "Safe mode cleared";
   spec.handler = [](AsyncWebServerRequest* r) {
     // Cleared at once; saved now ("saved":true), or by the FlashWriter task
-    // once the write gate lets it (false; kept in RAM meanwhile).
-    if (!s_ready) {
+    // once the write gate lets it (false; kept in RAM meanwhile). A failed
+    // NVS write: 500, cleared until the restart only.
+    Saved s = Saved::PutOff;
+    if (!clearSafe(s)) {
       r->send(503, "application/json", "{\"ok\":false,\"error\":\"boot guard not started\"}");
       return;
     }
-    const bool saved = clearSafeMode();
-    r->send(200, "application/json", saved ? "{\"ok\":true,\"saved\":true}" : "{\"ok\":true,\"saved\":false}");
+    if (s == Saved::Failed) {
+      r->send(500, "application/json",
+              "{\"ok\":false,\"saved\":false,\"error\":\"NVS write failed: cleared until the restart only\"}");
+      return;
+    }
+    r->send(200, "application/json", s == Saved::Now ? "{\"ok\":true,\"saved\":true}" : "{\"ok\":true,\"saved\":false}");
   };
   web->registerAction(std::move(spec));
 }

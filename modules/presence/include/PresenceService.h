@@ -80,16 +80,21 @@ class PresenceService {
   // pass on async_tcp, never a wait; when the gate says no, the line waits
   // in a bounded RAM queue (LOG_QUEUE_LINES / LOG_QUEUE_BYTES, the oldest
   // go when full, counted in logDropped()) and the FlashWriter job
-  // "presence" appends it, one gate slot per batch of up to LOG_BATCH_BYTES.
-  // While PowerGuard pauses writes the lines wait there.
+  // "presence" appends it, one gate slot per batch of up to LOG_BATCH_BYTES,
+  // one batch per run (the other jobs go in between). While PowerGuard
+  // pauses writes the lines wait there. Without the job (FlashWriter full)
+  // a line the gate says no to is lost (counted), never written past it.
+  // See PresenceLogWriter.h.
   // setLogSink: at setup (it adds the FlashWriter job).
   void setLogSink(fs::FS* fs, const char* path = "/logs/presence.log",
                   size_t maxBytes = 64UL * 1024UL);
   void setLogEnabled(bool on);
   bool logEnabled() const { return _logEnabled; }
   size_t logPending() const;     // lines waiting for the write gate
-  uint32_t logDropped() const;   // lines lost: queue full, or a failed write
-  // Shutdown: what is queued, waiting for a gate slot boundMs at most.
+  uint32_t logDropped() const;   // lines lost: queue full, no gate pass without the job, or a failed write
+  // Shutdown: what is queued, 2 x boundMs at most (gate slots, and a write
+  // under way on another task, whose end it waits for); what is left is
+  // logged.
   void flushLog(uint32_t boundMs);
 
   static constexpr size_t LOG_QUEUE_LINES = 64;
@@ -139,13 +144,10 @@ class PresenceService {
   bool logOverCap() const;  // reads only
   void logRoll();           // removes the file
   bool logAppend(const char* data, size_t len);
-  // The queued lines, a gate slot per batch (the FlashWriter job: boundMs 0).
-  uint32_t drainLog(uint32_t boundMs);
-  // One writer of the log file at a time (async_tcp, the FlashWriter task,
-  // shutdown); a spinlock, never held across a write.
-  bool claimLogWriter();
-  void releaseLogWriter();
   void countLogLost(size_t lines);
+  // PresenceLogWriter's Io: the queue lock, the writer flag, the file steps.
+  struct LogIo;
+  friend struct LogIo;
 
   std::map<String, ClientPresence> _clients;  // keyed by clientKey
 
@@ -163,9 +165,13 @@ class PresenceService {
   SemaphoreHandle_t _logMx{nullptr};
   int8_t            _logJob{-1};
   // Under _logMux (a spinlock: plain fields, no atomics in a heap object).
+  // One writer of the log file at a time (async_tcp, the FlashWriter task,
+  // shutdown), never held across a gate wait.
   mutable portMUX_TYPE _logMux = portMUX_INITIALIZER_UNLOCKED;
   bool              _logWriting{false};
+  bool              _logWaits{false};  // shutdown waits for that writer: _logDone when it is done
   uint32_t          _logLost{0};  // a failed write or a missed lock (the queue counts its own drops)
+  SemaphoreHandle_t _logDone{nullptr};
 };
 
 #endif  // PresenceService_h

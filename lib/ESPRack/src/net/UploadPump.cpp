@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include <esp_heap_caps.h>
 #include <lwip/opt.h>
+#include <lwip/pbuf.h>
 #include <string.h>
 
 #include "power/FlashWriter.h"
@@ -22,6 +23,19 @@ static_assert(uint32_t(ESPRACK_UPLOAD_RING_PSRAM) >= FlashSteps::kSector + uint3
 using Action = UploadPumpCore::Action;
 using Window = UploadPumpCore::Window;
 using Span = UploadPumpCore::Span;
+
+namespace {
+
+// AsyncClient's receive callback (the request's onData) and its count of
+// bytes held back by ackLater() are protected (AsyncTCP 3.4.5): reached
+// through member pointers named in a class derived from it (never made).
+struct ClientTap : AsyncClient {
+  static AcDataHandler AsyncClient::*recvCb() { return &ClientTap::_recv_cb; }
+  static void* AsyncClient::*recvArg() { return &ClientTap::_recv_cb_arg; }
+  static uint32_t AsyncClient::*heldBytes() { return &ClientTap::_rx_ack_len; }
+};
+
+}  // namespace
 
 bool UploadPump::attach(const char* name) {
   if (_job >= 0) return true;
@@ -54,7 +68,7 @@ bool UploadPump::begin(AsyncWebServerRequest* request, UploadSink sink) {
   const uint32_t gen = ++_gen;
   request->onDisconnect([this, gen]() { gone(gen); });
   Lock l(_mux);
-  (void)_core.begin(kHoldBelow, WriteGate::now());
+  (void)_core.begin(kHoldBelow, WriteGate::now(), _sink.revocable);
   return true;
 }
 
@@ -152,6 +166,15 @@ bool UploadPump::finish(AsyncWebServerRequest* request, Respond respond, Closed 
   _finishCalled = true;
   _respond = std::move(respond);
   _closed = std::move(closed);
+  bool cut;
+  {
+    Lock l(_mux);
+    // The request ended, its last chunk never came (a body cut short, a
+    // multipart without its closing boundary): the upload failed.
+    cut = _core.accepting();
+    if (cut) _core.fail(UploadResult::Aborted);
+  }
+  if (cut) log_w("[upload] the request ended before its last chunk: upload failed");
   driveFree();
   if (respondIfReady()) return true;
   // The flash work goes on: no response now (and no rx timeout); the poll
@@ -173,6 +196,11 @@ bool UploadPump::respondIfReady() {
   _respond = nullptr;
   AsyncWebServerResponse* resp = fn ? fn(_req, r) : nullptr;
   if (!resp) resp = _req->beginResponse(r == UploadResult::Ok ? 200 : 500);
+  if (!resp->_sourceValid()) {
+    // send() would replace it by a 500 and delete it under _resp: replaced here.
+    delete resp;
+    resp = _req->beginResponse(500, "text/plain", "Invalid data in handler");
+  }
   _resp = resp;
   _req->send(resp);  // a paused request sends it now, else when the handler returns
   return true;
@@ -184,15 +212,41 @@ void UploadPump::watch() {
   // Replaces the request's poll (a no-op until it has a response: see the
   // header); poll() does its part once the pump has answered.
   _client->onPoll(&UploadPump::pollThunk, this);
+  // Every later segment through packet(): held while the window is.
+  _client->onPacket(&UploadPump::packetThunk, this);
   _rxTimeout = _client->getRxTimeout();
   _client->setRxTimeout(0);  // the stall time instead: a held window brings no data
 }
 
 void UploadPump::pollThunk(void* arg, AsyncClient* c) { static_cast<UploadPump*>(arg)->poll(c); }
 
+void UploadPump::packetThunk(void* arg, AsyncClient* c, pbuf* b) { static_cast<UploadPump*>(arg)->packet(c, b); }
+
+void UploadPump::packet(AsyncClient* c, pbuf* b) {
+  // What AsyncClient::_recv does without a packet handler (the request's
+  // onData, then the acknowledgement), except that a segment that arrives
+  // while the window is held stays unacknowledged whether or not it gave
+  // a push: the multipart parser keeps a segment that ends in "\r",
+  // "\r\n" or a boundary prefix without calling the upload callback.
+  AcDataHandler& onData = c->*ClientTap::recvCb();
+  if (onData) onData(c->*ClientTap::recvArg(), c, b->payload, b->len);
+  bool held = false;
+  if (c == _client) {
+    Lock l(_mux);
+    held = _core.held();
+  }
+  if (held) {
+    c->*ClientTap::heldBytes() += b->len;  // acknowledged with the others when the window opens
+    pbuf_free(b);
+  } else {
+    c->ackPacket(b);
+  }
+}
+
 void UploadPump::poll(AsyncClient* c) {
   if (!_client || c != _client) return;
   bool stalled = false;
+  bool kept;
   Window w;
   {
     Lock l(_mux);
@@ -202,13 +256,19 @@ void UploadPump::poll(AsyncClient* c) {
       stalled = true;
     }
     w = _core.window();
+    kept = _core.accepting();
   }
   if (w == Window::Reopen) c->ack(SIZE_MAX);
+  if (!kept && !_finishCalled && _rxTimeout) {
+    // The body is no longer kept (failed, all in, settled) and the window
+    // is open: a client still sending sends the rest (dropped) and gets
+    // the answer from finish(); one that stopped is closed by its rx
+    // timeout again.
+    c->setRxTimeout(_rxTimeout);
+    _rxTimeout = 0;
+  }
   if (stalled) {
     log_w("[upload] no progress for %u ms: upload failed", (unsigned)ESPRACK_UPLOAD_STALL_MS);
-    // A client still sending sends the rest (dropped) and gets the answer
-    // from finish(); one that stopped is closed by its rx timeout again.
-    if (!_finishCalled && _rxTimeout) c->setRxTimeout(_rxTimeout);
     driveFree();
     if (!_client) return;
   }
@@ -289,7 +349,10 @@ void UploadPump::act(Action a, Span s[2], uint32_t len) {
 
 void UploadPump::driveFree() {
   // async_tcp: what is due runs here while the gate is free (a few steps
-  // at most: async_tcp has its watchdog), the rest on the FlashWriter.
+  // at most: async_tcp has its watchdog), the rest on the FlashWriter. A
+  // call that writes no flash needs no pass, but runs here without one
+  // only when there is no job (it may take a while: OtaWriter's end reads
+  // the whole image).
   constexpr uint8_t kMaxSteps = 4;
   bool pending;
   {
@@ -298,15 +361,16 @@ void UploadPump::driveFree() {
   }
   if (pending) {
     WritePass pass(WriteGate::now(), true);
-    for (uint8_t i = 0; pass.ok() && i < kMaxSteps; ++i) {
+    for (uint8_t i = 0; i < kMaxSteps; ++i) {
       Span s[2];
       uint32_t len = 0;
       Action a;
       {
         Lock l(_mux);
+        a = _core.peek();
+        if (a == Action::None || (!pass.ok() && (_job >= 0 || needsSlot(a)))) break;
         a = _core.next(s, len);
       }
-      if (a == Action::None) break;
       act(a, s, len);
     }
   }
@@ -326,18 +390,40 @@ uint32_t UploadPump::run() {
     Lock l(_mux);
     a = _core.next(s, len);
   }
-  if (a != Action::None) {
+  if (a != Action::None && !needsSlot(a)) {
+    act(a, s, len);  // no flash write: no slot, also while PowerGuard holds writes
+  } else if (a != Action::None) {
     WriteSlot slot;  // one bounded flash operation (a step of <= 4 KB)
     if (!slot.ok()) {
       Lock l(_mux);
       _core.done();
       return FlashWriter::kOnPower;  // the data stays in the ring
     }
+    {
+      Lock l(_mux);
+      a = _core.confirm(a);  // failed while it waited: the abort in this slot instead
+    }
     act(a, s, len);
   }
   reclaim();
   Lock l(_mux);
   return _core.pending() ? 1 : FlashWriter::kDone;  // 1 ms: the other jobs get their turn
+}
+
+bool UploadPump::needsSlot(Action a) const {
+  switch (a) {
+    case Action::Open:
+      return !(_sink.noFlash & UploadSink::kOpenNoFlash);
+    case Action::Write:
+      return true;
+    case Action::Finish:
+      return !(_sink.noFlash & UploadSink::kFinishNoFlash);
+    case Action::Abort:
+      return !(_sink.noFlash & UploadSink::kAbortNoFlash);
+    case Action::None:
+      break;
+  }
+  return false;
 }
 
 bool UploadPump::ensureRing() {

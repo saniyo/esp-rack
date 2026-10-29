@@ -55,6 +55,9 @@ import {
   remove as apiRemove,
   rename as apiRename,
   settleWrite,
+  SettleOpts,
+  WRITE_ABANDONED,
+  WRITE_STATE_UNKNOWN,
   uploadFile,
   downloadUrl,
   readText,
@@ -153,6 +156,18 @@ const FilesField: FC<FilesFieldProps> = ({ field }) => {
 
   const [volumes, setVolumes] = useState<FsVolume[]>([]);
   const [currentPath, setCurrentPath] = useState<string>(initial || '/flash');
+  // The folder shown now, for work that ends later (a queued write): it
+  // reloads this one, not the one it started in.
+  const currentPathRef = useRef(currentPath);
+  currentPathRef.current = currentPath;
+  const reloadSeqRef = useRef(0);
+  // Polls of queued writes stop when the page goes.
+  const writeAbortRef = useRef<AbortController | null>(null);
+  useEffect(() => {
+    const c = new AbortController();
+    writeAbortRef.current = c;
+    return () => c.abort();
+  }, []);
   const [entries, setEntries] = useState<FsEntry[]>([]);
   const [readOnly, setReadOnly] = useState<boolean>(false);
   const [loading, setLoading] = useState<boolean>(false);
@@ -242,6 +257,10 @@ const FilesField: FC<FilesFieldProps> = ({ field }) => {
   }, [enqueueSnackbar]);
 
   const reloadDir = useCallback(async (path: string) => {
+    // Only the latest listing, of the folder shown now, lands: a late one
+    // for a folder left meanwhile is dropped.
+    const seq = ++reloadSeqRef.current;
+    const stillWanted = () => seq === reloadSeqRef.current && path === currentPathRef.current;
     if (path === '/' || path === '') {
       setEntries([]);
       setReadOnly(true);
@@ -251,15 +270,19 @@ const FilesField: FC<FilesFieldProps> = ({ field }) => {
 
     try {
       const r = await listDir(path);
+      if (!stillWanted()) return;
       setEntries(r.data.entries || []);
       setReadOnly(!!r.data.readOnly);
     } catch (e: any) {
+      if (!stillWanted()) return;
       enqueueSnackbar(e?.response?.data?.error || e?.message || 'list_failed', { variant: 'error' });
       setEntries([]);
     } finally {
-      setLoading(false);
+      if (seq === reloadSeqRef.current) setLoading(false);
     }
   }, [enqueueSnackbar]);
+
+  const reloadCurrent = useCallback(() => reloadDir(currentPathRef.current), [reloadDir]);
 
   useEffect(() => { reloadVolumes(); }, [reloadVolumes]);
   useEffect(() => {
@@ -371,7 +394,9 @@ const FilesField: FC<FilesFieldProps> = ({ field }) => {
     // A mkdir the device queued (flash busy) is waited for: the uploads
     // into it would fail before it exists.
     for (const d of dirs) {
-      try { await settleWrite(apiMkdir(d)); } catch { /* exists / non-fatal */ }
+      try {
+        await settleWrite(apiMkdir(d), { signal: writeAbortRef.current?.signal });
+      } catch { /* exists / non-fatal */ }
     }
 
     setUploading(true);
@@ -470,7 +495,7 @@ const FilesField: FC<FilesFieldProps> = ({ field }) => {
 
     setUploadStage(null);
     setUploadCount(null);
-    await reloadDir(currentPath);
+    await reloadCurrent();
     await reloadVolumes();
     if (uploadAbortedRef.current) {
       enqueueSnackbar(`Upload canceled (${okCount}/${items.length} done)`, { variant: 'warning' });
@@ -494,7 +519,7 @@ const FilesField: FC<FilesFieldProps> = ({ field }) => {
     uploadSpeedSamplesRef.current = [];
     uploadStartedAtRef.current = 0;
     uploadAbortedRef.current = false;
-  }, [currentPath, reloadDir, reloadVolumes, enqueueSnackbar]);
+  }, [reloadCurrent, reloadVolumes, enqueueSnackbar]);
 
   const cancelUpload = useCallback(() => {
     uploadAbortedRef.current = true;
@@ -770,14 +795,15 @@ const FilesField: FC<FilesFieldProps> = ({ field }) => {
     for (const it of items) {
       try {
         // eslint-disable-next-line no-await-in-loop
-        await settleWrite(apiRemove(joinPath(currentPath, it.name), it.isDir));
+        await settleWrite(apiRemove(joinPath(currentPath, it.name), it.isDir), writeOpts(`Delete of '${it.name}'`));
         okCount++;
       } catch (e: any) {
-        enqueueSnackbar(`Delete '${it.name}' failed: ${e?.response?.data?.error || e?.message || 'delete_failed'}`, { variant: 'error' });
+        if (e?.message === WRITE_ABANDONED) return;  // the page went
+        writeFailed(e, 'delete_failed', `Delete of '${it.name}'`);
       }
     }
     setSelected(new Set());
-    await reloadDir(currentPath);
+    await reloadCurrent();
     enqueueSnackbar(`Deleted ${okCount}/${items.length}`, { variant: okCount === items.length ? 'success' : 'warning' });
   };
 
@@ -801,6 +827,31 @@ const FilesField: FC<FilesFieldProps> = ({ field }) => {
   const queuedNote = (what: string) =>
     enqueueSnackbar(`${what} queued until the flash is free`, { variant: 'info' });
 
+  // A queued write's polls: a note when it takes long (the device keeps at
+  // it), stopped when the page goes.
+  const writeOpts = (what: string, onQueued?: () => void): SettleOpts => ({
+    onQueued,
+    onSlow: (st) =>
+      enqueueSnackbar(`${what} is still running on the device (${st.steps} step${st.steps === 1 ? '' : 's'} done)`, {
+        variant: 'info',
+      }),
+    signal: writeAbortRef.current?.signal,
+  });
+
+  // A write that did not settle: the device's error; nothing when the page
+  // went; a warning when the device no longer knows the write (the listing
+  // shows what is there).
+  const writeFailed = (e: any, fallback: string, what?: string) => {
+    const code = e?.response?.data?.error || e?.message || fallback;
+    if (code === WRITE_ABANDONED) return;
+    if (code === WRITE_STATE_UNKNOWN) {
+      enqueueSnackbar(`${what || 'The write'}: state unknown, check the list`, { variant: 'warning' });
+      reloadCurrent();
+      return;
+    }
+    enqueueSnackbar(what ? `${what} failed: ${code}` : code, { variant: 'error' });
+  };
+
   const doMkdir = async () => {
     const name = mkdirName.trim();
     if (!name) return;
@@ -809,14 +860,14 @@ const FilesField: FC<FilesFieldProps> = ({ field }) => {
       setMkdirName('');
     };
     try {
-      await settleWrite(apiMkdir(joinPath(currentPath, name)), () => {
+      await settleWrite(apiMkdir(joinPath(currentPath, name)), writeOpts(`New folder '${name}'`, () => {
         close();
         queuedNote(`New folder '${name}'`);
-      });
+      }));
       close();
-      reloadDir(currentPath);
+      reloadCurrent();
     } catch (e: any) {
-      enqueueSnackbar(e?.response?.data?.error || e?.message || 'mkdir_failed', { variant: 'error' });
+      writeFailed(e, 'mkdir_failed');
     }
   };
 
@@ -828,14 +879,17 @@ const FilesField: FC<FilesFieldProps> = ({ field }) => {
       setRenameTarget(null);
     };
     try {
-      await settleWrite(apiRename(joinPath(currentPath, from), joinPath(currentPath, renameName.trim())), () => {
-        close();
-        queuedNote(`Rename of '${from}'`);
-      });
+      await settleWrite(
+        apiRename(joinPath(currentPath, from), joinPath(currentPath, renameName.trim())),
+        writeOpts(`Rename of '${from}'`, () => {
+          close();
+          queuedNote(`Rename of '${from}'`);
+        })
+      );
       close();
-      reloadDir(currentPath);
+      reloadCurrent();
     } catch (e: any) {
-      enqueueSnackbar(e?.response?.data?.error || e?.message || 'rename_failed', { variant: 'error' });
+      writeFailed(e, 'rename_failed');
     }
   };
 
@@ -847,14 +901,17 @@ const FilesField: FC<FilesFieldProps> = ({ field }) => {
       setDeleteTarget(null);
     };
     try {
-      await settleWrite(apiRemove(joinPath(currentPath, target.name), target.isDir), () => {
-        close();
-        queuedNote(`Delete of '${target.name}'`);
-      });
+      await settleWrite(
+        apiRemove(joinPath(currentPath, target.name), target.isDir),
+        writeOpts(`Delete of '${target.name}'`, () => {
+          close();
+          queuedNote(`Delete of '${target.name}'`);
+        })
+      );
       close();
-      reloadDir(currentPath);
+      reloadCurrent();
     } catch (e: any) {
-      enqueueSnackbar(e?.response?.data?.error || e?.message || 'delete_failed', { variant: 'error' });
+      writeFailed(e, 'delete_failed');
     }
   };
 
@@ -1069,7 +1126,7 @@ const FilesField: FC<FilesFieldProps> = ({ field }) => {
     try {
       await writeText(joinPath(currentPath, editTarget.name), editContent);
       setEditOriginal(editContent);
-      await reloadDir(currentPath);
+      await reloadCurrent();
     } catch (err: any) {
       setEditError(err?.response?.data?.error || err?.message || 'save_failed');
     } finally {

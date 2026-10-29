@@ -219,13 +219,19 @@ bool PersistentTlsClient::ensureConnected() {
   return true;
 }
 
+// Milliseconds to a millis() deadline, <= 0 once it passed. Unsigned
+// subtraction, so it holds across the 49.7-day wrap.
+static inline int32_t msLeft(uint32_t deadline_ms) {
+  return (int32_t)(deadline_ms - (uint32_t)millis());
+}
+
 bool PersistentTlsClient::waitReadable(uint32_t deadline_ms) {
   // Bytes already in WiFiClient's own buffer: select() can't see them.
   if (_tcp.available() > 0) return true;
   const int fd = _tcp.fd();
-  const uint32_t now = millis();
-  if (fd < 0 || now >= deadline_ms) return false;
-  const uint32_t left = deadline_ms - now;
+  const int32_t leftMs = msLeft(deadline_ms);
+  if (fd < 0 || leftMs <= 0) return false;
+  const uint32_t left = (uint32_t)leftMs;
   fd_set rd;
   FD_ZERO(&rd);
   FD_SET(fd, &rd);
@@ -240,7 +246,7 @@ String PersistentTlsClient::readLine(uint32_t deadline_ms,
                                      size_t max_len) {
   String out;
   out.reserve(max_len);
-  while (millis() < deadline_ms) {
+  while (msLeft(deadline_ms) > 0) {
     int avail = _ssl.available();
     if (avail <= 0) {
       if (!_ssl.connected() && _ssl.available() <= 0) {
@@ -366,7 +372,7 @@ int PersistentTlsClient::post(const String& url,
   // Everything else is read past and discarded.
   long content_length = -1;
   bool close_after = false;
-  while (millis() < deadline) {
+  while (msLeft(deadline) > 0) {
     String header = readLine(deadline, 512);
     if (header.length() == 0) break;  // end of headers
     int colon = header.indexOf(':');
@@ -395,7 +401,7 @@ int PersistentTlsClient::post(const String& url,
     out_response.reserve(retain_max);
     long remaining = content_length;
     uint8_t buf[256];
-    while (remaining > 0 && millis() < deadline) {
+    while (remaining > 0 && msLeft(deadline) > 0) {
       int to_read = remaining < (long)sizeof(buf)
                     ? (int)remaining : (int)sizeof(buf);
       int got = _ssl.read(buf, to_read);

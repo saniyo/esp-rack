@@ -89,10 +89,12 @@ class FileSystemService {
   // come while the flash write gate is free, else kept and written by the
   // FlashWriter task, one gate slot per 4 KB step; the answer comes once
   // the file is in place. Into <target>.partial, promoted at the end:
-  //   finish 1: close   2: remove the old target (.corrupt on a hash
-  //   mismatch)   3: rename .partial -> target (-> .corrupt: 422)
+  //   finish 1: close   then FsPromote.h, one flash operation per call: a
+  //   rename over the old target (LittleFS: atomic), or the old one aside,
+  //   the new one in, the old one removed (FAT); -> .corrupt: 422
   // A client that goes keeps the .partial (purgeUploadDebris at boot);
-  // a failed write removes it.
+  // a failed write removes it. One file per request: a second file part is
+  // not written, and the answer says so (400).
   struct Upload {
     FileSystemManager* mgr{nullptr};
     String target;  // volume-rooted; the bytes go to target + ".partial"
@@ -100,9 +102,11 @@ class FileSystemService {
     // the sink's (the FlashWriter task, or async_tcp while the gate is free)
     FsResult err{FsResult::OK};  // open / write / promote
     uint8_t step{0};             // finish calls done
+    uint8_t promoteAt{0};        // FsPromote's place
     bool ioFailed{false};        // a write failed: abort removes the .partial
     // async_tcp's (the request's chunks), set before the final push
     bool sawFinal{false};
+    uint8_t extraParts{0};   // file parts after the first: not written
     bool incomplete{false};  // the body ended without the file part's end: keep the .partial, 500
     bool hashOk{true};
     // Optional integrity check supplied by client via X-File-SHA256 / X-File-CRC32 headers.

@@ -2,13 +2,20 @@
 
 #include <power/FlashWriter.h>
 
+#include "FsPath.h"
+#include "FsPromote.h"
+
 // ---- FsWriteIo ----
 
-FsWriteIo::FsWriteIo() : _mx(xSemaphoreCreateMutex()) {}
+FsWriteIo::FsWriteIo() : _mx(xSemaphoreCreateMutex()), _stepMx(xSemaphoreCreateMutex()) {}
 
 bool FsWriteIo::lock(uint32_t ms) { return _mx && xSemaphoreTake(_mx, pdMS_TO_TICKS(ms)) == pdTRUE; }
 
 void FsWriteIo::unlock() { xSemaphoreGive(_mx); }
+
+bool FsWriteIo::stepLock(uint32_t ms) { return _stepMx && xSemaphoreTake(_stepMx, pdMS_TO_TICKS(ms)) == pdTRUE; }
+
+void FsWriteIo::stepUnlock() { xSemaphoreGive(_stepMx); }
 
 void FsWriteIo::kick() { ESPRack::FlashWriter::kick(_job); }
 
@@ -51,6 +58,14 @@ FileSystemManager::FileSystemManager() {
   const int8_t job = ESPRack::FlashWriter::add("fs", [this] { return _writes.run(); });
   if (job < 0) log_e("[fs] no FlashWriter job left: writes the gate puts off are refused");
   _io.setJob(job);
+  // The kept writes at a restart: after every module hook, with the config's.
+  const bool flush = ESPRack::FlashWriter::addRestartFlush(
+      [](void* self, uint32_t boundMs) { static_cast<FileSystemManager*>(self)->shutdown(boundMs); },
+      [](void* self, uint32_t boundMs) -> uint32_t {
+        return static_cast<FileSystemManager*>(self)->writesPending() ? boundMs : 0;
+      },
+      this);
+  if (!flush) log_e("[fs] no restart flush left: writes kept at a restart go with it");
 }
 
 void FileSystemManager::addBackend(std::unique_ptr<FileSystemBackend> backend) {
@@ -58,17 +73,7 @@ void FileSystemManager::addBackend(std::unique_ptr<FileSystemBackend> backend) {
   _backends.emplace_back(std::move(backend));
 }
 
-bool FileSystemManager::sanitize(const String& absPath, String& cleaned) {
-  if (absPath.length() == 0 || absPath.charAt(0) != '/') return false;
-  // reject ".." segments
-  if (absPath.indexOf("/..") >= 0) return false;
-  cleaned = absPath;
-  // collapse duplicated slashes
-  while (cleaned.indexOf("//") >= 0) cleaned.replace("//", "/");
-  // strip trailing slash (except root)
-  if (cleaned.length() > 1 && cleaned.endsWith("/")) cleaned.remove(cleaned.length() - 1);
-  return true;
-}
+bool FileSystemManager::sanitize(const String& absPath, String& cleaned) { return fsNormalise(absPath, cleaned); }
 
 FileSystemBackend* FileSystemManager::resolve(const String& absPath, String& relOut) const {
   String clean;
@@ -93,9 +98,16 @@ bool FileSystemManager::isReadOnlyPath(const String& absPath) const {
   String clean;
   if (!sanitize(absPath, clean)) return true;
   for (auto& p : _readOnlyPrefixes) {
-    if (clean == p || clean.startsWith(p + "/") || clean.startsWith(p)) {
-      if (clean == p || clean.startsWith(p + "/")) return true;
-    }
+    if (fsWithin(clean, p)) return true;
+  }
+  return false;
+}
+
+bool FileSystemManager::coversReadOnlyPath(const String& absPath) const {
+  String clean;
+  if (!sanitize(absPath, clean)) return true;
+  for (auto& p : _readOnlyPrefixes) {
+    if (fsWithin(clean, p) || fsWithin(p, clean)) return true;
   }
   return false;
 }
@@ -180,7 +192,7 @@ FsResult FileSystemManager::mkdir(const String& absPath) {
 }
 
 FsResult FileSystemManager::remove(const String& absPath, bool recursive) {
-  if (isReadOnlyPath(absPath)) return FsResult::READ_ONLY;
+  if (recursive ? coversReadOnlyPath(absPath) : isReadOnlyPath(absPath)) return FsResult::READ_ONLY;
   String rel;
   FileSystemBackend* b = resolve(absPath, rel);
   if (!b) return FsResult::INVALID_PATH;
@@ -201,6 +213,22 @@ FsResult FileSystemManager::remove(const String& absPath, bool recursive) {
   return fs->remove(rel) ? FsResult::OK : FsResult::IO_ERROR;
 }
 
+namespace {
+
+// FsPromote on a mounted volume (upload debris at boot).
+struct VolumeIo {
+  using Str = String;
+  fs::FS& fs;
+  bool replaces() const { return false; }  // restoreOld() does not ask
+  bool exists(const String& p) { return fs.exists(p); }
+  bool remove(const String& p) { return fs.remove(p); }
+  FsResult rename(const String& from, const String& to) {
+    return fs.rename(from, to) ? FsResult::OK : FsResult::IO_ERROR;
+  }
+};
+
+}  // namespace
+
 void FileSystemManager::purgeUploadDebris(fs::FS& fs, const char* root) {
   // Iterative BFS so the call frame stays constant — safe to run from a
   // small (e.g. SD mount-watcher) FreeRTOS task without blowing the stack.
@@ -214,6 +242,7 @@ void FileSystemManager::purgeUploadDebris(fs::FS& fs, const char* root) {
     if (!dir.isDirectory()) { dir.close(); continue; }
 
     std::vector<String> victims;
+    std::vector<String> olds;  // a promotion cut short (FsPromote.h)
     File child = dir.openNextFile();
     while (child) {
       const char* n = child.name();
@@ -226,6 +255,8 @@ void FileSystemManager::purgeUploadDebris(fs::FS& fs, const char* root) {
         // and promote on success, so a crash leaves nothing else behind;
         // zero-byte files are legitimate (markers, empty logs, configs).
         victims.emplace_back(full);
+      } else if (full.endsWith(kOldSuffix)) {
+        olds.emplace_back(full);
       }
       child.close();
       child = dir.openNextFile();
@@ -237,11 +268,15 @@ void FileSystemManager::purgeUploadDebris(fs::FS& fs, const char* root) {
         log_d("[fs] purged debris: %s", v.c_str());
       }
     }
+    VolumeIo io{fs};
+    for (auto& o : olds) {
+      if (FsPromote<VolumeIo>::restoreOld(io, o)) log_w("[fs] upload cut short: settled %s", o.c_str());
+    }
   }
 }
 
 FsResult FileSystemManager::rename(const String& fromAbs, const String& toAbs) {
-  if (isReadOnlyPath(fromAbs) || isReadOnlyPath(toAbs)) return FsResult::READ_ONLY;
+  if (coversReadOnlyPath(fromAbs) || isReadOnlyPath(toAbs)) return FsResult::READ_ONLY;
   String fromRel, toRel;
   FileSystemBackend* bf = resolve(fromAbs, fromRel);
   FileSystemBackend* bt = resolve(toAbs, toRel);
@@ -254,6 +289,36 @@ FsResult FileSystemManager::rename(const String& fromAbs, const String& toAbs) {
 
   if (!fs->exists(fromRel)) return FsResult::NOT_FOUND;
   if (fs->exists(toRel)) return FsResult::EXISTS;
+  return fs->rename(fromRel, toRel) ? FsResult::OK : FsResult::IO_ERROR;
+}
+
+bool FileSystemManager::exists(const String& absPath) {
+  String rel;
+  FileSystemBackend* b = resolve(absPath, rel);
+  if (!b || !b->isMounted()) return false;
+  fs::FS* fs = b->fs();
+  return fs && fs->exists(rel);
+}
+
+bool FileSystemManager::renameReplaces(const String& absPath) const {
+  String rel;
+  const FileSystemBackend* b = resolve(absPath, rel);
+  return b && b->renameReplaces();
+}
+
+FsResult FileSystemManager::renameOver(const String& fromAbs, const String& toAbs) {
+  if (isReadOnlyPath(fromAbs) || isReadOnlyPath(toAbs)) return FsResult::READ_ONLY;
+  String fromRel, toRel;
+  FileSystemBackend* bf = resolve(fromAbs, fromRel);
+  FileSystemBackend* bt = resolve(toAbs, toRel);
+  if (!bf || !bt) return FsResult::INVALID_PATH;
+  if (bf != bt) return FsResult::INVALID_PATH;
+  if (!bf->isMounted()) return FsResult::NOT_MOUNTED;
+  if (bf->readOnly()) return FsResult::READ_ONLY;
+  fs::FS* fs = bf->fs();
+  if (!fs) return FsResult::NOT_MOUNTED;
+  if (!fs->exists(fromRel)) return FsResult::NOT_FOUND;
+  if (!bf->renameReplaces() && fs->exists(toRel)) return FsResult::EXISTS;
   return fs->rename(fromRel, toRel) ? FsResult::OK : FsResult::IO_ERROR;
 }
 
@@ -314,13 +379,14 @@ FsResult FileSystemManager::removeGated(const String& absPath, bool recursive, u
   FileSystemBackend* b = nullptr;
   const FsResult r = writable(absPath, fs, rel, &b);
   if (r != FsResult::OK) return r;
+  if (recursive && coversReadOnlyPath(absPath)) return FsResult::READ_ONLY;  // a protected tree inside
   if (!b->onCodeFlash()) return remove(absPath, recursive);
   return _writes.submit(recursive ? WriteQueue::Kind::RemoveTree : WriteQueue::Kind::Remove, fs, rel, String(), op);
 }
 
 FsResult FileSystemManager::renameGated(const String& fromAbs, const String& toAbs, uint32_t* op) {
   if (op) *op = 0;
-  if (isReadOnlyPath(fromAbs) || isReadOnlyPath(toAbs)) return FsResult::READ_ONLY;
+  if (coversReadOnlyPath(fromAbs) || isReadOnlyPath(toAbs)) return FsResult::READ_ONLY;
   String fromRel, toRel;
   FileSystemBackend* bf = resolve(fromAbs, fromRel);
   FileSystemBackend* bt = resolve(toAbs, toRel);
@@ -332,4 +398,17 @@ FsResult FileSystemManager::renameGated(const String& fromAbs, const String& toA
   if (!fs) return FsResult::NOT_MOUNTED;
   if (!bf->onCodeFlash()) return rename(fromAbs, toAbs);
   return _writes.submit(WriteQueue::Kind::Rename, fs, fromRel, toRel, op);
+}
+
+void FileSystemManager::shutdown(uint32_t boundMs) {
+  _writes.shutdown(boundMs);
+  const uint8_t left = _writes.pending();
+  if (!left) return;
+  log_w("[fs] restart: %u file manager write(s) asked for and not done", (unsigned)left);
+  const bool listed = _writes.forEachPending([](const WriteQueue::Status& s) {
+    static const char* const kKinds[] = {"mkdir", "delete", "delete tree", "rename"};
+    log_w("[fs]   #%u %s %s: %u step(s) done", (unsigned)s.id, kKinds[static_cast<uint8_t>(s.kind)], s.path.c_str(),
+          (unsigned)s.steps);
+  });
+  if (!listed) log_w("[fs]   (not listed: the queue was busy)");
 }
