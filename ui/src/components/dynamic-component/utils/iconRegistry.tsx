@@ -208,6 +208,13 @@ export type AvatarColorName = 'primary' | 'secondary' | 'success' | 'error' | 'w
 const AVATAR_COLOR_KEYS: ReadonlySet<string> =
   new Set(['primary', 'secondary', 'success', 'error', 'warning', 'info']);
 
+// A colour for an sx prop: a palette key (success, warning, …) follows the
+// theme (light and dark); anything else is taken as a CSS colour.
+export const sxColor = (c?: string | null): string | undefined => {
+  if (!c) return undefined;
+  return AVATAR_COLOR_KEYS.has(c) ? `${c}.main` : c;
+};
+
 interface StyledAvatarProps {
   colorName?: string;
 }

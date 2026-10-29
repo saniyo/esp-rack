@@ -84,6 +84,16 @@ Each builder is a plain value object; nothing touches the JSON until `add()`.
 Produces the SAME JSON the old `add*Field` emitted (parity verified per
 conversion; order-free wire format makes equivalence robust).
 
+### Overview widgets (GW-UI-002)
+
+Generic display pieces for an overview page. The manifest carries only the
+skeleton (keys, labels, units, colours); every value comes through the
+page's REST/WS keys, as `refLine` does.
+
+- **Tile** — `.tile()` on `Number` / `Text` (`tile=1`), `.subKey(k)` (`sub=k`):
+  the label as a caption, a big value + unit, a line from a sibling key;
+  `colorMap` colours the value. Read-only; one grid cell, `span` as usual.
+
 ## Migration — incremental (chosen)
 
 Old `FormBuilder::add*Field` stays working throughout; modules convert one at a

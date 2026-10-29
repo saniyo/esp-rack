@@ -3,12 +3,13 @@
 // up by DynamicContentHandler to wrap consecutive same-group fields in a
 // MUI <Card>; colorMap drives live-color Avatar on read-only renders.
 export const fieldConfigurations = {
-  text: { options: ['r', 'rw', 'pl', 'icon', 'unit', 'color', 'colorMap', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const },
+  // tile/sub (text, number): an overview tile with a line from a sibling key.
+  text: { options: ['r', 'rw', 'pl', 'icon', 'unit', 'color', 'colorMap', 'tile', 'sub', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const },
   // secret — same option vocabulary as text minus `unit` and the now-
   // removed `password` flag. Routed to SecretField on the React side
   // (type=password input + eye-toggle).
   secret: { options: ['r', 'rw', 'pl', 'icon', 'color', 'colorMap', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const },
-  number: { options: ['r', 'rw', 'mn', 'mx', 'f', 'pl', 'icon', 'unit', 'color', 'colorMap', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const },
+  number: { options: ['r', 'rw', 'mn', 'mx', 'f', 'pl', 'icon', 'unit', 'color', 'colorMap', 'tile', 'sub', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const },
   slider: { options: ['r', 'rw', 'mn', 'mx', 'pl', 'st', 'icon', 'color', 'colorMap', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const },
   checkbox: { options: ['r', 'rw', 'pl', 'icon', 'color', 'colorMap', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const },
   button: { options: ['r', 'rw', 'pl', 'icon', 'color', 'colorMap', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const },
@@ -324,6 +325,12 @@ const optionParsers: Record<string, (option: string) => ParsedFieldOption> = {
     key: 'clientTime',
     value: getAfter(opt, 'clientTime').split(',').map((s) => s.trim()).filter(Boolean),
   }),
+
+  // ── sibling values: tile ──
+  // text/number: tile=1 shows the field as an overview tile; sub= names the
+  // sibling key whose text goes under the value.
+  tile: (opt) => ({ key: 'tile', value: getAfter(opt, 'tile').trim() !== '0' }),
+  sub: (opt) => ({ key: 'sub', value: getAfter(opt, 'sub').trim() }),
 
   // ── sibling values: progress ──
   // progress: sibling state keys for a live max / a marker.

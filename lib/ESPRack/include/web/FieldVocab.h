@@ -88,6 +88,8 @@ constexpr const char* LoadingIf     = "loadingIf";    // all  — "field:prefix"
 constexpr const char* Placeholder   = "pl";           // text/secret/number/slider/checkbox/button/switch/dropdown/textarea/radio/ip
 constexpr const char* Unit          = "unit";         // text/number/ip
 constexpr const char* ColorMap      = "colorMap";     // text/secret/number/slider/checkbox/button/switch/dropdown/textarea/radio/ip
+constexpr const char* Tile          = "tile";         // text/number — "=1": an overview tile (big value, unit, label)
+constexpr const char* SubKey        = "sub";          // text/number tile — a sibling key whose text goes under the value
 
 // Number / slider.
 constexpr const char* Min           = "mn";           // number/slider

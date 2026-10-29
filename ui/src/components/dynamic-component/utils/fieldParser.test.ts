@@ -5,6 +5,8 @@
 import { describe, expect, it } from '@jest/globals';
 
 import { parseFieldOptions, RefLineSpec, ThresholdStep } from './fieldParser';
+import { decimalsOf, gridColumnFor, tileOf } from './formLayout';
+import { tileColor, tileText } from '../elements/TileField';
 import {
   formatCellTime,
   formatDuration,
@@ -40,6 +42,62 @@ describe('Progress', () => {
       { pct: 60, color: 'warning' },
       { pct: 95, color: 'success' },
     ]);
+  });
+});
+
+describe('Tile', () => {
+  // web::Number("soc", 85.4).format("0.0").unit("%").label("Battery").tile()
+  //     .subKey("soc_sub").colorMap("100.0:success,default:info")
+  const o = 'number;r;mn=0.00;mx=100.00;f=0.0;unit=%;l=Battery;tile=1;sub=soc_sub;colorMap=100.0:success,default:info';
+
+  it('parses the tile flag and the sibling key on a number', () => {
+    const p = parseFieldOptions('soc', o);
+    expect(p.finalType).toBe('number');
+    expect(p.readableLabel).toBe('Battery');
+    expect(p.optionMap.tile?.value).toBe(true);
+    expect(p.optionMap.sub?.value).toBe('soc_sub');
+    expect(p.optionMap.unit?.value).toBe('%');
+    expect(p.optionMap.colorMap?.value).toEqual({ '100.0': 'success', default: 'info' });
+  });
+
+  it('parses it on a text; other types ignore it', () => {
+    // web::Text("mode", "Grid").tile().subKey("mode_sub")
+    const p = parseFieldOptions('mode', 'text;r;tile=1;sub=mode_sub');
+    expect(p.optionMap.tile?.value).toBe(true);
+    expect(p.optionMap.sub?.value).toBe('mode_sub');
+    const q = parseFieldOptions('x', 'slider;r;tile=1;sub=y');
+    expect(q.optionMap.tile).toBeUndefined();
+    expect(q.optionMap.sub).toBeUndefined();
+    expect(parseFieldOptions('t', 'text;r').optionMap.tile).toBeUndefined();
+  });
+
+  it('lays a tile out as one cell, span as usual', () => {
+    expect(tileOf(o)).toBe(true);
+    expect(tileOf('text;rw;tile=1')).toBe(true);
+    expect(tileOf('text;rw;tileX=1')).toBe(false);
+    expect(tileOf('text;rw')).toBe(false);
+    // an editable text is a whole row; as a tile it is one cell
+    expect(gridColumnFor('text', undefined, false, 4, tileOf('text;rw;tile=1'))).toBe('auto');
+    expect(gridColumnFor('number', 2, false, 5, true)).toEqual({ xs: '1 / -1', sm: 'span 2', md: 'span 2' });
+  });
+
+  it('shows a number at the format decimals, a text as it is', () => {
+    expect(decimalsOf(o)).toBe(1);
+    expect(decimalsOf('number;r')).toBe(0);
+    expect(tileText(85.44, o, 'number')).toBe('85.4');
+    expect(tileText('85.40', o, 'number')).toBe('85.4');
+    expect(tileText(1234, 'number;r', 'number')).toBe('1234');
+    expect(tileText('Grid', 'text;r;tile=1', 'text')).toBe('Grid');
+    expect(tileText(undefined, o, 'number')).toBe('—');
+    expect(tileText('', o, 'number')).toBe('—');
+  });
+
+  it('colours by the shown value, the raw one, then default', () => {
+    const map = { '100.0': 'success', Fault: 'error', default: 'info' };
+    expect(tileColor(map, '100.0', 100)).toBe('success');
+    expect(tileColor(map, 'Fault', 'Fault')).toBe('error');
+    expect(tileColor(map, '50.0', 50)).toBe('info');
+    expect(tileColor(undefined, '1', 1)).toBeUndefined();
   });
 });
 

@@ -479,13 +479,13 @@ access flag: `rw` by default, `.readOnly()` for `r`.
 
 | Builder | Value type | Type-specific options |
 |---|---|---|
-| `web::Text(key, const char*)` | string | `.placeholder() .unit() .colorMap()` |
+| `web::Text(key, const char*)` | string | `.placeholder() .unit() .colorMap()`. `.tile()`: an overview tile (below) |
 | `web::Secret(key, const char*)` | string, **encrypted at rest** (§4.4) | `.placeholder() .colorMap()` |
 | `web::Textarea(key, String)` | string | `.placeholder() .colorMap()` |
 | `web::Ip(key, const char*)` | string | `.placeholder() .unit() .colorMap()` |
 | `web::TimeZones(key, label)` | string (tz label) | — |
 | `web::Checkbox / Switch / Button(key, bool)` | bool | `.placeholder() .colorMap()` |
-| `web::Number(key, double)` | **emitted as a string** at the format's precision (`:192`) | `.min() .max()` (**default 0..100, always emitted, so set them**), `.format("0.00")` (decimals), `.unit() .placeholder() .colorMap()`. No `step`. |
+| `web::Number(key, double)` | **emitted as a string** at the format's precision (`:192`) | `.min() .max()` (**default 0..100, always emitted, so set them**), `.format("0.00")` (decimals), `.unit() .placeholder() .colorMap()`. No `step`. `.tile()`: an overview tile (below) |
 | `web::Slider(key, double)` | number | `.min() .max() .step()` (defaults 0/100/1) |
 | `web::Dropdown / Radio(key, int)` | int | `.option("Label", value)` repeated |
 | `web::Dropdown(key, const char*)` | string | `.option("Label", "value")` repeated; no `,` or `:` in either. For instance ids: `app->hw()->instanceOptions<I>(dropdown, selected)` lists the instances implementing `I` and keeps a stale `selected` visible |
@@ -497,6 +497,21 @@ access flag: `rw` by default, `.readOnly()` for `r`.
 | `web::Upload(key, url)` | — | `.accept(mime)` |
 | `web::Action(key[, label])` | button | `.ref("action.id")` (manifest action), or `.url() .method() .confirm() .withFields("param=field,...")`. `.withClientTime("epoch", "ms")` appends the browser's clock on click: `.ref("system.setTime").withClientTime("epoch","ms")` sets the clock from this browser |
 | `web::Message(key, text)` | static alert, always read-only | `.level("info"/"warning"/"error"/"success")`. `.levelKey(k)` takes the severity from a sibling's live value when it is one of those four |
+
+**Overview tiles.** `.tile()` on a `web::Number` or `web::Text` shows it as a
+tile: the label as a caption (with the icon), the value big with its unit
+(a number at its `.format()` decimals), and `.colorMap()` colouring the value
+(a palette key such as `success`, or a CSS colour). A tile is read-only.
+`.subKey(k)` adds a line under the value from a sibling key (a line break in
+it starts a second line). Lay tiles out with `web::Cols(n)`: four in a row look
+good, and `Cols(5)` fits five small ones; `.span(k)` works as usual.
+
+```cpp
+form.add(web::Cols(4));
+form.add(web::Number("soc", s.soc).format("0").unit("%").label("Battery")
+             .icon("BatteryFull").tile().subKey("soc_sub").colorMap("100:success,default:info"));
+form.add(web::Text("mode", s.mode).label("Mode").tile());
+```
 
 Rules worth knowing:
 
@@ -513,7 +528,8 @@ Rules worth knowing:
   type needs both sides.
 - Colors baked into the form (`.color()`) only change on refetch. WS ticks
   update values only (`NTPSettingsService.h:128-132`).
-- **Sibling values** (`Progress.maxKey/markerKey`, `Trend.refLine/vrefLine`) name
+- **Sibling values** (`Progress.maxKey/markerKey`, `Trend.refLine/vrefLine`,
+  `Number/Text.subKey`) name
   another state key. On a live tab that can be any key of the WS reader
   (it doesn't have to be a field). On a REST-only tab it must be a field of
   the same form.

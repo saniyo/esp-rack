@@ -29,6 +29,8 @@ export const spanOf = (o?: string): number | undefined => {
   return m ? Number(m[1]) : undefined;
 };
 export const fullOf = (o?: string): boolean => /(?:^|;)fr(?:=1)?(?:;|$)/.test(o ?? '');
+// tile=1 (text / number): shown as an overview tile, laid out as read-only.
+export const tileOf = (o?: string): boolean => /(?:^|;)tile(?:=1)?(?:;|$)/.test(o ?? '');
 
 export interface Segment<T> {
   cols?: number;  // undefined = flow
@@ -130,6 +132,12 @@ export const numberStep = (o: string | undefined): number | undefined => {
   return decimals > 0 ? Number((10 ** -decimals).toFixed(decimals)) : 1;
 };
 
+// Decimals of a "0.0"-style format (the raw `f=` option); 0 without one.
+export const decimalsOf = (o: string | undefined): number => {
+  const m = /(?:^|;)f=([^;]*)/.exec(o ?? '');
+  const dot = m ? m[1].indexOf('.') : -1;
+  return dot >= 0 ? m![1].length - dot - 1 : 0;
+};
 
 // Every grid cell: elements keep their own sizes; long values
 // wrap inside their cell instead of pushing neighbours; the grid separates

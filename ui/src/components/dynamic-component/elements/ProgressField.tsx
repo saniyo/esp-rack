@@ -6,6 +6,7 @@ import { Field } from '../types';
 import { useFieldParser } from '../utils/useFieldParser';
 import { FieldAvatar } from '../utils/iconRegistry';
 import { ThresholdStep } from '../utils/fieldParser';
+import { decimalsOf } from '../utils/formLayout';
 
 // Read-only progress bar: value against mn..mx, where the max
 // may come live from a sibling state key (maxKey) and a thin marker shows a
@@ -23,13 +24,6 @@ const BAR_COLORS: readonly string[] = ['primary', 'secondary', 'error', 'info', 
 const num = (v: any): number | undefined => {
   const n = typeof v === 'number' ? v : typeof v === 'string' ? parseFloat(v) : NaN;
   return Number.isFinite(n) ? n : undefined;
-};
-
-// Decimals from a "0.0"-style format (the raw `f=` option).
-const decimalsOf = (o: string): number => {
-  const m = /(?:^|;)f=([^;]*)/.exec(o);
-  const dot = m ? m[1].indexOf('.') : -1;
-  return dot >= 0 ? m![1].length - dot - 1 : 0;
 };
 
 const ProgressField: FC<ProgressFieldProps> = ({ field, value, getSibling }) => {

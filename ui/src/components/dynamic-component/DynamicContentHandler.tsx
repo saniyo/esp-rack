@@ -1,7 +1,7 @@
 import { ownerOfAction } from '../../contexts/manifest/normalizeManifest';
 import {
   CELL_SX, fullOf, gridColumnFor, gridTemplateFor, groupByCard, isLayoutMarker, segmentFields, spanOf,
-  visibleHeading,
+  tileOf, visibleHeading,
 } from './utils/formLayout';
 import { HeadingContext } from './HeadingContext';
 import React, { FC, useEffect, useRef, useState, useContext } from 'react';
@@ -18,6 +18,7 @@ import DeleteIcon from '@mui/icons-material/Delete';
 import { Field } from './types';
 import { parseFieldOptions, ShowIfSpec } from './utils/fieldParser';
 import TextField from './elements/TextField';
+import TileField from './elements/TileField';
 import SecretField from './elements/SecretField';
 import NumberField from './elements/NumberField';
 import SliderField from './elements/SliderField';
@@ -201,10 +202,12 @@ const DynamicContentHandler: FC<DynamicContentHandlerProps> = ({
 
     switch (field.type) {
       case 'text':
+        if (tileOf(field.o)) return <TileField key={fieldKey} field={field} value={formState[field.label]} getSibling={getSibling} />;
         return <TextField key={fieldKey} {...commonProps} />;
       case 'secret':
         return <SecretField key={fieldKey} {...commonProps} />;
       case 'number':
+        if (tileOf(field.o)) return <TileField key={fieldKey} field={field} value={formState[field.label]} getSibling={getSibling} />;
         return <NumberField key={fieldKey} {...commonProps} />;
       case 'slider':
         return <SliderField key={fieldKey} {...commonProps} />;
@@ -335,7 +338,7 @@ const DynamicContentHandler: FC<DynamicContentHandlerProps> = ({
               m: 0,
               p: 0,
               minWidth: 0,
-              gridColumn: gridColumnFor(cf.type, spanOf(cf.o), fullOf(cf.o), seg.cols, cf.readOnly),
+              gridColumn: gridColumnFor(cf.type, spanOf(cf.o), fullOf(cf.o), seg.cols, cf.readOnly || tileOf(cf.o)),
               ...CELL_SX,
             }}
           >

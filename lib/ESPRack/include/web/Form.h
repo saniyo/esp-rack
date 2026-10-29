@@ -115,6 +115,11 @@ class Text : public FieldSpec<Text> {
   Text& placeholder(const char* p) { return putStr(Opt::Placeholder, p); }
   Text& unit(const char* u)        { return putStr(Opt::Unit, u); }
   Text& colorMap(const char* spec) { return putStr(Opt::ColorMap, spec); }
+  // An overview tile: the label as a caption, the value big with its unit
+  // (colorMap colours it), read-only. subKey: a sibling key whose text goes
+  // under the value (live tab: any key of the WS reader).
+  Text& tile()                     { _af = Access::Read; return putFlag1(Opt::Tile); }
+  Text& subKey(const char* k)      { return putStr(Opt::SubKey, k); }
   void writeTo(JsonArray& fields) const { emit(fields, FieldType::Text, String(_v ? _v : "")); }
  private:
   const char* _v;
@@ -200,6 +205,9 @@ class Number : public FieldSpec<Number> {
   Number& placeholder(const char* p) { return putStr(Opt::Placeholder, p); }
   Number& unit(const char* u)        { return putStr(Opt::Unit, u); }
   Number& colorMap(const char* spec) { return putStr(Opt::ColorMap, spec); }
+  // An overview tile, as Text::tile(); the value at the format's decimals.
+  Number& tile()                     { _af = Access::Read; return putFlag1(Opt::Tile); }
+  Number& subKey(const char* k)      { return putStr(Opt::SubKey, k); }
   void writeTo(JsonArray& fields) const {
     int decimals = decimalsOf(_fmt);
     JsonObject f = fields.createNestedObject();
