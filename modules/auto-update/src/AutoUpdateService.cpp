@@ -8,6 +8,11 @@
 
 #ifdef ESP32
 #include <HTTPClient.h>
+#include <esp_heap_caps.h>
+#include <esp_ota_ops.h>
+#include <esp_partition.h>
+#include <power/WriteGate.h>
+#include <system/OtaWriter.h>
 #elif defined(ESP8266)
 #include <ESP8266HTTPClient.h>
 #endif
@@ -164,6 +169,13 @@ void AutoUpdateService::loop() {
     _state.otaElapsedSec = (int)(elapsed / 1000UL);
 
     uint32_t timeoutMs = (uint32_t)_state.updateTimeoutSec * 1000UL;
+#ifdef ESP32
+    // The task stops by itself at the deadline (between 4 KB steps, each
+    // bounded: an HTTP read timeout, a write gate slot). Killing it is the
+    // last resort: a task deleted while it waits in the write gate leaves
+    // its place there until the restart below.
+    timeoutMs += AUTO_UPDATE_KILL_GRACE_MS;
+#endif
     if (elapsed >= timeoutMs) {
       log_d("[AutoUpdate] TIMEOUT — killing OTA task, rebooting...");
       setOtaState(AU_TIMEOUT);
@@ -190,6 +202,12 @@ void AutoUpdateService::loop() {
   // --- Guards ---
   if (!_state.enabled || _state.checkInterval <= 0 || !_wifiConnected) return;
   if (_otaState != AU_IDLE) return;
+  // Another image under way (the upload page, ArduinoOTA): the check waits
+  // for it (they share the next OTA slot).
+  if (ESPRack::FirmwareUpdate::active()) return;
+#ifdef ESP32
+  if (ESPRack::OtaWriter::busy()) return;
+#endif
 
   // --- Periodic scheduler ---
   unsigned long now = millis();
@@ -310,20 +328,178 @@ t_httpUpdate_return AutoUpdateService::performUpdate(const String& url) {
   }
   return ESPhttpUpdate.update(WiFi, url, _state.currentVersion);
 #elif defined(ESP32)
-  httpUpdate.rebootOnUpdate(false);
-  httpUpdate.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
-  httpUpdate.onProgress([this](int cur, int total) {
-    ESPRack::FirmwareUpdate::progress();
-    if (_progressCallback) _progressCallback(cur, total);
-  });
-  WiFiClient client;
-  client.setTimeout(_state.updateTimeoutSec);
-  ESPRack::FirmwareUpdate::begin("auto-update");
-  const t_httpUpdate_return r = httpUpdate.update(client, url, _state.currentVersion);
-  ESPRack::FirmwareUpdate::end();
-  return r;
+  // No reboot here (handleOtaResult restarts); FirmwareUpdate is reported
+  // by the OtaWriter.
+  return downloadImage(url);
 #endif
 }
+
+#ifdef ESP32
+namespace {
+
+// The running image's SHA-256 in upper-case hex, as httpUpdate sent it.
+String runningSha256() {
+  uint8_t sha[32] = {0};
+  if (esp_partition_get_sha256(esp_ota_get_running_partition(), sha) != ESP_OK) return String();
+  char hex[2 * sizeof(sha) + 1];
+  for (size_t i = 0; i < sizeof(sha); ++i) snprintf(hex + 2 * i, 3, "%02X", sha[i]);
+  return String(hex);
+}
+
+}  // namespace
+
+bool AutoUpdateService::otaPastDeadline() const {
+  return millis() - _otaStartMs >= (uint32_t)_state.updateTimeoutSec * 1000UL;
+}
+
+t_httpUpdate_return AutoUpdateService::otaFailed(int err, const String& msg) {
+  _otaErr = err;
+  _otaErrStr = msg;
+  return HTTP_UPDATE_FAILED;
+}
+
+t_httpUpdate_return AutoUpdateService::downloadImage(const String& url) {
+  _otaErr = 0;
+  _otaErrStr = "";
+  _otaTimedOut = false;
+  // One image at a time (ota.begin() checks again before the first write).
+  if (ESPRack::FirmwareUpdate::active() || ESPRack::OtaWriter::busy()) {
+    return otaFailed(ESPRack::OtaWriter::kErrBusy, "Update error: another firmware update is under way");
+  }
+
+  WiFiClient client;
+  HTTPClient http;
+  if (!http.begin(client, url)) return otaFailed(HTTPC_ERROR_CONNECTION_REFUSED, "HTTP error: http.begin failed");
+
+  // What Arduino's httpUpdate sent (servers may route on it).
+  http.useHTTP10(true);  // no chunked transfer
+  http.setTimeout(AUTO_UPDATE_HTTP_TIMEOUT_MS);
+  http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
+  http.setUserAgent("ESP32-http-Update");
+  http.addHeader("Cache-Control", "no-cache");
+  http.addHeader("x-ESP32-BASE-MAC", Network.macAddress());
+  http.addHeader("x-ESP32-STA-MAC", WiFi.macAddress());
+  http.addHeader("x-ESP32-AP-MAC", WiFi.softAPmacAddress());
+  http.addHeader("x-ESP32-free-space", String(ESP.getFreeSketchSpace()));
+  http.addHeader("x-ESP32-sketch-size", String(ESP.getSketchSize()));
+  const String sketchMd5 = ESP.getSketchMD5();
+  if (sketchMd5.length()) http.addHeader("x-ESP32-sketch-md5", sketchMd5);
+  const String sketchSha = runningSha256();
+  if (sketchSha.length()) http.addHeader("x-ESP32-sketch-sha256", sketchSha);
+  http.addHeader("x-ESP32-chip-size", String(ESP.getFlashChipSize()));
+  http.addHeader("x-ESP32-sdk-version", ESP.getSdkVersion());
+  http.addHeader("x-ESP32-mode", "sketch");
+  if (_state.currentVersion.length()) http.addHeader("x-ESP32-version", _state.currentVersion);
+  const char* keys[] = {"x-MD5"};
+  http.collectHeaders(keys, 1);
+
+  const int code = http.GET();
+  const int len = http.getSize();
+  if (code <= 0) {
+    const String e = "HTTP error: " + HTTPClient::errorToString(code);
+    http.end();
+    return otaFailed(code, e);
+  }
+  switch (code) {
+    case HTTP_CODE_OK:
+      break;
+    case HTTP_CODE_NO_CONTENT:
+    case HTTP_CODE_NOT_MODIFIED:
+      http.end();
+      return HTTP_UPDATE_NO_UPDATES;
+    case HTTP_CODE_NOT_FOUND:
+      http.end();
+      return otaFailed(HTTP_UE_SERVER_FILE_NOT_FOUND, "File Not Found (404)");
+    case HTTP_CODE_FORBIDDEN:
+      http.end();
+      return otaFailed(HTTP_UE_SERVER_FORBIDDEN, "Forbidden (403)");
+    default:
+      http.end();
+      return otaFailed(HTTP_UE_SERVER_WRONG_HTTP_CODE, "Wrong HTTP Code (" + String(code) + ")");
+  }
+  if (len <= 0) {
+    http.end();
+    return otaFailed(HTTP_UE_SERVER_NOT_REPORT_SIZE, "Server Did Not Report Size");
+  }
+  const uint32_t room = ESPRack::OtaWriter::freeSlotSize();
+  if (!room) {
+    http.end();
+    return otaFailed(HTTP_UE_NO_PARTITION, "Partition Could Not be Found");
+  }
+  if ((uint32_t)len > room) {
+    http.end();
+    return otaFailed(HTTP_UE_TOO_LESS_SPACE, "Not Enough space");
+  }
+  const String md5 = http.header("x-MD5");
+
+  // One 4 KB step at a time: read it, then write it in a slot of the
+  // write gate (one sector erase). PSRAM when there is some.
+  constexpr size_t kStep = ESPRack::OtaWriter::kStep;
+  uint8_t* buf = static_cast<uint8_t*>(heap_caps_malloc_prefer(kStep, 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT,
+                                                               MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+  if (!buf) {
+    http.end();
+    return otaFailed(ESP_ERR_NO_MEM, "Update error: no memory for a 4 KB buffer");
+  }
+  NetworkClient* tcp = http.getStreamPtr();
+  ESPRack::OtaWriter ota;
+  t_httpUpdate_return ret = HTTP_UPDATE_OK;
+  const size_t total = (size_t)len;
+  size_t done = 0;
+  if (_progressCallback) _progressCallback(0, len);
+  while (done < total) {
+    if (otaPastDeadline()) {
+      _otaTimedOut = true;
+      ret = otaFailed(HTTPC_ERROR_READ_TIMEOUT, "timeout");
+      break;
+    }
+    const size_t n = total - done < kStep ? total - done : kStep;
+    if (!tcp || tcp->readBytes(buf, n) != n) {
+      ret = otaFailed(HTTPC_ERROR_READ_TIMEOUT, "Update error: stream read timeout");
+      break;
+    }
+    if (!done) {
+      if (buf[0] != 0xE9) {  // an app image's magic byte
+        ret = otaFailed(HTTP_UE_BIN_VERIFY_HEADER_FAILED, "Verify Bin Header Failed");
+        break;
+      }
+      // No flash write yet (sequential mode erases as it goes).
+      if (!ota.begin("auto-update", (uint32_t)total, md5.length() ? md5.c_str() : nullptr)) {
+        ret = ota.error() == ESPRack::OtaWriter::kErrBadMd5
+                  ? otaFailed(HTTP_UE_SERVER_FAULTY_MD5, "Wrong MD5")
+                  : otaFailed(ota.error(), String("Update error: ") + ota.errorString());
+        break;
+      }
+    }
+    ESPRack::WriteSlot slot;
+    if (!slot.ok()) {
+      ret = otaFailed(ESP_ERR_INVALID_STATE, "Update error: flash writes paused (power)");
+      break;
+    }
+    if (!ota.write(buf, n)) {
+      ret = otaFailed(ota.error(), String("Update error: ") + ota.errorString());
+      break;
+    }
+    slot.release();
+    done += n;
+    if (_progressCallback) _progressCallback((int)done, len);
+  }
+  if (ret == HTTP_UPDATE_OK) {
+    // Check and close the image, then set it to boot: one slot each.
+    ESPRack::WriteSlot slot;
+    if (!slot.ok()) {
+      ret = otaFailed(ESP_ERR_INVALID_STATE, "Update error: flash writes paused (power)");
+    } else if (!ota.end() || !slot.again() || !ota.activate()) {
+      ret = ota.error() ? otaFailed(ota.error(), String("Update error: ") + ota.errorString())
+                        : otaFailed(ESP_ERR_INVALID_STATE, "Update error: flash writes paused (power)");
+    }
+  }
+  ota.abort();  // nothing once activated
+  heap_caps_free(buf);
+  http.end();
+  return ret;
+}
+#endif
 
 // ====================================================
 // CHECK FOR UPDATE — preflight + OTA
@@ -432,13 +608,18 @@ void AutoUpdateService::handleOtaResult(t_httpUpdate_return ret, const char* ser
       int err = ESPhttpUpdate.getLastError();
       String errStr = ESPhttpUpdate.getLastErrorString();
 #elif defined(ESP32)
-      int err = httpUpdate.getLastError();
-      String errStr = httpUpdate.getLastErrorString();
+      int err = _otaErr;
+      String errStr = _otaErrStr;
 #endif
       char lr[256];
       snprintf(lr, sizeof(lr), "%s failed (%d): %s", server, err, errStr.c_str());
       log_d("[AutoUpdate] %s", lr);
+#ifdef ESP32
+      // Stopped at the deadline: nothing left behind, no restart needed.
+      setOtaState(_otaTimedOut ? AU_TIMEOUT : AU_FAILED);
+#else
       setOtaState(AU_FAILED);
+#endif
       setLastResult(lr);
       break;
     }

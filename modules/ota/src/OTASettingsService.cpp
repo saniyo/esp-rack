@@ -1,13 +1,52 @@
 #include <OTASettingsService.h>
 
 #include <App.h>  // ESPRack::restartDevice
+#include <power/WriteGate.h>
 #include <system/FirmwareUpdate.h>
 #include <system/LoopWdt.h>
+#ifdef ESP32
+#include <system/OtaWriter.h>
+#endif
 #include <web/Form.h>
 #include <WebManager.h>
 
+namespace {
+
+// ArduinoOTA's transfer holds the firmware update (the loop task only).
+bool s_otaOwn = false;
+
+// ArduinoOTA's onStart: the update for this transfer, or false (another
+// writer has it: the upload page, auto-update; they share the next slot).
+bool takeUpdate() {
+#ifdef ESP32
+  // An OtaWriter takes its claim, then FirmwareUpdate: one that comes
+  // between these two finds FirmwareUpdate taken and backs off.
+  if (ESPRack::OtaWriter::busy() || !ESPRack::FirmwareUpdate::tryBegin("ota")) return false;
+#else
+  ESPRack::FirmwareUpdate::begin("ota");
+#endif
+  return true;
+}
+
+// The transfer ended or failed.
+void giveUpdate(bool resumeWdt) {
+  if (!s_otaOwn) return;
+  s_otaOwn = false;
+  ESPRack::FirmwareUpdate::end();
+  if (resumeWdt) ESPRack::LoopWdt::resume();
+}
+
+}  // namespace
+
 void OTASettings::buildForm(OTASettings& settings, JsonObject& root) {
   web::Form form(root, "ota", "OTA Settings");
+  if (ESPRack::WriteGate::holders() > 0) {
+    // Arduino's Update erases 64 KB blocks: not through the write gate.
+    form.add(web::Message("m_gate",
+                          "A module on this device holds flash write windows. ArduinoOTA writes past them "
+                          "(64 KB block erases); prefer the firmware upload page or auto-update.")
+                 .level("warning"));
+  }
   form.add(web::Switch("enabled", settings.enabled).icon("SystemUpdate"));
   form.add(web::Number("port", (double)settings.port)
                .min(1).max(65535).format("0").icon("Settings"));
@@ -104,6 +143,10 @@ void OTASettingsService::configureArduinoOTA() {
     }
 #endif
     log_d("Starting OTA Update Service...");
+    if (ESPRack::WriteGate::holders() > 0) {
+      log_w("[ota] ArduinoOTA is on, but its writes don't go through the flash write gate (%u holders)",
+            (unsigned)ESPRack::WriteGate::holders());
+    }
     _arduinoOTA = new ArduinoOTAClass;
     // Do NOT let ArduinoOTA start its own mDNS responder. Its begin()
     // unconditionally calls MDNS.begin() when _mdnsEnabled (default true),
@@ -119,9 +162,23 @@ void OTASettingsService::configureArduinoOTA() {
     // The transfer blocks the loop for the whole upload: pause the loop
     // watchdog until it ends or fails.
     _arduinoOTA->onStart([]() {
+      if (!takeUpdate()) {
+        // Update.begin() already ran (nothing written yet): its abort ends
+        // the transfer, onError(OTA_END_ERROR) follows and espota gets the
+        // error.
+        log_w("[ota] refused: another firmware update is under way (%s)", ESPRack::FirmwareUpdate::source());
+#ifdef ESP32
+        Update.abort();
+#endif
+        return;
+      }
+      s_otaOwn = true;
       Serial.println(F("Starting"));
+      if (ESPRack::WriteGate::holders() > 0) {
+        log_w("[ota] ArduinoOTA writes outside the flash write gate (%u holders): 64 KB erases may land in their windows",
+              (unsigned)ESPRack::WriteGate::holders());
+      }
       ESPRack::LoopWdt::pause();
-      ESPRack::FirmwareUpdate::begin("ota");
     });
     // Reboot through the framework: the modules' onShutdown()
     // runs on the loop task and the next boot reports lastRestartReason()
@@ -129,16 +186,15 @@ void OTASettingsService::configureArduinoOTA() {
     _arduinoOTA->setRebootOnSuccess(false);
     _arduinoOTA->onEnd([]() {
       Serial.println(F("\r\nEnd"));
-      ESPRack::FirmwareUpdate::end();
+      giveUpdate(false);  // the loop watchdog stays paused up to the restart
       ESPRack::restartDevice(ESPRack::kRestartOta);
     });
     _arduinoOTA->onProgress([](unsigned int progress, unsigned int total) {
-      ESPRack::FirmwareUpdate::progress();
+      if (s_otaOwn) ESPRack::FirmwareUpdate::progress();
       log_d("Progress: %u%%", (progress / (total / 100)));
     });
     _arduinoOTA->onError([](ota_error_t error) {
-      ESPRack::FirmwareUpdate::end();
-      ESPRack::LoopWdt::resume();
+      giveUpdate(true);
       log_d("Error[%u]: ", error);
       if (error == OTA_AUTH_ERROR)
         log_d("Auth Failed");

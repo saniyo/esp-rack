@@ -8,7 +8,7 @@ import { AXIOS, toAxiosPath } from './endpoints';
 type FsRole =
   | 'schema' | 'volumes' | 'list' | 'stat'
   | 'download' | 'upload'
-  | 'mkdir' | 'delete' | 'rename'
+  | 'mkdir' | 'delete' | 'rename' | 'writeStatus'
   | 'format' | 'formatStatus'
   | 'unmount' | 'mount'
   | 'archivePrepare' | 'archiveStatus' | 'archiveDownload' | 'archiveCancel'
@@ -24,6 +24,7 @@ const FS_PATHS: Record<FsRole, string> = {
   mkdir: '/api/v1/fs/mkdir',
   delete: '/api/v1/fs/delete',
   rename: '/api/v1/fs/rename',
+  writeStatus: '/api/v1/fs/write/status',
   format: '/api/v1/fs/format',
   formatStatus: '/api/v1/fs/format/status',
   unmount: '/api/v1/fs/unmount',
@@ -117,16 +118,69 @@ export function uploadFile(
   });
 }
 
-export function mkdir(path: string): AxiosPromise<{ ok: boolean }> {
+// mkdir / delete / rename: 200 when done at once; 202 {status:'queued', op}
+// when the device's flash writer does it later (the flash write gate is
+// busy). settleWrite() waits for a queued one to finish.
+export interface FsWriteReply {
+  ok: boolean;
+  status?: 'queued';
+  op?: number;
+}
+
+export function mkdir(path: string): AxiosPromise<FsWriteReply> {
   return AXIOS.post(toAxiosPath(FS_PATHS.mkdir), { path });
 }
 
-export function remove(path: string, recursive = false): AxiosPromise<{ ok: boolean }> {
+export function remove(path: string, recursive = false): AxiosPromise<FsWriteReply> {
   return AXIOS.post(toAxiosPath(FS_PATHS.delete), { path, recursive });
 }
 
-export function rename(from: string, to: string): AxiosPromise<{ ok: boolean }> {
+export function rename(from: string, to: string): AxiosPromise<FsWriteReply> {
   return AXIOS.post(toAxiosPath(FS_PATHS.rename), { from, to });
+}
+
+export interface FsWriteStatus {
+  op: number;
+  kind: 'mkdir' | 'delete' | 'rename';
+  state: 'queued' | 'running' | 'done' | 'error';
+  steps: number;
+  path: string;
+  error?: string;
+}
+
+export function writeStatus(op: number): AxiosPromise<FsWriteStatus> {
+  return AXIOS.get(toAxiosPath(FS_PATHS.writeStatus), { params: { op } });
+}
+
+const WRITE_POLL_MS = 500;
+const WRITE_WAIT_MS = 120000;
+
+// Resolves when the write is done: at once for a 200, after polling the
+// write status for a queued one (onQueued is called first). Rejects with
+// the device's error code, or 'still_queued' after WRITE_WAIT_MS. A status
+// the device no longer has (404: e.g. dropped as old) counts as done; the
+// listing reloaded afterwards shows what is there.
+export async function settleWrite(reply: AxiosPromise<FsWriteReply>, onQueued?: () => void): Promise<void> {
+  const res = await reply;
+  const op = res.data?.op;
+  if (res.status !== 202 || res.data?.status !== 'queued' || op === undefined) return;
+  if (onQueued) onQueued();
+  const t0 = Date.now();
+  for (;;) {
+    // eslint-disable-next-line no-await-in-loop
+    await new Promise((resolve) => setTimeout(resolve, WRITE_POLL_MS));
+    let st: FsWriteStatus;
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      st = (await writeStatus(op)).data;
+    } catch (e: any) {
+      if (e?.response?.status === 404) return;
+      throw e;
+    }
+    if (st.state === 'done') return;
+    if (st.state === 'error') throw new Error(st.error || 'write_failed');
+    if (Date.now() - t0 > WRITE_WAIT_MS) throw new Error('still_queued');
+  }
 }
 
 export function fetchSchema(): AxiosPromise<any> {

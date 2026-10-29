@@ -54,6 +54,7 @@ import {
   mkdir as apiMkdir,
   remove as apiRemove,
   rename as apiRename,
+  settleWrite,
   uploadFile,
   downloadUrl,
   readText,
@@ -367,8 +368,10 @@ const FilesField: FC<FilesFieldProps> = ({ field }) => {
       }
     }
     const dirs = Array.from(dirSet).sort((a, b) => a.length - b.length);
+    // A mkdir the device queued (flash busy) is waited for: the uploads
+    // into it would fail before it exists.
     for (const d of dirs) {
-      try { await apiMkdir(d); } catch { /* exists / non-fatal */ }
+      try { await settleWrite(apiMkdir(d)); } catch { /* exists / non-fatal */ }
     }
 
     setUploading(true);
@@ -767,7 +770,7 @@ const FilesField: FC<FilesFieldProps> = ({ field }) => {
     for (const it of items) {
       try {
         // eslint-disable-next-line no-await-in-loop
-        await apiRemove(joinPath(currentPath, it.name), it.isDir);
+        await settleWrite(apiRemove(joinPath(currentPath, it.name), it.isDir));
         okCount++;
       } catch (e: any) {
         enqueueSnackbar(`Delete '${it.name}' failed: ${e?.response?.data?.error || e?.message || 'delete_failed'}`, { variant: 'error' });
@@ -792,12 +795,25 @@ const FilesField: FC<FilesFieldProps> = ({ field }) => {
     await bulkUpload(currentPath, items);
   };
 
+  // mkdir / rename / delete the device queued (its flash is busy): the
+  // dialog closes, a snackbar says so, and the listing reloads (or the
+  // error shows) once the device reports it done.
+  const queuedNote = (what: string) =>
+    enqueueSnackbar(`${what} queued until the flash is free`, { variant: 'info' });
+
   const doMkdir = async () => {
-    if (!mkdirName.trim()) return;
-    try {
-      await apiMkdir(joinPath(currentPath, mkdirName.trim()));
+    const name = mkdirName.trim();
+    if (!name) return;
+    const close = () => {
       setMkdirOpen(false);
       setMkdirName('');
+    };
+    try {
+      await settleWrite(apiMkdir(joinPath(currentPath, name)), () => {
+        close();
+        queuedNote(`New folder '${name}'`);
+      });
+      close();
       reloadDir(currentPath);
     } catch (e: any) {
       enqueueSnackbar(e?.response?.data?.error || e?.message || 'mkdir_failed', { variant: 'error' });
@@ -806,10 +822,17 @@ const FilesField: FC<FilesFieldProps> = ({ field }) => {
 
   const doRename = async () => {
     if (!renameTarget || !renameName.trim()) return;
-    try {
-      await apiRename(joinPath(currentPath, renameTarget.name), joinPath(currentPath, renameName.trim()));
+    const from = renameTarget.name;
+    const close = () => {
       setRenameOpen(false);
       setRenameTarget(null);
+    };
+    try {
+      await settleWrite(apiRename(joinPath(currentPath, from), joinPath(currentPath, renameName.trim())), () => {
+        close();
+        queuedNote(`Rename of '${from}'`);
+      });
+      close();
       reloadDir(currentPath);
     } catch (e: any) {
       enqueueSnackbar(e?.response?.data?.error || e?.message || 'rename_failed', { variant: 'error' });
@@ -818,10 +841,17 @@ const FilesField: FC<FilesFieldProps> = ({ field }) => {
 
   const doDelete = async () => {
     if (!deleteTarget) return;
-    try {
-      await apiRemove(joinPath(currentPath, deleteTarget.name), deleteTarget.isDir);
+    const target = deleteTarget;
+    const close = () => {
       setDeleteOpen(false);
       setDeleteTarget(null);
+    };
+    try {
+      await settleWrite(apiRemove(joinPath(currentPath, target.name), target.isDir), () => {
+        close();
+        queuedNote(`Delete of '${target.name}'`);
+      });
+      close();
       reloadDir(currentPath);
     } catch (e: any) {
       enqueueSnackbar(e?.response?.data?.error || e?.message || 'delete_failed', { variant: 'error' });

@@ -5,6 +5,8 @@
 #include <esp_rom_crc.h>
 #include <mbedtls/version.h>
 
+#include <new>
+
 #include <WebManager.h>
 
 // mbedTLS shipped with Arduino-ESP32 2.x exposed the SHA-256 streaming
@@ -76,6 +78,8 @@ FileSystemService::FileSystemService(AsyncWebServer* server,
   _server->on(FS_UPLOAD_PATH, HTTP_POST,
               std::bind(&FileSystemService::handleUploadDone, this, _1),
               std::bind(&FileSystemService::handleUpload, this, _1, _2, _3, _4, _5, _6));
+  // The upload pump's FlashWriter job (at setup, on the loop task).
+  _pump.attach("fs-upload");
 }
 
 void FileSystemService::registerManifest(WebManager* web) {
@@ -181,6 +185,13 @@ void FileSystemService::registerManifest(WebManager* web) {
     e.handler = bindReq(&FileSystemService::handleHashStatus);
     page.endpoints.push_back(std::move(e));
   }
+  {
+    WebEndpointMeta e;
+    e.method = "GET"; e.path = FS_WRITE_STATUS_PATH; e.role = "writeStatus";
+    e.auth = WebAuthLevel::Admin;
+    e.handler = bindReq(&FileSystemService::handleWriteStatus);
+    page.endpoints.push_back(std::move(e));
+  }
 
   // ── POST endpoints (JSON body, auto-parsed by AsyncCallbackJsonWebHandler) ─
   {
@@ -276,6 +287,8 @@ int FileSystemService::httpCodeFor(FsResult r) {
     case FsResult::INVALID_PATH: return 400;
     case FsResult::EXISTS: return 409;
     case FsResult::IO_ERROR: return 500;
+    case FsResult::QUEUED: return 202;
+    case FsResult::BUSY: return 503;
   }
   return 500;
 }
@@ -414,191 +427,260 @@ void FileSystemService::handleUpload(AsyncWebServerRequest* request,
                                      uint8_t* data,
                                      size_t len,
                                      bool final) {
-  if (!index) {
-    _uploadFailed = false;
-    if (_uploadFile) _uploadFile.close();
-    if (_sha256CtxInit) {
-      mbedtls_sha256_free(&_sha256Ctx);
-      _sha256CtxInit = false;
-    }
-    _hashEnabled = false;
-    _crc = 0;
-    _expectedSha256 = "";
-    _expectedCrc32 = "";
-    _uploadTarget = "";
-
+  if (request->_tempObject) return;  // refused: answered already, the rest is dropped
+  if (!index && !_pump.owns(request)) {
     Authentication auth = _sec->authenticateRequest(request);
     if (!AuthenticationPredicates::IS_ADMIN(auth)) {
-      sendError(request, 403, "forbidden");
-      _uploadFailed = true;
+      refuseUpload(request, 403, "forbidden");
       return;
     }
 
     String target = queryPath(request);
     if (target.length() == 0) {
-      sendError(request, 400, "missing_path");
-      _uploadFailed = true;
+      refuseUpload(request, 400, "missing_path");
       return;
     }
     if (!target.endsWith("/")) target += "/";
     target += filename;
 
     if (_manager->isReadOnlyPath(target)) {
-      sendError(request, 403, FsResult::READ_ONLY);
-      _uploadFailed = true;
+      refuseUpload(request, 403, FsResult::READ_ONLY);
       return;
+    }
+
+    std::unique_ptr<Upload> up(new (std::nothrow) Upload());
+    if (!up) {
+      refuseUpload(request, 503, "no_memory");
+      return;
+    }
+    up->mgr = _manager;
+    up->target = target;
+
+    // Optional integrity validation (opt-in via headers).
+    up->expectedSha256 = toLowerHex(headerValue(request, "X-File-SHA256"));
+    up->expectedCrc32 = toLowerHex(headerValue(request, "X-File-CRC32"));
+    if (up->expectedSha256.length() == 64 || up->expectedCrc32.length() == 8) {
+      up->hashEnabled = true;
+      mbedtls_sha256_init(&up->sha256);
+      COMPAT_SHA256_STARTS(&up->sha256, 0);
+      up->sha256Init = true;
+      up->crc = 0;
     }
 
     // Write to <target>.partial and promote on success (LIB-FIX-007): an
     // interrupted upload (TCP drop, reboot, crash) can only ever leave a
     // *.partial behind - never a truncated file under the real name - and
     // an existing target survives a failed upload untouched. Boot-time
-    // purgeUploadDebris() then only needs to sweep *.partial.
-    FsResult r;
-    _uploadFile = _manager->openWrite(target + ".partial", r);
-    if (!_uploadFile) {
-      sendError(request, httpCodeFor(r), r);
-      _uploadFailed = true;
+    // purgeUploadDebris() then only needs to sweep *.partial. The pump
+    // opens it (sink open) and takes the request's onDisconnect: a client
+    // that goes aborts the sink, which closes the file and keeps the
+    // .partial.
+    if (!_pump.begin(request, uploadSink(up.get()))) {
+      refuseUpload(request, 503, "busy");  // another upload runs
       return;
     }
-    _uploadTarget = target;
+    // The last upload's sink and answer are done with (begin() checked).
+    _upload = std::move(up);
     log_d("[upload] start: %s (.partial)", target.c_str());
-
-    // Optional integrity validation (opt-in via headers).
-    _expectedSha256 = toLowerHex(headerValue(request, "X-File-SHA256"));
-    _expectedCrc32 = toLowerHex(headerValue(request, "X-File-CRC32"));
-    if (_expectedSha256.length() == 64 || _expectedCrc32.length() == 8) {
-      _hashEnabled = true;
-      mbedtls_sha256_init(&_sha256Ctx);
-      COMPAT_SHA256_STARTS(&_sha256Ctx, 0);
-      _sha256CtxInit = true;
-      _crc = 0;
-    }
-
-    // ALWAYS register disconnect cleanup — independent of hash validation —
-    // so any abort (tab-switch, TCP drop, browser close) salvages the file.
-    // Capture target by value so the lambda is correct even if a later upload
-    // overwrites _uploadTarget before this disconnect fires.
-    String capturedTarget = target;
-    request->onDisconnect([this, capturedTarget]() {
-      // Only act if our upload is still the in-flight one. If _uploadTarget
-      // already differs (cleared by successful final, or replaced by a later
-      // upload) we must not touch shared state or re-rename a now-valid file.
-      if (_uploadTarget != capturedTarget) {
-        return;  // happy-path post-success disconnect; stay silent
-      }
-      log_d("[upload] disconnect (interrupted): %s", capturedTarget.c_str());
-
-      if (_uploadFile) _uploadFile.close();
-      if (_sha256CtxInit) {
-        mbedtls_sha256_free(&_sha256Ctx);
-        _sha256CtxInit = false;
-      }
-      _hashEnabled = false;
-      _uploadTarget = "";
-      // The bytes are already in <target>.partial; the target is untouched.
-      log_d("[upload] kept %s.partial", capturedTarget.c_str());
-    });
   }
 
-  if (_uploadFailed) return;
+  Upload* u = _upload.get();
+  if (!u || !_pump.owns(request) || u->sawFinal) return;  // a second file part: dropped
 
-  if (len && _uploadFile) {
-    if (_uploadFile.write(data, len) != len) {
-      _uploadFile.close();
-      _manager->remove(_uploadTarget + ".partial", false);
-      _uploadTarget = "";
-      sendError(request, 500, FsResult::IO_ERROR);
-      _uploadFailed = true;
-      return;
-    }
-    if (_hashEnabled) {
-      if (_sha256CtxInit) COMPAT_SHA256_UPDATE(&_sha256Ctx, data, len);
-      _crc = esp_rom_crc32_le(_crc, data, len);
-    }
+  if (len && u->hashEnabled) {
+    if (u->sha256Init) COMPAT_SHA256_UPDATE(&u->sha256, data, len);
+    u->crc = esp_rom_crc32_le(u->crc, data, len);
   }
 
-  if (final && _uploadFile) {
-    _uploadFile.close();
-
-    if (_hashEnabled) {
-      uint8_t out[32];
-      String actualSha;
-      if (_sha256CtxInit) {
-        COMPAT_SHA256_FINISH(&_sha256Ctx, out);
-        mbedtls_sha256_free(&_sha256Ctx);
-        _sha256CtxInit = false;
-        actualSha = sha256ToHex(out);
+  if (final) {
+    u->sawFinal = true;
+    if (u->hashEnabled) {
+      // Checked here (async_tcp, before the final push): the sink's finish
+      // keeps a mismatch as <target>.corrupt instead of promoting it.
+      if (u->sha256Init) {
+        uint8_t out[32];
+        COMPAT_SHA256_FINISH(&u->sha256, out);
+        mbedtls_sha256_free(&u->sha256);
+        u->sha256Init = false;
+        u->actualSha256 = sha256ToHex(out);
       }
-      String actualCrc = crc32ToHex(_crc);
-
-      bool shaOk = _expectedSha256.length() == 64 ? actualSha == _expectedSha256 : true;
-      bool crcOk = _expectedCrc32.length() == 8 ? actualCrc == _expectedCrc32 : true;
-
-      if (!(shaOk && crcOk)) {
-        // Preserve the corrupt upload for inspection rather than silently deleting.
-        String corruptPath = _uploadTarget + ".corrupt";
-        _manager->remove(corruptPath, false);  // clear any stale .corrupt from prior attempt
-        _manager->rename(_uploadTarget + ".partial", corruptPath);
-
-        DynamicJsonDocument doc(384);
-        doc["ok"] = false;
-        doc["error"] = "hash_mismatch";
-        if (_expectedSha256.length() == 64) {
-          doc["expectedSha256"] = _expectedSha256;
-          doc["actualSha256"] = actualSha;
-        }
-        if (_expectedCrc32.length() == 8) {
-          doc["expectedCrc32"] = _expectedCrc32;
-          doc["actualCrc32"] = actualCrc;
-        }
-        doc["savedAs"] = corruptPath;
-        sendJson(request, 422, doc);
-        _uploadFailed = true;
-        _hashEnabled = false;
-        _uploadTarget = "";
-        return;
-      }
-      _hashEnabled = false;
+      u->actualCrc32 = crc32ToHex(u->crc);
+      const bool shaOk = u->expectedSha256.length() == 64 ? u->actualSha256 == u->expectedSha256 : true;
+      const bool crcOk = u->expectedCrc32.length() == 8 ? u->actualCrc32 == u->expectedCrc32 : true;
+      u->hashOk = shaOk && crcOk;
+      u->hashEnabled = false;
     }
-    // Promote: <target>.partial -> <target>. Remove first: FAT (SD) refuses
-    // a rename onto an existing file.
-    const String partial = _uploadTarget + ".partial";
-    _manager->remove(_uploadTarget, false);
-    FsResult pr = _manager->rename(partial, _uploadTarget);
-    if (pr != FsResult::OK) {
-      log_e("[upload] promote %s failed: %s", _uploadTarget.c_str(),
-            FileSystemManager::resultString(pr));
-      sendError(request, httpCodeFor(pr), pr);
-      _uploadFailed = true;
-    }
-    _uploadTarget = "";
   }
+  // The pump keeps what it can't write now; a failure is answered in
+  // handleUploadDone.
+  (void)_pump.push(request, data, len, final);
 }
 
 void FileSystemService::handleUploadDone(AsyncWebServerRequest* request) {
-  if (_uploadFailed) {
-    _uploadFailed = false;
-    return;  // error already responded
+  if (request->_tempObject) return;  // error already responded
+  Upload* u = _upload.get();
+  if (u && _pump.owns(request) && !u->sawFinal) {
+    // Safety net: the multipart parser handed us back without ever calling
+    // handleUpload with final=true. Close the file, keep the .partial and
+    // answer 500 "incomplete_upload" (the sink's finish sees incomplete).
+    log_i("[upload] done-without-final, salvaging: %s", u->target.c_str());
+    u->incomplete = true;
+    u->sawFinal = true;
+    (void)_pump.push(request, nullptr, 0, true);
   }
-  // Safety net: if the multipart parser handed us back without ever calling
-  // handleUpload with final=true, _uploadTarget will still be set. Salvage.
-  if (_uploadTarget.length() > 0) {
-    log_i("[upload] done-without-final, salvaging: %s", _uploadTarget.c_str());
-    if (_uploadFile) _uploadFile.close();
-    if (_sha256CtxInit) {
-      mbedtls_sha256_free(&_sha256Ctx);
-      _sha256CtxInit = false;
-    }
-    _hashEnabled = false;
-    log_d("[upload] incomplete, kept %s.partial", _uploadTarget.c_str());
-    _uploadTarget = "";
-    sendError(request, 500, "incomplete_upload");
+  // The pump answers once the file is in place (at once while the gate is
+  // free, else from its poll when the FlashWriter task is done with it).
+  if (u && _pump.finish(request, [u](AsyncWebServerRequest* req, ESPRack::UploadResult r) {
+        return uploadResponse(req, *u, r);
+      })) {
     return;
   }
+  // No file part in the request: nothing written, as before.
   DynamicJsonDocument doc(64);
   doc["ok"] = true;
   sendJson(request, 200, doc);
+}
+
+namespace {
+
+constexpr size_t kUploadFileBuf = 256;  // stdio buffer: the ring's steps are whole 4 KB, chunks 1.4 KB
+
+AsyncWebServerResponse* jsonResponse(AsyncWebServerRequest* request, int code, const JsonDocument& doc) {
+  String body;
+  serializeJson(doc, body);
+  return request->beginResponse(code, "application/json", body);
+}
+
+AsyncWebServerResponse* errorResponse(AsyncWebServerRequest* request, int code, const char* msg) {
+  DynamicJsonDocument doc(128);
+  doc["ok"] = false;
+  doc["error"] = msg;
+  return jsonResponse(request, code, doc);
+}
+
+}  // namespace
+
+ESPRack::UploadSink FileSystemService::uploadSink(Upload* u) {
+  // Each call is one bounded flash operation, in a gate slot (the
+  // FlashWriter task) or a pass (async_tcp while the gate is free).
+  ESPRack::UploadSink s;
+  s.open = [u]() {
+    FsResult r;
+    u->file = u->mgr->openWrite(String(u->target + ".partial"), r);
+    if (!u->file) {
+      u->err = r;
+      return false;
+    }
+    u->file.setBufferSize(kUploadFileBuf);  // before the first write: not the 4 KB default
+    return true;
+  };
+  s.write = [u](const uint8_t* data, size_t len) {
+    if (u->file.write(data, len) == len) return true;
+    u->err = FsResult::IO_ERROR;
+    u->ioFailed = true;
+    u->file.close();  // the abort removes the .partial
+    return false;
+  };
+  s.finish = [u]() -> int {
+    const String partial = u->target + ".partial";
+    switch (u->step++) {
+      case 0:
+        u->file.close();
+        if (u->incomplete) {
+          log_d("[upload] incomplete, kept %s", partial.c_str());
+          return ESPRack::UploadSink::kFailed;
+        }
+        return ESPRack::UploadSink::kMore;
+      case 1:
+        // Promote: <target>.partial -> <target>. Remove first: FAT (SD)
+        // refuses a rename onto an existing file. A hash mismatch clears
+        // any stale .corrupt from a prior attempt instead.
+        (void)u->mgr->remove(u->hashOk ? u->target : String(u->target + ".corrupt"), false);
+        return ESPRack::UploadSink::kMore;
+      default: {
+        if (!u->hashOk) {
+          // Preserve the corrupt upload for inspection rather than silently deleting.
+          (void)u->mgr->rename(partial, String(u->target + ".corrupt"));
+          return ESPRack::UploadSink::kFailed;
+        }
+        const FsResult pr = u->mgr->rename(partial, u->target);
+        if (pr != FsResult::OK) {
+          log_e("[upload] promote %s failed: %s", u->target.c_str(), FileSystemManager::resultString(pr));
+          u->err = pr;
+          return ESPRack::UploadSink::kFailed;
+        }
+        return ESPRack::UploadSink::kDone;
+      }
+    }
+  };
+  s.abort = [u]() {
+    // A client that went (or the upload stalled): the bytes stay in
+    // <target>.partial, the target is untouched. A failed write: removed.
+    if (u->file) {
+      u->file.close();
+      log_d("[upload] interrupted, kept %s.partial", u->target.c_str());
+    } else if (u->ioFailed) {
+      (void)u->mgr->remove(String(u->target + ".partial"), false);
+      u->ioFailed = false;
+    }
+  };
+  return s;
+}
+
+AsyncWebServerResponse* FileSystemService::uploadResponse(AsyncWebServerRequest* request, const Upload& u,
+                                                          ESPRack::UploadResult r) {
+  using ESPRack::UploadResult;
+  switch (r) {
+    case UploadResult::Ok: {
+      DynamicJsonDocument doc(64);
+      doc["ok"] = true;
+      return jsonResponse(request, 200, doc);
+    }
+    case UploadResult::SinkFailed:
+      if (u.err != FsResult::OK) {
+        return errorResponse(request, httpCodeFor(u.err), FileSystemManager::resultString(u.err));
+      }
+      if (u.incomplete) return errorResponse(request, 500, "incomplete_upload");
+      if (!u.hashOk) {
+        DynamicJsonDocument doc(384);
+        doc["ok"] = false;
+        doc["error"] = "hash_mismatch";
+        if (u.expectedSha256.length() == 64) {
+          doc["expectedSha256"] = u.expectedSha256;
+          doc["actualSha256"] = u.actualSha256;
+        }
+        if (u.expectedCrc32.length() == 8) {
+          doc["expectedCrc32"] = u.expectedCrc32;
+          doc["actualCrc32"] = u.actualCrc32;
+        }
+        const String savedAs = u.target + ".corrupt";
+        doc["savedAs"] = savedAs;
+        return jsonResponse(request, 422, doc);
+      }
+      return errorResponse(request, 500, FileSystemManager::resultString(FsResult::IO_ERROR));
+    case UploadResult::NoMemory:
+      return errorResponse(request, 503, "no_memory");
+    case UploadResult::NoWriter:
+      return errorResponse(request, 503, "writes_held");
+    case UploadResult::Overflow:
+      return errorResponse(request, 500, "upload_overflow");
+    case UploadResult::Stalled:
+      return errorResponse(request, 500, "upload_stalled");
+    case UploadResult::Aborted:
+      break;
+  }
+  return errorResponse(request, 500, "upload_aborted");
+}
+
+void FileSystemService::refuseUpload(AsyncWebServerRequest* request, int code, const char* msg) {
+  sendError(request, code, msg);
+  // The mark (freed with the request): the rest of the body and the done
+  // handler leave this request alone.
+  if (!request->_tempObject) request->_tempObject = malloc(1);
+}
+
+void FileSystemService::refuseUpload(AsyncWebServerRequest* request, int code, FsResult res) {
+  refuseUpload(request, code, FileSystemManager::resultString(res));
 }
 
 // --------- POST /mkdir ----------
@@ -606,11 +688,9 @@ void FileSystemService::handleMkdir(AsyncWebServerRequest* request, JsonVariant&
   if (!json.is<JsonObject>()) { sendError(request, 400, "invalid_body"); return; }
   JsonObject o = json.as<JsonObject>();
   if (!o.containsKey("path")) { sendError(request, 400, "missing_path"); return; }
-  FsResult r = _manager->mkdir(o["path"].as<const char*>());
-  if (r != FsResult::OK) { sendError(request, httpCodeFor(r), r); return; }
-  DynamicJsonDocument doc(32);
-  doc["ok"] = true;
-  sendJson(request, 200, doc);
+  uint32_t op = 0;
+  FsResult r = _manager->mkdirGated(o["path"].as<const char*>(), &op);
+  sendWriteResult(request, r, op);
 }
 
 // --------- POST /delete ----------
@@ -619,11 +699,9 @@ void FileSystemService::handleDelete(AsyncWebServerRequest* request, JsonVariant
   JsonObject o = json.as<JsonObject>();
   if (!o.containsKey("path")) { sendError(request, 400, "missing_path"); return; }
   bool recursive = o["recursive"] | false;
-  FsResult r = _manager->remove(o["path"].as<const char*>(), recursive);
-  if (r != FsResult::OK) { sendError(request, httpCodeFor(r), r); return; }
-  DynamicJsonDocument doc(32);
-  doc["ok"] = true;
-  sendJson(request, 200, doc);
+  uint32_t op = 0;
+  FsResult r = _manager->removeGated(o["path"].as<const char*>(), recursive, &op);
+  sendWriteResult(request, r, op);
 }
 
 // --------- POST /rename ----------
@@ -634,11 +712,62 @@ void FileSystemService::handleRename(AsyncWebServerRequest* request, JsonVariant
     sendError(request, 400, "missing_from_or_to");
     return;
   }
-  FsResult r = _manager->rename(o["from"].as<const char*>(), o["to"].as<const char*>());
+  uint32_t op = 0;
+  FsResult r = _manager->renameGated(o["from"].as<const char*>(), o["to"].as<const char*>(), &op);
+  sendWriteResult(request, r, op);
+}
+
+// mkdir / delete / rename through the flash write gate: 200 when done at
+// once (as without the gate), 202 {status:"queued", op} when the
+// FlashWriter task does it later (poll GET /write/status?op=N), else the
+// error (503 "busy": no room to keep it now).
+void FileSystemService::sendWriteResult(AsyncWebServerRequest* request, FsResult r, uint32_t op) {
+  if (r == FsResult::QUEUED) {
+    DynamicJsonDocument doc(96);
+    doc["ok"] = true;
+    doc["status"] = "queued";
+    doc["op"] = op;
+    sendJson(request, 202, doc);
+    return;
+  }
   if (r != FsResult::OK) { sendError(request, httpCodeFor(r), r); return; }
   DynamicJsonDocument doc(32);
   doc["ok"] = true;
   sendJson(request, 200, doc);
+}
+
+// --------- GET /write/status?op=N ----------
+// A write the gate put off: queued, running, done or error (with why).
+void FileSystemService::handleWriteStatus(AsyncWebServerRequest* request) {
+  if (!request->hasParam("op")) { sendError(request, 400, "missing_op"); return; }
+  const uint32_t id = (uint32_t)strtoul(request->getParam("op")->value().c_str(), nullptr, 10);
+  FileSystemManager::WriteQueue::Status st;
+  if (!_manager->writeStatus(id, st)) { sendError(request, 404, "op_not_found"); return; }
+  using S = FileSystemManager::WriteQueue::State;
+  using K = FileSystemManager::WriteQueue::Kind;
+  sendAdaptiveJson(request, [&st](JsonObject& root) {
+    const char* state = "queued";
+    switch (st.state) {
+      case S::Now:
+      case S::Running: state = "running"; break;
+      case S::Done: state = "done"; break;
+      case S::Failed: state = "error"; break;
+      default: break;
+    }
+    const char* kind = "mkdir";
+    switch (st.kind) {
+      case K::Mkdir: kind = "mkdir"; break;
+      case K::Remove:
+      case K::RemoveTree: kind = "delete"; break;
+      case K::Rename: kind = "rename"; break;
+    }
+    root["op"] = st.id;
+    root["kind"] = kind;
+    root["state"] = state;
+    root["steps"] = st.steps;
+    root["path"] = st.path;
+    if (st.state == S::Failed) root["error"] = FileSystemManager::resultString(st.result);
+  }, 512);
 }
 
 // --------- POST /format ----------

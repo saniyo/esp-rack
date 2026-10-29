@@ -70,6 +70,16 @@ class OTASettings {
 
 class WebManager;
 
+// ArduinoOTA (espota / PlatformIO network upload) and the flash write gate
+// (power/WriteGate.h): ArduinoOTA writes the image through Arduino's
+// Update, which erases a whole 64 KB block at every 64 KB boundary (the
+// CPU caches are off for ~0.15-1 s each time) and blocks the loop task for
+// the whole transfer. That can't wait for the gate's pauses, so it does
+// NOT go through the gate: on a device where a module holds write windows
+// (WriteGate::holders() > 0) an ArduinoOTA upload can land in them. The
+// page says so and the start is logged as a warning; the upload page and
+// auto-update go through the gate (ESPRack::OtaWriter). Use those on such
+// a device, or switch ArduinoOTA off there.
 class OTASettingsService : public StatefulService<OTASettings> {
  public:
   // OTA is fully mDNS-free: ArduinoOTA's own responder is disabled and the

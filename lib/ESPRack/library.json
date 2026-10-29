@@ -32,7 +32,7 @@
   "dependencies": [
     {
       "name": "ESP Async WebServer",
-      "version": "^3.6.0"
+      "version": "^3.7.0"
     },
     {
       "name": "AsyncTCP",

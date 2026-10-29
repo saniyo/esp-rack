@@ -11,6 +11,7 @@ class FileSystemFlash : public FileSystemBackend {
   const char* name() const override { return "flash"; }
 
   bool isMounted() const override { return _mounted; }
+  bool onCodeFlash() const override { return true; }
 
   bool mount() override {
     if (_mounted) return true;

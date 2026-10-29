@@ -21,7 +21,7 @@
 class FileSystemModule : public ESPRack::Module {
  public:
   void describe(ESPRack::ModuleDescriptor& d) override {
-    d.id = "filesystem"; d.version = "1.0.1"; d.priority = 20;
+    d.id = "filesystem"; d.version = "1.1.0"; d.priority = 20;
   }
   void onInstall(ESPRack::ModuleContext& ctx) override {
     reserveSdPins(ctx.app ? ctx.app->hw() : nullptr);

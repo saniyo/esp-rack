@@ -27,7 +27,10 @@ UploadFirmwareService::UploadFirmwareService(AsyncWebServer* server, SecurityMan
   // server->on; now lives in registerManifest below as a normal
   // WebEndpointMeta entry under the "uploadFirmware" page so it
   // goes through WebManager like every other tab schema.
-#ifdef ESP8266
+#ifdef ESP32
+  // The pump's FlashWriter job (at setup, on the loop task).
+  _pump.attach("fw-upload");
+#elif defined(ESP8266)
   Update.runAsync(true);
 #endif
 }
@@ -92,6 +95,109 @@ void UploadFirmwareService::uploadForm(AsyncWebServerRequest* request) {
     buildForm(root);
   }, 1024);
 }
+
+#ifdef ESP32
+
+namespace {
+
+const char* uploadFailure(ESPRack::UploadResult r) {
+  using ESPRack::UploadResult;
+  switch (r) {
+    case UploadResult::Ok: return "";
+    case UploadResult::SinkFailed: return "image write failed";
+    case UploadResult::Overflow: return "upload buffer overflow";
+    case UploadResult::NoMemory: return "no memory for the upload buffer";
+    case UploadResult::NoWriter: return "flash writes held, no writer task";
+    case UploadResult::Stalled: return "upload stalled";
+    case UploadResult::Aborted: return "upload aborted";
+  }
+  return "upload failed";
+}
+
+}  // namespace
+
+void UploadFirmwareService::handleUpload(AsyncWebServerRequest* request,
+                                         const String& filename,
+                                         size_t index,
+                                         uint8_t* data,
+                                         size_t len,
+                                         bool final) {
+  // refused earlier: already answered, the rest of the body is dropped
+  if (request->_tempObject) return;
+  if (!index && !_pump.owns(request)) {
+    Authentication authentication = _securityManager->authenticateRequest(request);
+    if (!AuthenticationPredicates::IS_ADMIN(authentication)) {
+      handleError(request, 403);
+      return;
+    }
+    // As Update.begin(contentLength) refused it: no slot, or the body
+    // doesn't fit it (the image is a little smaller than the body).
+    const uint32_t slot = ESPRack::OtaWriter::freeSlotSize();
+    const size_t size = request->contentLength();
+    if (!slot || size > slot) {
+      log_e("[upload] firmware: %u B, OTA slot %u B", (unsigned)size, (unsigned)slot);
+      handleError(request, 500);
+      return;
+    }
+    // One image at a time: another upload, auto-update or ArduinoOTA. The
+    // update is the upload's from here (open may wait for a slot); a
+    // failed upload gives it back with the sink's abort. _ota is the last
+    // upload's until its session has settled (its abort may still run).
+    if (_pump.active() || !_ota.reserve("upload")) {
+      handleError(request, 503);
+      return;
+    }
+    if (!_pump.begin(request, _ota.sink("upload", static_cast<uint32_t>(size)))) {
+      _ota.abort();  // nothing begun: the reservation only
+      handleError(request, 503);
+      return;
+    }
+  }
+  // The pump keeps what it can't write now; a failure is answered in
+  // uploadComplete. Not its request (a second file part after the first
+  // one ended): dropped.
+  (void)_pump.push(request, data, len, final);
+}
+
+void UploadFirmwareService::uploadComplete(AsyncWebServerRequest* request) {
+  // handleUpload already answered with its error
+  if (request->_tempObject) return;
+  // The pump answers once the image is written, checked and set to boot
+  // (at once, or from its poll while the gate holds writes); the device
+  // restarts once that client has gone.
+  const bool mine = _pump.finish(
+      request,
+      [this](AsyncWebServerRequest* req, ESPRack::UploadResult r) -> AsyncWebServerResponse* {
+        if (r == ESPRack::UploadResult::Ok) return req->beginResponse(200);
+        const char* why = r == ESPRack::UploadResult::SinkFailed && _ota.error() ? _ota.errorString()
+                                                                                 : uploadFailure(r);
+        log_e("[upload] firmware: %s", why);
+        return req->beginResponse(500, "text/plain", why);
+      },
+      [](ESPRack::UploadResult r) {
+        if (r == ESPRack::UploadResult::Ok) ESPRack::restartDevice(ESPRack::kRestartUpload);
+      });
+  if (mine) return;
+  // Only a finished, authorised upload restarts the device. A POST without a
+  // file part never reaches handleUpload, so it is refused here: 403 for a
+  // caller who may not upload, 400 for an admin who sent no firmware.
+  Authentication authentication = _securityManager->authenticateRequest(request);
+  handleError(request, AuthenticationPredicates::IS_ADMIN(authentication) ? 400 : 403);
+}
+
+void UploadFirmwareService::handleError(AsyncWebServerRequest* request, int code) {
+  // if we have had an error already, do nothing
+  if (request->_tempObject) {
+    return;
+  }
+  // send the error code to the client and record the error code in the temp
+  // object (FirmwareUpdate is the OtaWriter's: this request began nothing)
+  request->_tempObject = new int(code);
+  AsyncWebServerResponse* response = request->beginResponse(code);
+  request->send(response);
+}
+
+#else  // ESP8266: Arduino Update, as before
 
 void UploadFirmwareService::handleUpload(AsyncWebServerRequest* request,
                                          const String& filename,
@@ -168,8 +274,7 @@ void UploadFirmwareService::handleError(AsyncWebServerRequest* request, int code
 }
 
 void UploadFirmwareService::handleEarlyDisconnect() {
-#ifdef ESP32
-  Update.abort();
-#endif
   ESPRack::FirmwareUpdate::end();
 }
+
+#endif  // ESP32

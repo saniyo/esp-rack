@@ -10,7 +10,7 @@
 
 #ifdef ESP32
 #include <WiFi.h>
-#include <HTTPUpdate.h>
+#include <HTTPUpdate.h>  // t_httpUpdate_return, HTTP_UE_* (the image goes through ESPRack::OtaWriter)
 #elif defined(ESP8266)
 #include <ESP8266WiFi.h>
 #include <ESP8266httpUpdate.h>
@@ -37,6 +37,17 @@ class WebManager;
 
 #ifndef FALLBACK_UPDATE_CHECK_TIMEOUT_MS
 #define FALLBACK_UPDATE_CHECK_TIMEOUT_MS 5000UL
+#endif
+
+// The image download: HTTP read timeout (as Arduino's httpUpdate had), and
+// how long past updateTimeoutSec the loop waits for the update task to stop
+// by itself (it checks the deadline between 4 KB steps) before it deletes
+// it and restarts.
+#ifndef AUTO_UPDATE_HTTP_TIMEOUT_MS
+#define AUTO_UPDATE_HTTP_TIMEOUT_MS 8000
+#endif
+#ifndef AUTO_UPDATE_KILL_GRACE_MS
+#define AUTO_UPDATE_KILL_GRACE_MS 30000UL
 #endif
 
 // =========================================================
@@ -207,6 +218,17 @@ class AutoUpdateService : public StatefulService<AutoUpdateSettings> {
 
   // actual OTA update call
   t_httpUpdate_return performUpdate(const String& url);
+#ifdef ESP32
+  // The download on the update task: HTTP GET (the headers httpUpdate
+  // sent, redirects followed, 204/304 = no update, x-MD5 checked), then
+  // the image through ESPRack::OtaWriter, each 4 KB step in a WriteSlot.
+  t_httpUpdate_return downloadImage(const String& url);
+  t_httpUpdate_return otaFailed(int err, const String& msg);
+  bool otaPastDeadline() const;
+  int _otaErr = 0;          // the last failure: an HTTPClient / HTTP_UE_* code, or an esp_err_t
+  String _otaErrStr;
+  bool _otaTimedOut = false;
+#endif
 
   // handle OTA result (shared by primary/fallback)
   void handleOtaResult(t_httpUpdate_return ret, const char* server);

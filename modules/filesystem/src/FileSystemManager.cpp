@@ -1,6 +1,57 @@
 #include "FileSystemManager.h"
 
-FileSystemManager::FileSystemManager() {}
+#include <power/FlashWriter.h>
+
+// ---- FsWriteIo ----
+
+FsWriteIo::FsWriteIo() : _mx(xSemaphoreCreateMutex()) {}
+
+bool FsWriteIo::lock(uint32_t ms) { return _mx && xSemaphoreTake(_mx, pdMS_TO_TICKS(ms)) == pdTRUE; }
+
+void FsWriteIo::unlock() { xSemaphoreGive(_mx); }
+
+void FsWriteIo::kick() { ESPRack::FlashWriter::kick(_job); }
+
+int8_t FsWriteIo::kind(Vol fs, const String& path) {
+  File f = fs->open(path);
+  if (!f) return -1;
+  const bool dir = f.isDirectory();
+  f.close();
+  return dir ? 1 : 0;
+}
+
+// Its full path; getNextFileName opens no File per entry.
+bool FsWriteIo::firstChild(Vol fs, const String& dir, String& child, bool& isDir) {
+  File d = fs->open(dir);
+  if (!d) return false;
+  if (!d.isDirectory()) {
+    d.close();
+    return false;
+  }
+  bool found = false;
+  for (;;) {
+    bool isD = false;
+    String n = d.getNextFileName(&isD);
+    if (!n.length()) break;
+    if (n.endsWith("/.") || n.endsWith("/..")) continue;
+    child = n;
+    isDir = isD;
+    found = true;
+    break;
+  }
+  d.close();
+  return found;
+}
+
+// ---- FileSystemManager ----
+
+FileSystemManager::FileSystemManager() {
+  // At setup (the loop task): the FlashWriter job for the writes the gate
+  // puts off. Without one they are refused while the gate is not free.
+  const int8_t job = ESPRack::FlashWriter::add("fs", [this] { return _writes.run(); });
+  if (job < 0) log_e("[fs] no FlashWriter job left: writes the gate puts off are refused");
+  _io.setJob(job);
+}
 
 void FileSystemManager::addBackend(std::unique_ptr<FileSystemBackend> backend) {
   if (!backend) return;
@@ -58,6 +109,8 @@ const char* FileSystemManager::resultString(FsResult r) {
     case FsResult::INVALID_PATH: return "invalid_path";
     case FsResult::IO_ERROR: return "io_error";
     case FsResult::EXISTS: return "exists";
+    case FsResult::QUEUED: return "queued";
+    case FsResult::BUSY: return "busy";
   }
   return "unknown";
 }
@@ -126,32 +179,6 @@ FsResult FileSystemManager::mkdir(const String& absPath) {
   return fs->mkdir(rel) ? FsResult::OK : FsResult::IO_ERROR;
 }
 
-bool FileSystemManager::removeRecursive(fs::FS& fs, const String& path) {
-  File f = fs.open(path);
-  if (!f) return false;
-  bool isDir = f.isDirectory();
-  if (!isDir) {
-    f.close();
-    return fs.remove(path);
-  }
-  File child = f.openNextFile();
-  while (child) {
-    String n = child.name();
-    // normalize: ensure absolute
-    String childPath = n.startsWith("/") ? n : (path.endsWith("/") ? (path + n) : (path + "/" + n));
-    bool childDir = child.isDirectory();
-    child.close();
-    if (childDir) {
-      if (!removeRecursive(fs, childPath)) { f.close(); return false; }
-    } else {
-      if (!fs.remove(childPath)) { f.close(); return false; }
-    }
-    child = f.openNextFile();
-  }
-  f.close();
-  return fs.rmdir(path);
-}
-
 FsResult FileSystemManager::remove(const String& absPath, bool recursive) {
   if (isReadOnlyPath(absPath)) return FsResult::READ_ONLY;
   String rel;
@@ -168,9 +195,7 @@ FsResult FileSystemManager::remove(const String& absPath, bool recursive) {
   f.close();
 
   if (isDir) {
-    if (recursive) {
-      return removeRecursive(*fs, rel) ? FsResult::OK : FsResult::IO_ERROR;
-    }
+    if (recursive) return WriteQueue::removeTree(_io, fs, rel);
     return fs->rmdir(rel) ? FsResult::OK : FsResult::IO_ERROR;
   }
   return fs->remove(rel) ? FsResult::OK : FsResult::IO_ERROR;
@@ -254,4 +279,57 @@ File FileSystemManager::openWrite(const String& absPath, FsResult& resOut) {
   File f = fs->open(rel, "w");
   resOut = f ? FsResult::OK : FsResult::IO_ERROR;
   return f;
+}
+
+// ---- writes through the flash write gate ----
+
+FsResult FileSystemManager::writable(const String& absPath, fs::FS*& fs, String& rel,
+                                     FileSystemBackend** bOut) const {
+  if (isReadOnlyPath(absPath)) return FsResult::READ_ONLY;
+  FileSystemBackend* b = resolve(absPath, rel);
+  if (!b) return FsResult::INVALID_PATH;
+  if (!b->isMounted()) return FsResult::NOT_MOUNTED;
+  if (b->readOnly()) return FsResult::READ_ONLY;
+  fs = b->fs();
+  if (!fs) return FsResult::NOT_MOUNTED;
+  if (bOut) *bOut = b;
+  return FsResult::OK;
+}
+
+FsResult FileSystemManager::mkdirGated(const String& absPath, uint32_t* op) {
+  if (op) *op = 0;
+  fs::FS* fs = nullptr;
+  String rel;
+  FileSystemBackend* b = nullptr;
+  const FsResult r = writable(absPath, fs, rel, &b);
+  if (r != FsResult::OK) return r;
+  if (!b->onCodeFlash()) return mkdir(absPath);
+  return _writes.submit(WriteQueue::Kind::Mkdir, fs, rel, String(), op);
+}
+
+FsResult FileSystemManager::removeGated(const String& absPath, bool recursive, uint32_t* op) {
+  if (op) *op = 0;
+  fs::FS* fs = nullptr;
+  String rel;
+  FileSystemBackend* b = nullptr;
+  const FsResult r = writable(absPath, fs, rel, &b);
+  if (r != FsResult::OK) return r;
+  if (!b->onCodeFlash()) return remove(absPath, recursive);
+  return _writes.submit(recursive ? WriteQueue::Kind::RemoveTree : WriteQueue::Kind::Remove, fs, rel, String(), op);
+}
+
+FsResult FileSystemManager::renameGated(const String& fromAbs, const String& toAbs, uint32_t* op) {
+  if (op) *op = 0;
+  if (isReadOnlyPath(fromAbs) || isReadOnlyPath(toAbs)) return FsResult::READ_ONLY;
+  String fromRel, toRel;
+  FileSystemBackend* bf = resolve(fromAbs, fromRel);
+  FileSystemBackend* bt = resolve(toAbs, toRel);
+  if (!bf || !bt) return FsResult::INVALID_PATH;
+  if (bf != bt) return FsResult::INVALID_PATH;  // cross-volume rename not supported
+  if (!bf->isMounted()) return FsResult::NOT_MOUNTED;
+  if (bf->readOnly()) return FsResult::READ_ONLY;
+  fs::FS* fs = bf->fs();
+  if (!fs) return FsResult::NOT_MOUNTED;
+  if (!bf->onCodeFlash()) return rename(fromAbs, toAbs);
+  return _writes.submit(WriteQueue::Kind::Rename, fs, fromRel, toRel, op);
 }

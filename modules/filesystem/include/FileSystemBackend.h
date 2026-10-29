@@ -19,6 +19,9 @@ class FileSystemBackend {
   virtual void unmount() = 0;
 
   virtual bool readOnly() const { return false; }
+  // Writes here stop the CPU caches (the chip's own flash): they go through
+  // the flash write gate (power/WriteGate.h). An SD card does not.
+  virtual bool onCodeFlash() const { return false; }
   virtual bool canFormat() const { return false; }
   virtual bool format() { return false; }
 

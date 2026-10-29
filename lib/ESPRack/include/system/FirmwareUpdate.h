@@ -8,10 +8,14 @@
 //
 //   if (!ESPRack::FirmwareUpdate::active()) ESPRack::restartDevice("watchdog: ...");
 //
-// The writers report it: the upload page, ArduinoOTA and auto-update do;
-// a consumer that writes an image itself calls begin() / progress() / end().
+// The writers report it: OtaWriter (system/OtaWriter.h) does for its users
+// (auto-update, the upload page), ArduinoOTA too; a consumer that writes an
+// image some other way calls begin() / progress() / end().
 // active() also lapses when no progress came for ESPRACK_FW_UPDATE_STALL_MS:
 // a client that vanished without an abort never blocks a restart for good.
+// One image at a time: a writer that must not overlap another one takes
+// the update with tryBegin() (false: another writer is active) and gives
+// it back with end().
 // Any task.
 
 #include <stdint.h>
@@ -24,6 +28,7 @@ namespace ESPRack {
 namespace FirmwareUpdate {
 
 void begin(const char* source);  // "upload", "ota", "auto-update", ...: a static string
+bool tryBegin(const char* source);  // begin() unless another writer is active()
 void progress();                 // each chunk written
 void end();                      // finished or failed; harmless when not begun
 bool active();                   // begun, not ended, progress within the stall time
