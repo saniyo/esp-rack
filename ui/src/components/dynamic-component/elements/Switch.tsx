@@ -1,8 +1,14 @@
 // Switch.tsx
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useCallback, useEffect, useState, useRef } from 'react';
 import { Switch as MuiSwitch, FormControlLabel, ListItem, Tooltip } from '@mui/material';
 import { Field } from '../types';
 import { useFieldParser } from '../utils/useFieldParser';
+
+// After a click the clicked value is held this long (a live frame from before
+// the save must not flip it back), then the device's value shows again: a save
+// that failed or was refused doesn't leave the clicked value up (a phone has
+// no mouse-leave to end the hold).
+const HOLD_MS = 2000;
 
 interface SwitchProps {
   field: Field;
@@ -17,6 +23,9 @@ const Switch: React.FC<SwitchProps> = ({ field, value, onChange, onBlur }) => {
 
   const [localValue, setLocalValue] = useState<boolean>(Boolean(value));
   const isInteracting = useRef(false);
+  const latest = useRef(value);
+  latest.current = value;
+  const holdTimer = useRef<number | undefined>(undefined);
 
   useEffect(() => {
     if (!isInteracting.current) {
@@ -24,21 +33,26 @@ const Switch: React.FC<SwitchProps> = ({ field, value, onChange, onBlur }) => {
     }
   }, [value]);
 
+  const release = useCallback(() => {
+    window.clearTimeout(holdTimer.current);
+    isInteracting.current = false;
+    setLocalValue(Boolean(latest.current));
+  }, []);
+  useEffect(() => () => window.clearTimeout(holdTimer.current), []);
+
   const handleClick = () => {
     if (isReadOnly) return;
     const newChecked = !localValue;
     setLocalValue(newChecked);
     isInteracting.current = true;
+    window.clearTimeout(holdTimer.current);
+    holdTimer.current = window.setTimeout(release, HOLD_MS);
     onChange(field.label, newChecked); // тільки boolean
     onBlur(field.label, newChecked);   // тільки boolean
   };
 
-  const handleMouseLeave = () => {
-    isInteracting.current = false;
-  };
-
   return (
-    <ListItem onMouseLeave={handleMouseLeave}>
+    <ListItem>
       <Tooltip title={isReadOnly ? 'Read-only field' : 'Click to toggle value'}>
         <FormControlLabel
           control={
