@@ -52,18 +52,34 @@ bool parseName(const char* name, uint32_t& key, uint32_t& hash) {
   return key != 0;
 }
 
+// Internal RAM per open file. The Arduino FS gives every file a 4 KB stdio
+// buffer in the internal heap (at the PSRAM threshold), so each segment we
+// open grabs 4 KB for a moment. The small ones that land in its hole while
+// it is held fragment the heap. Records are small, and a chunk bigger than
+// the buffer is written straight through.
+constexpr size_t kIoBuf = 256;     // headers, single records, appends
+constexpr size_t kReadBuf = 1024;  // sequential reads for a query
+
+File openFile(fs::FS& fs, const char* path, const char* mode, size_t buf = kIoBuf) {
+  File f = fs.open(path, mode);
+  if (f) f.setBufferSize(buf);  // before the first read or write: the buffer comes then
+  return f;
+}
+
 // The .seg files of a directory, sorted by name (the key comes first and has
-// a fixed length per tier, so name order is time order).
+// a fixed length per tier, so name order is time order). Names only: no
+// entry is opened (openNextFile would open each one, with its buffer).
 std::vector<String> segments(fs::FS& fs, const char* dir) {
   std::vector<String> out;
   File d = fs.open(dir);
   if (!d || !d.isDirectory()) return out;
-  for (File f = d.openNextFile(); f; f = d.openNextFile()) {
-    const char* n = f.name();
-    const char* base = strrchr(n, '/');
-    base = base ? base + 1 : n;
+  bool isDir = false;
+  for (String n = d.getNextFileName(&isDir); n.length(); n = d.getNextFileName(&isDir)) {
+    if (isDir) continue;
+    const char* base = strrchr(n.c_str(), '/');
+    base = base ? base + 1 : n.c_str();
     uint32_t k, h;
-    if (!f.isDirectory() && parseName(base, k, h)) out.push_back(String(base));
+    if (parseName(base, k, h)) out.push_back(String(base));
   }
   std::sort(out.begin(), out.end(), [](const String& a, const String& b) { return a < b; });
   return out;
@@ -310,7 +326,7 @@ bool Series::scanTier(fs::FS& fs, uint8_t tier, const Step& step) {
   for (size_t i = 0; i < names.size(); ++i) {
     char path[80];
     snprintf(path, sizeof path, "%s/%s", dir, names[i].c_str());
-    File f = fs.open(path, "r");
+    File f = openFile(fs, path, "r");
     if (!f) continue;
     hist::SegHeader h;
     const size_t size = f.size();
@@ -331,7 +347,7 @@ bool Series::scanTier(fs::FS& fs, uint8_t tier, const Step& step) {
       if (torn) {
         char tmp[84];
         snprintf(tmp, sizeof tmp, "%s.tmp", path);
-        File o = fs.open(tmp, "w");
+        File o = openFile(fs, tmp, "w");
         bool ok = !!o;
         uint8_t hb[hist::kSegHeaderLen];
         hist::encodeHeader(h, hb);
@@ -350,7 +366,7 @@ bool Series::scanTier(fs::FS& fs, uint8_t tier, const Step& step) {
         }
         step.done();
         n = good;
-        f = fs.open(path, "r");
+        f = openFile(fs, path, "r");
         if (!f) continue;
       }
       uint32_t t2;
@@ -450,10 +466,13 @@ size_t Series::flush(fs::FS& fs, uint8_t* scratch, size_t scratchLen, size_t bud
           from += rs;
         }
         if (from < end) {
-          mkdirs(fs, id_, dir);
+          if (!dirMade_[k]) {  // once per tier, not on every flush
+            mkdirs(fs, id_, dir);
+            dirMade_[k] = true;
+          }
           char path[80];
           snprintf(path, sizeof path, "%s/%lu-%08lx.seg", dir, (unsigned long)key, (unsigned long)z.lay.schemaHash);
-          File f = fs.open(path, "a");
+          File f = openFile(fs, path, "a");
           ok = !!f;
           if (ok && f.size() == 0) {
             hist::SegHeader h;
@@ -529,7 +548,7 @@ void Series::retention(fs::FS& fs, uint32_t now, uint32_t maxBytes, const Step& 
     for (size_t i = 0; i < names.size(); ++i) {
       char path[80];
       snprintf(path, sizeof path, "%s/%s", dir, names[i].c_str());
-      File f = fs.open(path, "r");
+      File f = openFile(fs, path, "r");
       hist::SegHeader h;
       info[i] = {0, 0};
       if (!f) continue;
@@ -588,6 +607,7 @@ bool Series::erase(fs::FS& fs, const Step& step) {
       fs.rmdir(dir);
       step.done();
     }
+    dirMade_[k] = false;
   }
   char p[48];
   snprintf(p, sizeof p, "/hist/%s", id_);
@@ -622,7 +642,7 @@ void Series::read(fs::FS& fs, uint8_t tier, uint32_t from, uint32_t to, double* 
     if (!parseName(n.c_str(), key, hash) || hash != z.lay.schemaHash || key < kFrom || key > kTo) continue;
     char path[80];
     snprintf(path, sizeof path, "%s/%s", dir, n.c_str());
-    File f = fs.open(path, "r");
+    File f = openFile(fs, path, "r", kReadBuf);
     hist::SegHeader h;
     if (!f || !readHeader(f, h) || h.recSize != rs) continue;
     while (f.read(rec, rs) == rs) {

@@ -126,6 +126,7 @@ class Series : public IHistorySeries {
   bool mounted_ = false;
   bool erasing_ = false;     // an erase is under way (hist task only)
   uint8_t flushFrom_ = 0;    // the tier a budgeted flush() serves first (they take turns)
+  bool dirMade_[hist::kMaxTiers] = {};  // a tier's directory exists (mkdirs once, not per flush)
   bool psram_ = false;
   uint32_t full_ = 0, stale_ = 0;
   uint32_t ramBytes_ = 0;
