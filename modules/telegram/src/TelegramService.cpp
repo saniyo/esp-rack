@@ -501,7 +501,11 @@ bool TelegramService::sendDirect(const String& token,
   // Connect with explicit 5s wall clock. Without this overload Arduino
   // uses its global socket timeout which on ESP-IDF 5 is effectively
   // unbounded for some lwIP configurations.
-  if (!_cli.connect(host, port, 5000)) return false;
+  _sendErr = "";
+  if (!_cli.connect(host, port, 5000)) {
+    _sendErr = "no connection to api.telegram.org";
+    return false;
+  }
 
   StaticJsonDocument<1024> body;
   body["chat_id"] = chatId;
@@ -527,6 +531,7 @@ bool TelegramService::sendDirect(const String& token,
 
   String statusLine = _cli.readStringUntil('\n');
   bool ok = statusLine.indexOf(" 200 ") >= 0;
+  String errBody;  // a refusal's JSON: its "description" says why
 
   // Drain the rest with a wall clock — readStringUntil could leave
   // bytes in the buffer; without a bounded loop we'd spin until the
@@ -536,7 +541,8 @@ bool TelegramService::sendDirect(const String& token,
   uint32_t drainStart = millis();
   while ((_cli.connected() || _cli.available()) && (millis() - drainStart < 2000)) {
     if (_cli.available()) {
-      (void)_cli.read();
+      const int ch = _cli.read();
+      if (!ok && ch > 0 && errBody.length() < 400) errBody += (char)ch;
       continue;
     }
     // Nothing buffered: wait in select() for the socket (more data or the
@@ -555,6 +561,19 @@ bool TelegramService::sendDirect(const String& token,
     if (!_cli.available()) break;  // readable, nothing decoded (closed, or a partial record): done
   }
   _cli.stop();
+  if (!ok) {
+    // "HTTP/1.1 400 Bad Request" -> "400 Bad Request", plus the API's
+    // description ("Bad Request: message thread not found").
+    statusLine.trim();
+    const int sp = statusLine.indexOf(' ');
+    _sendErr = statusLine.length() ? statusLine.substring(sp >= 0 ? sp + 1 : 0) : String("no reply");
+    const int d = errBody.indexOf("\"description\":\"");
+    if (d >= 0) {
+      const int s = d + 15;
+      const int e = errBody.indexOf('"', s);
+      if (e > s) _sendErr += String(": ") + errBody.substring(s, e);
+    }
+  }
   return ok;
 }
 
@@ -701,15 +720,18 @@ void TelegramService::runWorker() {
         // succeed when raw POST struggles with handshake.
         ok = sendViaUtb(token, chat, topic, m->text, pm);
       }
+      // Why it failed (Telegram's answer, e.g. "401 Unauthorized" for a
+      // revoked token), in front of the text in the log and "Last attempt".
+      const String shown = ok || _sendErr.isEmpty() ? m->text : String("[") + _sendErr + "] " + m->text;
       if (!ok && ++m->tries < kSendTries && xQueueSendToFront(_q, &m, 0) == pdTRUE) {
         // Back to the head of the queue, order kept: tried again after a
         // pause, or once the network is back.
-        logLine(false, "retry", m->text);
+        logLine(false, "retry", shown);
         m = nullptr;
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(kRetryPauseMs));  // a settings save ends it early
         continue;
       }
-      logLine(ok, ok ? "ok" : "fail", m->text);
+      logLine(ok, ok ? "ok" : "fail", shown);
       if (ok) _lastSendOkAt_s = (uint32_t)(millis() / 1000);
     }
 

@@ -161,6 +161,7 @@ class TelegramService : public StatefulService<TelegramSettings>,
   uint32_t _cmdIgnored{0}, _cmdDropped{0};
   void pollCommands(const String& token);
   void noteCmd(const String& text);        // _state.cmdStatus, logged once per change
+  String _sendErr;                         // why the last sendDirect failed (TelTask only)
   void publishCommands(const String& token);
   bool postJson(const String& token, const char* method, const String& payload);
 
