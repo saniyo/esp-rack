@@ -402,6 +402,20 @@ class Trend : public FieldSpec<Trend> {
     if (sign < 0) _lines += ",hk=-1";
     return *this;
   }
+  // The area under the last line() (lineChart): posColor above 0, negColor
+  // below, split at 0 (e.g. a signed power: charge / discharge). A colour is
+  // a CSS colour or a theme palette key (primary, info, warning, …).
+  //   .line("p", "#555", "monotone").signedArea("#1e88e5", "#eb6834")
+  Trend& signedArea(const char* posColor, const char* negColor) {
+    if (!_lines.length() || !posColor || !posColor[0] || !negColor || !negColor[0] ||
+        strpbrk(posColor, ",;:=|") || strpbrk(negColor, ",;:=|")) {
+      log_w("[form] %s: signedArea refused", _key);
+      return *this;
+    }
+    _lines += ",ap="; _lines += posColor;
+    _lines += ",an="; _lines += negColor;
+    return *this;
+  }
   // A series: its state key, color, curve type and, optionally, the name the
   // legend and the tooltip show (default: the key). No ',' ';' ':' '=' in name.
   Trend& line(const char* key_, const char* color, const char* type, const char* name = nullptr) {

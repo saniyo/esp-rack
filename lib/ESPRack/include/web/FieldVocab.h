@@ -125,6 +125,8 @@ constexpr const char* Zero          = "y0";           // trend — 0 always on t
 constexpr const char* Height        = "hgt";          // trend — plot height, px (default 400)
 constexpr const char* Overlay       = "ovl";          // trend — "back+front|…": bars drawn over each other
 constexpr const char* TipKey        = "tip";          // trend — a row key whose text the tooltip adds
+//   inside `lines`, per series: h= (history column), hk=-1 (sign), ap= / an=
+//   (signed area: colour above / below 0)
 
 // Progress.
 constexpr const char* MaxKey        = "maxKey";       // progress — max from a sibling key

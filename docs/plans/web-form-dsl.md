@@ -93,6 +93,11 @@ page's REST/WS keys, as `refLine` does.
 - **Tile** — `.tile()` on `Number` / `Text` (`tile=1`), `.subKey(k)` (`sub=k`):
   the label as a caption, a big value + unit, a line from a sibling key;
   `colorMap` colours the value. Read-only; one grid cell, `span` as usual.
+- **Signed area** — `Trend.line(...).signedArea(pos, neg)` (`ap=`/`an=` inside
+  that line's `lines` entry): the area under the line, one colour above 0
+  and another below, a gradient whose stop sits at 0. A lineChart with such
+  a line renders as a recharts ComposedChart; the area stays out of the
+  tooltip and the legend. Colours: CSS or a theme palette key.
 
 ## Migration — incremental (chosen)
 

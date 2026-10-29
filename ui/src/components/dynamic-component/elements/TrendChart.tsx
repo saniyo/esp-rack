@@ -2,6 +2,8 @@ import React, { useEffect, useRef, useState, useMemo, useCallback } from 'react'
 import {
   LineChart,
   Line,
+  ComposedChart,
+  Area,
   BarChart,
   Bar,
   PieChart,
@@ -24,6 +26,7 @@ import {
   Box,
   LinearProgress,
   Typography,
+  useTheme,
 } from '@mui/material';
 import { FieldAvatar } from '../utils/iconRegistry';
 
@@ -33,30 +36,7 @@ import { useDeviceZone } from '../../../utils/useDeviceZone';
 import TrendHistoryBar from './trend/TrendHistoryBar';
 import { HistPeriod } from './trend/historyPlan';
 import { HistoryBinding, parsePeriods, useHistoryData } from './trend/useHistoryData';
-
-/** ****************************
- *  КОНСТАНТИ ТА ТИПИ
- ***************************** */
-type CustomCurveType =
-  | 'linear'
-  | 'monotone'
-  | 'basis'
-  | 'basisClosed'
-  | 'basisOpen'
-  | 'natural'
-  | 'step'
-  | 'stepBefore'
-  | 'stepAfter';
-
-interface LineConfig {
-  dataKey: string;
-  readableLabel: string;
-  color: string;
-  type: CustomCurveType;
-  hidden: boolean;
-  histSpec?: string;  // h=: the history column (default: dataKey)
-  histSign: number;   // hk=-1: drawn below 0, like the live push
-}
+import { areaColor, CustomCurveType, LineConfig, parseLineConfigs, signedAreaOffset } from './trend/lineConfigs';
 
 interface Field {
   label: string;
@@ -98,88 +78,6 @@ const ChartHeader = React.memo(({ readableLabel, secondaryText, iconName }: Char
     <ListItemText primary={readableLabel} secondary={secondaryText} />
   </ListItem>
 ));
-
-/** ************************************************** **
- *        ФУНКЦІЯ ПАРСИНГУ lines=... -> LineConfig[]
- ** ************************************************** **/
-function parseLineConfigs(
-  linesString: string,
-  labelMap: Record<string, string>
-): LineConfig[] {
-  if (!linesString) return [];
-
-  const predefinedColors = [
-    '#8884d8',
-    '#FF0000',
-    '#FF00FF',
-    '#00C49F',
-    '#FFBB28',
-    '#FF8042',
-    '#8A2BE2',
-    '#5F9EA0',
-    '#D2691E',
-    '#FF7F50',
-    '#6495ED',
-    '#DC143C',
-    '#00FFFF',
-    '#00008B',
-    '#008B8B',
-    '#B8860B',
-    '#A9A9A9',
-    '#006400',
-    '#BDB76B',
-    '#8B008B',
-    '#556B2F',
-  ];
-  const getColor = (idx: number) => predefinedColors[idx % predefinedColors.length];
-
-  // lines=key19:color=#123456,type=step;key20:color=#abc123,hidden=true ...
-  return linesString.split(';').map((part, index) => {
-    const [dataKeyRaw, rest] = part.split(':');
-    const dataKey = (dataKeyRaw || '').trim();
-
-    let hidden = false;
-    let color = getColor(index);
-    let type: CustomCurveType = 'monotone';
-    let name = '';
-    let histSpec: string | undefined;
-    let histSign = 1;
-
-    if (rest) {
-      // наприклад "color=#ff0000,type=step"
-      const params = rest.split(',');
-      params.forEach((param) => {
-        const [k, v] = param.split('=');
-        if (!k || !v) return;
-        const key = k.trim();
-        const value = v.trim();
-        if (key === 'hidden' && value === 'true') {
-          hidden = true;
-        } else if (key === 'color') {
-          color = value;
-        } else if (key === 'type') {
-          type = value as CustomCurveType;
-        } else if (key === 'name') {
-          name = value;
-        } else if (key === 'h') {
-          histSpec = value;
-        } else if (key === 'hk') {
-          histSign = Number(value) < 0 ? -1 : 1;
-        }
-      });
-    }
-
-    return {
-      dataKey,
-      readableLabel: name || labelMap[dataKey] || dataKey,
-      hidden,
-      color,
-      type,
-      histSpec,
-      histSign,
-    };
-  });
-}
 
 /** ****************************
  *  КАСТОМНИЙ КОМПОНЕНТ ЛЕГЕНДИ
@@ -349,7 +247,7 @@ const CustomTooltipComponent: React.FC<CustomTooltipProps> = ({
  *   ГОЛОВНИЙ КОМПОНЕНТ TrendChart: підключаємо логіку "MAX_POINTS"
  ********************************************************************* */
 const TrendChart: React.FC<TrendChartProps> = ({ field, value = [], getSibling }) => {
-  // const theme = useTheme();
+  const theme = useTheme();
 
   // 1) Розбір опцій
   //    Наприклад: "trend;mode=lineChart;lines=key1:color=red;..."
@@ -748,6 +646,47 @@ const TrendChart: React.FC<TrendChartProps> = ({ field, value = [], getSibling }
     ));
   }, [plotConfigs, hiddenLines]);
 
+  // ap=/an= (.signedArea): the area under a line, one colour above 0 and
+  // another below — a gradient whose stop sits at 0. Drawn under the lines,
+  // left out of the tooltip and the legend (the line carries those).
+  const gradId = useMemo(() => `sa-${field.label.replace(/[^A-Za-z0-9_-]/g, '_')}`, [field.label]);
+  const renderAreas = useMemo(() => {
+    const signed = plotConfigs.filter((c) => c.areaPos);
+    if (!signed.length) return null;
+    return [
+      <defs key="sa-defs">
+        {signed.map((cfg) => {
+          const off = signedAreaOffset(plotRows, cfg.dataKey);
+          const pos = areaColor(cfg.areaPos, theme.palette as any);
+          const neg = areaColor(cfg.areaNeg, theme.palette as any);
+          return (
+            <linearGradient key={cfg.dataKey} id={`${gradId}-${cfg.dataKey}`} x1="0" y1="0" x2="0" y2="1">
+              <stop offset={0} stopColor={pos} />
+              <stop offset={off} stopColor={pos} />
+              <stop offset={off} stopColor={neg} />
+              <stop offset={1} stopColor={neg} />
+            </linearGradient>
+          );
+        })}
+      </defs>,
+      ...signed.map((cfg) => (
+        <Area
+          key={`sa-${cfg.dataKey}`}
+          type={cfg.type}
+          dataKey={cfg.dataKey}
+          stroke="none"
+          fill={`url(#${gradId}-${cfg.dataKey})`}
+          fillOpacity={0.35}
+          activeDot={false}
+          tooltipType="none"
+          legendType="none"
+          isAnimationActive={false}
+          hide={hiddenLines[cfg.dataKey]}
+        />
+      )),
+    ];
+  }, [plotConfigs, plotRows, hiddenLines, theme.palette, gradId]);
+
   // ovl=back+front: the back bars on a hidden axis of their own, so both lay
   // out across the whole category and sit over each other (front drawn last).
   const overlayBack = useMemo(() => {
@@ -964,9 +903,11 @@ const TrendChart: React.FC<TrendChartProps> = ({ field, value = [], getSibling }
   // ***************************************************
   const renderedChart = useMemo(() => {
     switch (rawMode) {
-      case 'lineChart':
+      case 'lineChart': {
+        // A signed area needs Area next to Line: a ComposedChart, same children.
+        const LineLike: any = renderAreas ? ComposedChart : LineChart;
         return (
-          <LineChart
+          <LineLike
             data={plotRows}
             margin={chartMargin}
           >
@@ -1000,11 +941,13 @@ const TrendChart: React.FC<TrendChartProps> = ({ field, value = [], getSibling }
                 />
               }
             />}
+            {renderAreas}
             {renderLines}
             {renderRefLines}
             {renderVRefLines}
-          </LineChart>
+          </LineLike>
         );
+      }
 
       case 'barChart':
         // Time-series bar mode: one bar cluster per timestamp (sharing the
@@ -1082,6 +1025,7 @@ const TrendChart: React.FC<TrendChartProps> = ({ field, value = [], getSibling }
     overlayBack,
     om.tip,
     renderLines,
+    renderAreas,
     renderBars,
     handleLegendClick,
     hoveredDataKey,
