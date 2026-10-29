@@ -3,7 +3,7 @@
 import { describe, expect, it } from '@jest/globals';
 
 import { parseFieldOptions } from '../../utils/fieldParser';
-import { areaColor, parseLineConfigs, signedAreaOffset } from './lineConfigs';
+import { areaColor, parseLineConfigs, signedAreaCurve, signedAreaOffset, tooltipEntries } from './lineConfigs';
 
 describe('signed area', () => {
   // web::Trend("load").line("p", "#555555", "monotone", "Load").signedArea("#1e88e5", "#eb6834")
@@ -41,5 +41,26 @@ describe('signed area', () => {
     expect(signedAreaOffset([{ p: -3 }, { p: -1 }], 'p')).toBe(0); // all below
     expect(signedAreaOffset([], 'p')).toBe(1);
     expect(signedAreaOffset([{ p: 'x' }, { q: 5 }, { p: -2 }, { p: 2 }], 'p')).toBe(0.5);
+  });
+
+  it('draws the area on a curve that stays within the data extremes', () => {
+    expect(signedAreaCurve('linear')).toBe('linear');
+    expect(signedAreaCurve('monotone')).toBe('monotone');
+    expect(signedAreaCurve('stepAfter')).toBe('stepAfter');
+    expect(signedAreaCurve('basis')).toBe('monotone');
+    expect(signedAreaCurve('basisOpen')).toBe('monotone');
+    expect(signedAreaCurve('natural')).toBe('monotone');
+  });
+
+  it('leaves the signed area out of the tooltip', () => {
+    // recharts hands our tooltip the Area too (type 'none', same dataKey)
+    const payload = [
+      { dataKey: 'p', type: 'none', name: 'p', color: 'url(#sa-load-p)' },
+      { dataKey: 'p', name: 'Load', color: '#555555' },
+      { dataKey: 'q', name: 'Q', color: '#111111' },
+    ];
+    expect(tooltipEntries(payload, null).map((e) => e.name)).toEqual(['Load', 'Q']);
+    expect(tooltipEntries(payload, 'p').map((e) => e.name)).toEqual(['Load']);
+    expect(tooltipEntries([payload[0]], null)).toEqual([]);
   });
 });

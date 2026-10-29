@@ -36,7 +36,15 @@ import { useDeviceZone } from '../../../utils/useDeviceZone';
 import TrendHistoryBar from './trend/TrendHistoryBar';
 import { HistPeriod } from './trend/historyPlan';
 import { HistoryBinding, parsePeriods, useHistoryData } from './trend/useHistoryData';
-import { areaColor, CustomCurveType, LineConfig, parseLineConfigs, signedAreaOffset } from './trend/lineConfigs';
+import {
+  areaColor,
+  CustomCurveType,
+  LineConfig,
+  parseLineConfigs,
+  signedAreaCurve,
+  signedAreaOffset,
+  tooltipEntries,
+} from './trend/lineConfigs';
 
 interface Field {
   label: string;
@@ -184,12 +192,11 @@ const CustomTooltipComponent: React.FC<CustomTooltipProps> = ({
   unit,
   tipKey,
 }) => {
-  if (active && payload && payload.length) {
-    const tipText = tipKey ? payload[0]?.payload?.[tipKey] : undefined;
-    // Якщо користувач "наводить" на конкретну серію (Bar), можемо відфільтрувати
-    const filteredPayload = hoveredDataKey
-      ? payload.filter((entry: any) => entry.dataKey === hoveredDataKey)
-      : payload;
+  // Без серій з tooltipType="none" (signed area); на наведеній серії — лише вона
+  const visible = active && payload ? tooltipEntries(payload, null) : [];
+  if (visible.length) {
+    const tipText = tipKey ? visible[0]?.payload?.[tipKey] : undefined;
+    const filteredPayload = tooltipEntries(visible, hoveredDataKey);
 
     const tooltipStyle: React.CSSProperties = {
       backgroundColor: '#fff',
@@ -672,7 +679,7 @@ const TrendChart: React.FC<TrendChartProps> = ({ field, value = [], getSibling }
       ...signed.map((cfg) => (
         <Area
           key={`sa-${cfg.dataKey}`}
-          type={cfg.type}
+          type={signedAreaCurve(cfg.type)}
           dataKey={cfg.dataKey}
           stroke="none"
           fill={`url(#${gradId}-${cfg.dataKey})`}

@@ -97,7 +97,9 @@ page's REST/WS keys, as `refLine` does.
   that line's `lines` entry): the area under the line, one colour above 0
   and another below, a gradient whose stop sits at 0. A lineChart with such
   a line renders as a recharts ComposedChart; the area stays out of the
-  tooltip and the legend. Colours: CSS or a theme palette key.
+  tooltip and the legend. Colours: CSS or a theme palette key. On a
+  `basis*` or `natural` line the area is drawn `monotone` (those curves
+  miss or overshoot the points, which would move the split off 0).
 - **Flow** — `web::Flow(key)`, field type `flow`, `nodes=id,title,icon,valueKey,unit,subKey|…`
   and `edges=from,to,valueKey,unit,dirKey,subKey|…` (positional, empty =
   none). `.node()` / `.edge()` then `.valueKey() .unit() .subKey()` on the

@@ -132,6 +132,26 @@ export function signedAreaOffset(rows: Record<string, any>[], key: string): numb
   return hi - lo > 0 ? hi / (hi - lo) : 1;
 }
 
+// The curve of a signed area. The gradient stop above assumes the area's box
+// spans exactly 0..the data's extremes; linear, monotone and the steps pass
+// through every point and stay within them, but basis* never reaches the
+// extremes and natural overshoots them, which would move the colour split
+// off 0. Those take monotone for the area (the line keeps its own curve).
+export function signedAreaCurve(type: CustomCurveType): CustomCurveType {
+  return type.startsWith('basis') || type === 'natural' ? 'monotone' : type;
+}
+
+// The rows a trend tooltip lists: the series a chart marked tooltipType="none"
+// (the signed area) are left out — our own tooltip content does not get
+// recharts' default filter — then, on a hovered legend entry, only that series.
+export function tooltipEntries<T extends { type?: string; dataKey?: any }>(
+  payload: T[],
+  hoveredDataKey: string | null
+): T[] {
+  const visible = payload.filter((e) => e.type !== 'none');
+  return hoveredDataKey ? visible.filter((e) => e.dataKey === hoveredDataKey) : visible;
+}
+
 // An area colour: a theme palette key (primary, info, warning, …) takes the
 // palette's main colour (light and dark themes), anything else is a CSS colour.
 export function areaColor(c: string | undefined, palette: Record<string, any>): string | undefined {

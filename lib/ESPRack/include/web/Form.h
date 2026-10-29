@@ -404,7 +404,8 @@ class Trend : public FieldSpec<Trend> {
   }
   // The area under the last line() (lineChart): posColor above 0, negColor
   // below, split at 0 (e.g. a signed power: charge / discharge). A colour is
-  // a CSS colour or a theme palette key (primary, info, warning, …).
+  // a CSS colour or a theme palette key (primary, info, warning, …). On a
+  // basis*/natural line the area itself is drawn monotone (split stays at 0).
   //   .line("p", "#555", "monotone").signedArea("#1e88e5", "#eb6834")
   Trend& signedArea(const char* posColor, const char* negColor) {
     if (!_lines.length() || !posColor || !posColor[0] || !negColor || !negColor[0] ||
