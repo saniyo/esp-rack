@@ -66,6 +66,9 @@ class TelegramService : public StatefulService<TelegramSettings>,
   void begin();
   // Runs command handlers on the loop task.
   void loop();
+  // 0 while commands wait in the inbound queue, idle otherwise (the worker
+  // wakes the loop as it queues one).
+  uint32_t loopWaitMs(uint32_t nowMs) const;
 
   bool doOnCommand(uint32_t subId, const char* cmd, const char* help, TelegramCommandHandler h,
                    bool adminOnly) override;
@@ -143,6 +146,10 @@ class TelegramService : public StatefulService<TelegramSettings>,
   uint32_t _cmdsRev{0};                    // +1 per registration
   uint32_t _cmdsPublished{0};              // the rev setMyCommands last sent
   QueueHandle_t _inQ{nullptr};             // TelegramInbound*, TelTask -> loop
+  static constexpr uint32_t kCmdLockMs = 100;  // _cmdMx from the loop task / other modules
+  // The worker's waits (offline re-check, retry pause, send pacing) are
+  // waits on its own notification: a settings save or Wi-Fi up ends them.
+  void wakeWorker() { if (_task) xTaskNotifyGive(_task); }
   long long _updOffset{0};                 // 0 = backlog not skipped yet
   uint32_t _lastPollMs{0};
   struct AdminNag {

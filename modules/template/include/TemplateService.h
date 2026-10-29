@@ -96,6 +96,7 @@ class TemplateService : public StatefulService<TemplateState> {
   void registerManifest(WebManager* web);  // from onInstall
   void begin();                            // from onBegin
   void loop();                             // from onLoop — never blocks
+  uint32_t loopWaitMs(uint32_t nowMs) const;  // from loopWaitMs
   void end();                              // from onShutdown
 
  private:
@@ -115,6 +116,7 @@ class TemplateService : public StatefulService<TemplateState> {
   char     _line[TemplateState::kLineLen]{};
   size_t   _lineLen{0};
   uint32_t _lastPushMs{0};
+  uint16_t _pushMs{1000};  // the setting as pushLive() last read it (loopWaitMs)
 };
 
 #endif  // ESPRACK_TEMPLATE_SERVICE_H

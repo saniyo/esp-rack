@@ -70,13 +70,19 @@ class FileSystemSd : public FileSystemBackend {
   }
 
   // Returns immediately. Kicks a one-shot background task that retries
-  // SD.begin() a few times (with vTaskDelay between attempts) — covers the
+  // SD.begin() a few times (with a wait between attempts) — covers the
   // card's power-up window without blocking the caller (e.g. async_tcp).
   // Idempotent: if already mounted or a watcher is in flight, it's a no-op.
   bool mountAsync() {
     if (_mounted) return true;
-    bool expected = false;
-    if (!_watcherActive.compare_exchange_strong(expected, true)) return true;
+    // Test-and-set under a spinlock, not compare_exchange: this object is on
+    // the heap (PSRAM on Xtensa, where RMW atomics fail).
+    static portMUX_TYPE s_watchMux = portMUX_INITIALIZER_UNLOCKED;
+    taskENTER_CRITICAL(&s_watchMux);
+    const bool running = _watcherActive.load();
+    if (!running) _watcherActive.store(true);
+    taskEXIT_CRITICAL(&s_watchMux);
+    if (running) return true;
     BaseType_t r = xTaskCreatePinnedToCore(
         mountWatcherTask, "sd_mount_w", 8192, this, 1, nullptr, 0);
     if (r != pdPASS) {
@@ -138,7 +144,7 @@ class FileSystemSd : public FileSystemBackend {
         entry.close();
         if (isDir) total += countRecursive(*f, name);
         total++;  // entry itself
-        vTaskDelay(1);
+        yieldStep();
         entry = root.openNextFile();
       }
       root.close();
@@ -159,7 +165,7 @@ class FileSystemSd : public FileSystemBackend {
       root.close();
       for (auto& n : names) {
         removeRecursive(*f, n);
-        vTaskDelay(1);
+        yieldStep();
       }
     }
     _formatState = 3;   // done
@@ -175,13 +181,20 @@ class FileSystemSd : public FileSystemBackend {
   volatile uint32_t _formatTotal{0};
   volatile uint32_t _formatDone{0};
 
+  // Long jobs (format: count, delete) give the CPU away between entries: a
+  // one-tick wait on the task's own notification, so IDLE (task watchdog) and
+  // lower-priority work run; taskYIELD() would only reach equal priority.
+  static void yieldStep() { (void)ulTaskNotifyTake(pdTRUE, 1); }
+
   static void mountWatcherTask(void* arg) {
     auto* self = static_cast<FileSystemSd*>(arg);
-    // 5 attempts spread over ~1.5 s — covers card power-up; yields between tries.
+    // 5 attempts spread over ~1.5 s — covers card power-up. Exception (own
+    // one-shot task): the pause between tries stays, as a wait on the task's
+    // notification.
     for (int i = 1; i <= 5 && !self->_mounted; i++) {
       if (self->mount()) break;
       log_e("[SD] async mount attempt %d failed; retrying…", i);
-      vTaskDelay(pdMS_TO_TICKS(150 * i));  // 150, 300, 450, 600, 750
+      ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(150 * i));  // 150, 300, 450, 600, 750
     }
     if (self->_mounted) {
       if (auto* f = self->fs()) FileSystemManager::purgeUploadDebris(*f);
@@ -204,7 +217,7 @@ class FileSystemSd : public FileSystemBackend {
         child.close();
         if (isDir) n += countRecursive(vfs, cp);
         n++;  // entry itself
-        vTaskDelay(1);
+        yieldStep();
         child = f.openNextFile();
       }
       f.close();
@@ -226,7 +239,7 @@ class FileSystemSd : public FileSystemBackend {
         child.close();
         if (isDir) removeRecursive(vfs, cp);
         else { vfs.remove(cp.c_str()); _formatDone = _formatDone + 1; }
-        vTaskDelay(1);
+        yieldStep();
         child = f.openNextFile();
       }
       f.close();

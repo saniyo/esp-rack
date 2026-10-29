@@ -305,6 +305,7 @@ void ConfigManager::flushDeferred() {
 uint32_t ConfigManager::writeDeferred() {
   const uint32_t runSince = ESPRack::WriteGate::now();
   bool power = false;
+  _busyRetry.store(false);
   for (auto& e : _entries) {
     if (!e || !e->deferred()) continue;
     ESPRack::WriteSlot slot(0, nullptr, runSince);
@@ -333,9 +334,13 @@ uint32_t ConfigManager::writeDeferred() {
   // After the saves, so the snapshot freezes what they wrote (a save that
   // failed doesn't hold it up: it freezes what is on flash).
   if (!power && snapPending()) power = !snapshotSteps(runSince);
-  // Left over: PowerGuard paused writes (before or during a step), or a save
-  // that failed: run again when PowerGuard allows writes (or on the next kick).
-  return (_anyDeferred || snapPending()) ? ESPRack::FlashWriter::kOnPower : ESPRack::FlashWriter::kDone;
+  // Left over: a service's state lock timed out (noteBusy): again in
+  // CFGMGR_BUSY_RETRY_MS. PowerGuard paused writes (before or during a step),
+  // or a save that failed: run again when PowerGuard allows writes (or on
+  // the next kick).
+  if (!_anyDeferred && !snapPending()) return ESPRack::FlashWriter::kDone;
+  if (!power && _busyRetry.load()) return CFGMGR_BUSY_RETRY_MS;
+  return ESPRack::FlashWriter::kOnPower;
 }
 
 void ConfigManager::flushDeferredNow(uint32_t boundMs) {

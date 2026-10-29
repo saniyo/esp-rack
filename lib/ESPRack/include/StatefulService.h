@@ -9,7 +9,10 @@
 #ifdef ESP32
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
+#include "UpdateError.h"
 #endif
+
+#include "LockWait.h"
 
 #ifndef DEFAULT_BUFFER_SIZE
 #define DEFAULT_BUFFER_SIZE 8192 //1024
@@ -71,8 +74,13 @@ class StatefulService {
     }
   }
 
+  // The state lock is taken with a timeout (ESPRACK_STATE_LOCK_TIMEOUT_MS,
+  // see LockWait.h). Busy: update() changes nothing and returns ERROR with
+  // the reason "state busy" (the REST paths answer 400 with it), read()
+  // does not run the reader and returns false (a JSON reader's object stays
+  // as the caller passed it). Logged on the 1st, 2nd, 4th... timeout.
   StateUpdateResult update(std::function<StateUpdateResult(T&)> stateUpdater, const String& originId) {
-    beginTransaction();
+    if (!beginTransaction()) return busyResult();
     StateUpdateResult result = stateUpdater(_state);
     endTransaction();
     if (result == StateUpdateResult::CHANGED) {
@@ -82,14 +90,14 @@ class StatefulService {
   }
 
   StateUpdateResult updateWithoutPropagation(std::function<StateUpdateResult(T&)> stateUpdater) {
-    beginTransaction();
+    if (!beginTransaction()) return busyResult();
     StateUpdateResult result = stateUpdater(_state);
     endTransaction();
     return result;
   }
 
   StateUpdateResult update(JsonObject& jsonObject, JsonStateUpdater<T> stateUpdater, const String& originId) {
-    beginTransaction();
+    if (!beginTransaction()) return busyResult();
     StateUpdateResult result = stateUpdater(jsonObject, _state);
     endTransaction();
     if (result == StateUpdateResult::CHANGED) {
@@ -99,23 +107,28 @@ class StatefulService {
   }
 
   StateUpdateResult updateWithoutPropagation(JsonObject& jsonObject, JsonStateUpdater<T> stateUpdater) {
-    beginTransaction();
+    if (!beginTransaction()) return busyResult();
     StateUpdateResult result = stateUpdater(jsonObject, _state);
     endTransaction();
     return result;
   }
 
-  void read(std::function<void(T&)> stateReader) {
-    beginTransaction();
+  bool read(std::function<void(T&)> stateReader) {
+    if (!beginTransaction()) return false;
     stateReader(_state);
     endTransaction();
+    return true;
   }
 
-  void read(JsonObject& jsonObject, JsonStateReader<T> stateReader) {
-    beginTransaction();
+  bool read(JsonObject& jsonObject, JsonStateReader<T> stateReader) {
+    if (!beginTransaction()) return false;
     stateReader(_state, jsonObject);
     endTransaction();
+    return true;
   }
+
+  // Lock timeouts since boot (diagnostics).
+  uint32_t lockTimeouts() const { return _lockTimeouts; }
 
   void callUpdateHandlers(const String& originId) {
     for (const StateUpdateHandlerInfo_t& updateHandler : _updateHandlers) {
@@ -126,16 +139,37 @@ class StatefulService {
  protected:
   T _state;
 
-  inline void beginTransaction() {
+  // false: the lock was busy for ESPRACK_STATE_LOCK_TIMEOUT_MS; the caller
+  // must not touch _state nor call endTransaction().
+  inline bool beginTransaction() {
 #ifdef ESP32
-    xSemaphoreTakeRecursive(_accessMutex, portMAX_DELAY);
+    if (!_accessMutex) return true;
+    if (xSemaphoreTakeRecursive(_accessMutex, pdMS_TO_TICKS(ESPRACK_STATE_LOCK_TIMEOUT_MS)) == pdTRUE) {
+      return true;
+    }
+    // Plain counter: a lost increment when two tasks time out at once is harmless.
+    const uint32_t n = ++_lockTimeouts;
+    if (ESPRack::logThisFail(n)) {
+      log_w("[state] %p: lock busy for %u ms (%u so far)", (void*)this,
+            (unsigned)ESPRACK_STATE_LOCK_TIMEOUT_MS, (unsigned)n);
+    }
+    return false;
+#else
+    return true;
 #endif
   }
 
   inline void endTransaction() {
 #ifdef ESP32
-    xSemaphoreGiveRecursive(_accessMutex);
+    if (_accessMutex) xSemaphoreGiveRecursive(_accessMutex);
 #endif
+  }
+
+  StateUpdateResult busyResult() {
+#ifdef ESP32
+    ESPRack::setUpdateError("state busy");
+#endif
+    return StateUpdateResult::ERROR;
   }
 
  private:
@@ -143,6 +177,7 @@ class StatefulService {
   SemaphoreHandle_t _accessMutex;
 #endif
   std::list<StateUpdateHandlerInfo_t> _updateHandlers;
+  uint32_t _lockTimeouts{0};
 };
 
 #endif  // end StatefulService_h

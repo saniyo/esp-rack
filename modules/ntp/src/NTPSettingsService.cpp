@@ -1,5 +1,7 @@
 #include <NTPSettingsService.h>
 #include <WebManager.h>
+#include <App.h>  // ESPRack::wakeLoop
+#include <system/LoopWait.h>
 
 NTPSettingsService::NTPSettingsService(ConfigManager* cfgMgr)
     : StatefulService<NTPSettings>(),
@@ -29,7 +31,7 @@ NTPSettingsService::NTPSettingsService(ConfigManager* cfgMgr)
 #endif
 
   addUpdateHandler([this](const String& origin) {
-    configureNTP();
+    requestConfigure();
     _cfg.saveIfChanged(origin);
     // No broadcastWs here (LIB-FIX-009): the feature's WS binding pushes on
     // every propagated update, after this handler has refreshed state.
@@ -91,6 +93,10 @@ void NTPSettingsService::begin() {
 }
 
 void NTPSettingsService::loop() {
+  if (_reconfigure) {
+    _reconfigure = false;  // before the work: a request meanwhile runs it again
+    configureNTP();
+  }
   // Periodic push so the Status tab (local/utc time, uptime) actually ticks.
   // Skip ALL work — even the millis() diff — when nobody's subscribed; the
   // unconditional 1 Hz tick was previously feeding into main-loop pressure
@@ -103,30 +109,47 @@ void NTPSettingsService::loop() {
   }
 }
 
+uint32_t NTPSettingsService::loopWaitMs(uint32_t nowMs) const {
+  if (_reconfigure) return 0;
+  if (!_feature || !_feature->hasSubscribers()) return ESPRACK_LOOP_IDLE_WAIT_MS;
+  return ESPRack::LoopWait::dueIn(nowMs, (uint32_t)_lastTickMs, 1000);
+}
+
+void NTPSettingsService::requestConfigure() {
+  _reconfigure = true;
+  ESPRack::wakeLoop();
+}
+
 #ifdef ESP32
 void NTPSettingsService::onStationModeGotIP(WiFiEvent_t event, WiFiEventInfo_t info) {
   log_d("Got IP address, starting NTP synchronization.");
-  configureNTP();
+  requestConfigure();
 }
 void NTPSettingsService::onStationModeDisconnected(WiFiEvent_t event, WiFiEventInfo_t info) {
   log_d("WiFi dropped, stopping NTP.");
-  configureNTP();
+  requestConfigure();
 }
 #elif defined(ESP8266)
 void NTPSettingsService::onStationModeGotIP(const WiFiEventStationModeGotIP& event) {
-  configureNTP();
+  requestConfigure();
 }
 void NTPSettingsService::onStationModeDisconnected(const WiFiEventStationModeDisconnected& event) {
-  configureNTP();
+  requestConfigure();
 }
 #endif
 
 void NTPSettingsService::configureNTP() {
 #ifdef ESP32
-  // Called from the WiFi event task, the settings update handler and
-  // begin(): run the whole thing under the service's (recursive) lock, so
-  // the calls are serialized and the last caller's settings win.
-  read([this](NTPSettings& s) { configureNTPLocked(s); });
+  // On the loop task only, so the calls are serialized: a copy of the
+  // settings under the lock, the slow part (TimeSync, SNTP via tcpip) after
+  // it, so no reader waits on the tcpip task through the lock.
+  // The state lock timed out: keep what runs, and try again next pass.
+  NTPSettings st;
+  if (!read([&st](NTPSettings& s) { st = s; })) {
+    _reconfigure = true;
+    return;
+  }
+  applySntp(st);
 #elif defined(ESP8266)
   if (WiFi.isConnected() && _state.enabled) {
     configTime(_state.tzFormat.c_str(), _state.server.c_str());
@@ -138,7 +161,7 @@ void NTPSettingsService::configureNTP() {
 }
 
 #ifdef ESP32
-void NTPSettingsService::configureNTPLocked(const NTPSettings& st) {
+void NTPSettingsService::applySntp(const NTPSettings& st) {
   // The timezone belongs to core TimeSync (libc TZ and everything that reads it), not
   // to the SNTP client: set it whether or not NTP runs.
   if (!ESPRack::TimeSync::instance().setTimezone(st.tzFormat.c_str(), st.tzLabel.c_str())) {

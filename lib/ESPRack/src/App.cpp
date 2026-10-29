@@ -15,9 +15,12 @@
 #include "hw/HwRegistry.h"
 #include "system/BootGuard.h"
 #include "system/CrashDump.h"
+#include "system/LoopWait.h"
 #include "system/LoopWdt.h"
 
 #include <freertos/FreeRTOS.h>
+#include <freertos/event_groups.h>
+#include <freertos/semphr.h>
 #include <freertos/task.h>
 #include <esp_attr.h>
 #include <esp_rom_crc.h>
@@ -142,6 +145,65 @@ void armRestartDeadline(uint32_t ms) {
 }
 }  // namespace
 
+namespace {
+// wakeLoop(): ends the loop task's wait (App::loop). Static, in internal
+// RAM and never freed, so a wake from any task or ISR is safe before begin
+// and after shutdown; created by the first App.
+StaticSemaphore_t s_wakeBuf;
+SemaphoreHandle_t s_wake = nullptr;
+
+// The restart steps other tasks wait for, as bits next to their flags (set
+// after the flag; cleared by a new App): an event wait with the old bound
+// instead of polling the flag.
+StaticEventGroup_t s_phaseBuf;
+EventGroupHandle_t s_phase = nullptr;
+constexpr EventBits_t kClaimed = 1u << 0;    // shutdownDone_
+constexpr EventBits_t kHooksDone = 1u << 1;  // hooksDone_
+constexpr EventBits_t kAfterDone = 1u << 2;  // afterState_ == 2
+constexpr EventBits_t kNever = 1u << 3;      // nobody sets it: a pause no event ends
+
+void createWaits() {  // the App ctor (setup, one task)
+  if (!s_wake) s_wake = xSemaphoreCreateBinaryStatic(&s_wakeBuf);
+  if (!s_phase) s_phase = xEventGroupCreateStatic(&s_phaseBuf);
+  xEventGroupClearBits(s_phase, kClaimed | kHooksDone | kAfterDone);
+}
+
+TickType_t ticksFor(uint32_t ms) { return static_cast<TickType_t>(LoopWait::ticksFor(ms, configTICK_RATE_HZ)); }
+
+void setPhase(EventBits_t bits) {
+  if (s_phase) xEventGroupSetBits(s_phase, bits);
+}
+
+// Until done() or ms have passed; woken when `bit` is set.
+template <class Done>
+bool waitPhase(EventBits_t bit, uint32_t ms, Done done) {
+  const uint32_t t0 = millis();
+  while (!done() && s_phase) {
+    const uint32_t elapsed = millis() - t0;
+    if (elapsed >= ms) break;
+    (void)xEventGroupWaitBits(s_phase, bit, pdFALSE, pdTRUE, ticksFor(ms - elapsed));
+  }
+  return done();
+}
+
+// A pause with nothing to wait for (a retry); still an RTOS wait.
+void pauseMs(uint32_t ms) {
+  if (s_phase) (void)xEventGroupWaitBits(s_phase, kNever, pdFALSE, pdTRUE, ticksFor(ms));
+}
+}  // namespace
+
+void wakeLoop() {
+  if (SemaphoreHandle_t w = s_wake) xSemaphoreGive(w);
+}
+
+void IRAM_ATTR wakeLoopFromISR() {
+  SemaphoreHandle_t w = s_wake;
+  if (!w) return;
+  BaseType_t woken = pdFALSE;
+  xSemaphoreGiveFromISR(w, &woken);
+  if (woken) portYIELD_FROM_ISR(woken);
+}
+
 #ifndef ESPRACK_SHUTDOWN_BUDGET_MS
 // Per-module onShutdown() budget. Not preemptive (a hook can't be
 // interrupted) — an overrun is logged so the offending module shows up.
@@ -237,6 +299,7 @@ App::App(AsyncWebServer* server, const char* deviceName, const char* deviceVersi
   resolveLastRestartReason();
   log_i("[boot] last restart: %s", s_lastReason);
 
+  createWaits();
   s_app = this;
 }
 
@@ -375,7 +438,7 @@ void App::begin() {
   bool fsOk = ESPFS.begin(false);
   if (!fsOk) {
     log_e("[fs] LittleFS mount failed — retrying once before any format");
-    delay(50);
+    pauseMs(50);
     fsOk = ESPFS.begin(false);
   }
   if (!fsOk) {
@@ -599,7 +662,11 @@ void App::begin() {
 }
 
 void App::loop() {
-  if (!begun_) return;
+  if (!begun_) {
+    // Shut down, the reset is under way on another task: nothing to run.
+    if (shutdownDone_.load() && s_wake) (void)xSemaphoreTake(s_wake, ticksFor(ESPRACK_LOOP_MAX_WAIT_MS));
+    return;
+  }
 
   // Time first: SNTP / operator samples, clock events.
   TimeSync::instance().loop();
@@ -689,6 +756,36 @@ void App::loop() {
     }
   }
 #endif  // FT_HEAP_MONITOR
+
+  // No busy loop (HGW-LIB-003): wait for the nearest deadline or a
+  // wakeLoop(). A wake given while we ran ends the next wait at once.
+  const uint32_t wait = loopWaitMs();
+  if (wait && s_wake) (void)xSemaphoreTake(s_wake, ticksFor(wait));
+}
+
+uint32_t App::loopWaitMs() const {
+  const uint32_t now = millis();
+  uint32_t w = ESPRACK_LOOP_MAX_WAIT_MS;
+  auto nearest = [&w](uint32_t ms) {
+    if (ms < w) w = ms;
+  };
+  // The core's own timers. Its flags wake the loop where they are set:
+  // SNTP / operator time / TZ (TimeSync), the manifest bake (WebManager),
+  // "restore factory pins" (HwRegistry), restartDevice; queued WS frames
+  // (WsManager). The WS heartbeat (5 s) and ping (20 s) are deadlines of
+  // their own (WsManager::waitMs). FlashWriter::retry (once a second while
+  // its task is missing) and the debug samplers (60 s) ride on the bound.
+  nearest(TimeSync::instance().loopWaitMs(now));
+  nearest(BootGuard::loopWaitMs(now));
+  nearest(wsManager_.waitMs(now));
+  if (restartRequested_.load()) nearest(0);
+  for (const auto& m : modules_) {
+    if (w == 0) break;
+    if (m) nearest(m->loopWaitMs(now));
+  }
+  // The loop watchdog (if on) is fed once per loop(): half its timeout at most.
+  const uint32_t wdt = LoopWdt::armed() && !LoopWdt::paused() ? LoopWdt::timeoutMs() : 0;
+  return LoopWait::bound(w, ESPRACK_LOOP_MAX_WAIT_MS, wdt);
 }
 
 void App::shutdown() {
@@ -699,8 +796,10 @@ bool App::runShutdownOnce(const char* reason) {
   if (shutdownDone_.exchange(true)) return false;   // another path owns the hooks
   if (!begun_) {
     hooksDone_ = true;
+    setPhase(kClaimed | kHooksDone);
     return true;
   }
+  setPhase(kClaimed);
   begun_ = false;                             // App::loop stops ticking modules
   // The hooks may take longer than the loop watchdog in total; the restart
   // deadline (restartDevice) bounds them instead.
@@ -732,6 +831,7 @@ bool App::runShutdownOnce(const char* reason) {
   // The boot record writes put off the same way (clearSafeMode, markStable).
   BootGuard::flush(ESPRACK_SHUTDOWN_WRITE_WAIT_MS);
   hooksDone_ = true;
+  setPhase(kHooksDone);
   return true;
 }
 
@@ -751,9 +851,7 @@ uint32_t App::restartDeadlineMs() const {
 }
 
 bool App::waitHooks(uint32_t ms) const {
-  const uint32_t t0 = millis();
-  while (!hooksDone_.load() && millis() - t0 < ms) vTaskDelay(pdMS_TO_TICKS(20));
-  return hooksDone_.load();
+  return waitPhase(kHooksDone, ms, [this] { return hooksDone_.load(); });
 }
 
 void App::runAfterShutdownOnce() {
@@ -775,12 +873,12 @@ void App::runAfterShutdownOnce() {
       afterShutdown_();
     }
     afterState_ = 2;
+    setPhase(kAfterDone);
     return;
   }
   // Another task is inside afterShutdown (e.g. wiping /config): don't reset
   // under it. Bounded, so a hang can't keep the device from rebooting.
-  const uint32_t t0 = millis();
-  while (afterState_.load() != 2 && millis() - t0 < 5000) vTaskDelay(pdMS_TO_TICKS(20));
+  (void)waitPhase(kAfterDone, 5000, [this] { return afterState_.load() == 2; });
 }
 
 void App::finishAndRestart() {
@@ -831,7 +929,12 @@ void restartDevice(const char* reason, std::function<void()> afterShutdown) {
   // already under way — it must not cut the running hooks short.
   bool expected = false;
   if (!a->restartClaimed_.compare_exchange_strong(expected, true)) {
-    for (;;) vTaskDelay(pdMS_TO_TICKS(1000));
+    // The restart deadline resets the chip under us. Should that timer be
+    // missing, reset here once the whole allowance (hooks, then
+    // afterShutdown's own) is over.
+    pauseMs(a->restartDeadlineMs() + ESPRACK_RESTART_DEADLINE_MS + 1000);
+    log_e("[restart] the reset under way did not happen — resetting now");
+    esp_restart();
   }
 
   a->restartReason_ = reason ? reason : "unknown";
@@ -846,11 +949,8 @@ void restartDevice(const char* reason, std::function<void()> afterShutdown) {
   // Off the loop task: hand off to App::loop(), which runs the hooks there
   // (never concurrently with a module's onLoop) and resets the chip.
   a->restartRequested_ = true;
-  uint32_t t0 = millis();
-  while (!a->shutdownDone_.load() && millis() - t0 < 3000) {
-    vTaskDelay(pdMS_TO_TICKS(20));
-  }
-  if (a->shutdownDone_.load()) {
+  wakeLoop();
+  if (waitPhase(kClaimed, 3000, [a] { return a->shutdownDone_.load(); })) {
     // The loop is running the hooks — give them their budget. Normally the
     // loop finishes, runs afterShutdown and resets the chip while we wait.
     if (!a->waitHooks(a->shutdownGraceMs())) {

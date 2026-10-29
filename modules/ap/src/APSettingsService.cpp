@@ -3,6 +3,8 @@
 #include <WebFeatureBuilder.h>
 #include <web/Form.h>
 #include <DeviceIdentity.h>
+#include <App.h>  // ESPRack::wakeLoop
+#include <system/LoopWait.h>
 #include <SecretsVault.h>
 
 // softAP accepts 8..63-char passphrases. Below 8 the driver refuses to
@@ -187,6 +189,7 @@ void APSettingsService::begin() {
 void APSettingsService::reconfigureAP() {
   _lastManaged = millis() - MANAGE_NETWORK_DELAY;
   _reconfigureAp = true;
+  ESPRack::wakeLoop();  // the settings handler runs on async_tcp
 }
 
 void APSettingsService::loop() {
@@ -197,6 +200,15 @@ void APSettingsService::loop() {
     manageAP();
   }
   handleDNS();
+}
+
+uint32_t APSettingsService::loopWaitMs(uint32_t nowMs) const {
+#if defined(ESP8266)
+  // ESP8266's DNSServer answers only from processNextRequest().
+  if (_dnsServer) return ESPRACK_LOOP_DEFAULT_WAIT_MS;
+#endif
+  // ESP32: the captive DNS answers on its own (AsyncUDP), nothing to poll.
+  return ESPRack::LoopWait::dueIn(nowMs, (uint32_t)_lastManaged, MANAGE_NETWORK_DELAY);
 }
 
 void APSettingsService::manageAP() {

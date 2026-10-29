@@ -2,6 +2,8 @@
 
 #include <AdaptiveJson.h>
 #include <WebManager.h>
+#include <App.h>  // ESPRack::wakeLoop
+#include <system/LoopWait.h>
 
 // ===================== state <-> JSON =====================
 
@@ -131,6 +133,7 @@ TemplateService::TemplateService(ConfigManager* cfgMgr, HardwareSerial& port)
   addUpdateHandler([this](const String& origin) {
     _cfg.saveIfChanged(origin);   // CRC-gated: no flash write if unchanged
     _applyPending = true;         // UART re-open happens in loop()
+    ESPRack::wakeLoop();          // async_tcp: the loop may be waiting
   }, false);
 }
 
@@ -203,9 +206,24 @@ void TemplateService::begin() {
 }
 
 void TemplateService::loop() {
-  if (_applyPending.exchange(false)) applyPort();
+  // Load + store, not exchange: the service is on the heap (PSRAM on Xtensa,
+  // where RMW atomics fail). A save between the two is applied right here.
+  if (_applyPending.load()) {
+    _applyPending.store(false);
+    applyPort();
+  }
   if (_open) drainPort();
   pushLive();
+}
+
+uint32_t TemplateService::loopWaitMs(uint32_t nowMs) const {
+  if (_applyPending.load()) return 0;
+  // The UART has no event here, so it is polled at the default cadence
+  // (HardwareSerial::onReceive + ESPRack::wakeLoop() would make it one, at
+  // the cost of a UART event task).
+  if (_open) return ESPRACK_LOOP_DEFAULT_WAIT_MS;
+  if (_feature && _feature->hasSubscribers()) return ESPRack::LoopWait::dueIn(nowMs, _lastPushMs, _pushMs);
+  return ESPRACK_LOOP_IDLE_WAIT_MS;
 }
 
 void TemplateService::end() {
@@ -282,6 +300,7 @@ void TemplateService::pushLive() {
 
   uint16_t pushMs = 1000;
   read([&](TemplateState& s) { pushMs = s.pushMs; });
+  _pushMs = pushMs;
   const uint32_t now = millis();
   const uint32_t dt  = now - _lastPushMs;
   if (dt < pushMs) return;

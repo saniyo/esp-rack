@@ -52,6 +52,8 @@ class MothershipModule : public ESPRack::Module {
 
   void onBegin() override { if (svc_) svc_->begin(); }
   void onLoop()  override { if (svc_) svc_->loop();  }
+  // loop() has nothing on a timer (the check-in task does the work).
+  uint32_t loopWaitMs(uint32_t) const override { return ESPRACK_LOOP_IDLE_WAIT_MS; }
 
   MothershipService* service() { return svc_.get(); }
 

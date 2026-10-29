@@ -206,6 +206,10 @@ class AutoUpdateService : public StatefulService<AutoUpdateSettings> {
 
   void begin();
   void loop();
+  // The next scheduled check, a running update's deadline (once a second),
+  // the restart after a timeout; idle while disabled or offline (the Wi-Fi
+  // events, the settings handler and the update task wake the loop).
+  uint32_t loopWaitMs(uint32_t nowMs) const;
 
   void checkForUpdate();
 
@@ -252,6 +256,11 @@ class AutoUpdateService : public StatefulService<AutoUpdateSettings> {
   volatile OtaState _otaState;
   unsigned long _otaStartMs;
   TaskHandle_t _otaTaskHandle;
+  // After a timeout the restart waits a second (the page shows "timeout"
+  // first): loop() and loopWaitMs() hold it, not a sleep on the loop task.
+  static constexpr uint32_t kTimeoutRestartMs = 1000;
+  bool _restartPending{false};
+  uint32_t _restartAtMs{0};
 
 #ifdef ESP32
   void onStationModeGotIP(WiFiEvent_t event, WiFiEventInfo_t info);

@@ -9,7 +9,10 @@
 //
 // Threading: validate()/update()/state() may run on any task (settings
 // updaters run on async_tcp); the claim table is guarded by a leaf mutex —
-// the registry never calls module code while holding it.
+// the registry never calls module code while holding it. It is taken with
+// ESPRACK_HW_LOCK_WAIT_MS at most: a caller that doesn't get it in time logs
+// it and takes the safe answer (validate: refused, heldByOther/reserved:
+// yes, state: the last one, a change: skipped).
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
@@ -25,6 +28,10 @@
 // System -> Hardware tab. 1 (default): always shown (plan Q5). 0: the tab
 // and its texts are compiled out (about 4.3 KB on C3); the registry, the
 // claims and the admin action system.restoreFactoryHw stay.
+#ifndef ESPRACK_HW_LOCK_WAIT_MS
+#define ESPRACK_HW_LOCK_WAIT_MS 500  // the lock covers copies and checks (the System tab's JSON at most)
+#endif
+
 #ifndef ESPRACK_HW_TAB
 #define ESPRACK_HW_TAB 1
 #endif
@@ -186,8 +193,9 @@ class HwRegistry {
   void budgetText(char* buf, size_t len) const;
   void fillInstanceRows(JsonArray rows) const;
   void fillPinRows(JsonArray rows) const;
-  void lock() const { xSemaphoreTake(_mx, portMAX_DELAY); }
+  bool lock(const char* who) const;  // false: not had in ESPRACK_HW_LOCK_WAIT_MS (logged)
   void unlock() const { xSemaphoreGive(_mx); }
+  HwState lastState(const ExtHwModule& who) const;  // without the lock: one byte, the last evaluated
 
   SemaphoreHandle_t _mx;
   HwClaims _claims;

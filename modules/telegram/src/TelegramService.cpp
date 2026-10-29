@@ -6,6 +6,10 @@
 #include <WebFeatureSpec.h>
 #include <web/Form.h>
 #include <DeviceIdentity.h>
+#include <App.h>  // ESPRack::wakeLoop
+#include <system/LoopWait.h>
+#include <lwip/sockets.h>
+#include <algorithm>
 
 // ─── ctor / dtor ────────────────────────────────────────────────────
 TelegramService::TelegramService(ConfigManager* cfgMgr)
@@ -193,6 +197,7 @@ void TelegramService::begin() {
   //      fallback uses the new value next time.
   addUpdateHandler([this](const String& origin) {
     if (_state.enabled && !_task) startTask();  // enabled at runtime: no reboot
+    wakeWorker();
     ensureBotToken(_state.botToken);
     updateStatusLabel();
     _cfg.saveIfChanged(origin);
@@ -532,9 +537,22 @@ bool TelegramService::sendDirect(const String& token,
   while ((_cli.connected() || _cli.available()) && (millis() - drainStart < 2000)) {
     if (_cli.available()) {
       (void)_cli.read();
-    } else {
-      delay(5);
+      continue;
     }
+    // Nothing buffered: wait in select() for the socket (more data or the
+    // peer's FIN) for the rest of the 2 s, not a sleep-poll.
+    const int fd = _cli.fd();
+    if (fd < 0) break;
+    const uint32_t spent = millis() - drainStart;
+    if (spent >= 2000) break;
+    fd_set rd;
+    FD_ZERO(&rd);
+    FD_SET(fd, &rd);
+    timeval tv;
+    tv.tv_sec = (2000 - spent) / 1000;
+    tv.tv_usec = ((2000 - spent) % 1000) * 1000;
+    if (select(fd + 1, &rd, nullptr, nullptr, &tv) <= 0) break;
+    if (!_cli.available()) break;  // readable, nothing decoded (closed, or a partial record): done
   }
   _cli.stop();
   return ok;
@@ -624,6 +642,10 @@ void TelegramService::startTask() {
       s_telStack, &s_telBlock, 1);
 #endif
   log_i("[tel] task started (enabled=true)");
+  // Back online: the worker's offline wait ends now (its own notification;
+  // the task is static and lives as long as the service).
+  WiFi.onEvent([this](WiFiEvent_t, WiFiEventInfo_t) { wakeWorker(); },
+               WiFiEvent_t::ARDUINO_EVENT_WIFI_STA_GOT_IP);
 }
 
 void TelegramService::taskTrampoline(void* pv) {
@@ -636,19 +658,26 @@ void TelegramService::runWorker() {
   TelegramQueuedMessage* m = nullptr;
   for (;;) {
     // ask for commands every cmd_poll_s while any is registered.
-    if (_state.enabled && !_state.botToken.isEmpty() && WiFi.isConnected() && !_cmds.empty() &&
-        static_cast<uint32_t>(millis() - _lastPollMs) >= static_cast<uint32_t>(_state.cmdPollS) * 1000u) {
+    const bool polling = _state.enabled && !_state.botToken.isEmpty() && WiFi.isConnected() && !_cmds.empty();
+    const uint32_t pollMs = static_cast<uint32_t>(_state.cmdPollS) * 1000u;
+    if (polling && static_cast<uint32_t>(millis() - _lastPollMs) >= pollMs) {
       _lastPollMs = millis();
       pollCommands(_state.botToken);
     }
     // Offline: leave the queue alone, so what was queued meanwhile (a boot
     // report right after a crash, say) goes out once the network is back.
+    // Exception (own task): the 500 ms re-check stays; GOT_IP ends it early.
     if (_state.enabled && !WiFi.isConnected()) {
-      vTaskDelay(pdMS_TO_TICKS(500));
+      ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(500));
       continue;
     }
-    if (xQueueReceive(_q, &m, pdMS_TO_TICKS(50)) != pdPASS || !m) {
-      vTaskDelay(pdMS_TO_TICKS(20));
+    // The queue is the event: wait for a message until the next command
+    // poll, 1 s at most (settings and the link are looked at again).
+    uint32_t waitMs = 1000;
+    if (polling) waitMs = std::min(waitMs, ESPRack::LoopWait::dueIn(millis(), _lastPollMs, pollMs));
+    if (xQueueReceive(_q, &m, ESPRack::LoopWait::ticksFor(waitMs, configTICK_RATE_HZ)) != pdPASS || !m) continue;
+    if (_state.enabled && !WiFi.isConnected() && xQueueSendToFront(_q, &m, 0) == pdTRUE) {
+      m = nullptr;  // the link dropped meanwhile: back to the head, kept for later
       continue;
     }
 
@@ -676,7 +705,7 @@ void TelegramService::runWorker() {
         // pause, or once the network is back.
         logLine(false, "retry", m->text);
         m = nullptr;
-        vTaskDelay(pdMS_TO_TICKS(kRetryPauseMs));
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(kRetryPauseMs));  // a settings save ends it early
         continue;
       }
       logLine(ok, ok ? "ok" : "fail", m->text);
@@ -696,7 +725,9 @@ void TelegramService::runWorker() {
     updateStatusLabel();
     callUpdateHandlers("sta");
 
-    vTaskDelay(pdMS_TO_TICKS(_state.sendIntervalMs));
+    // Exception (own task): the pause between sends (Telegram's rate limit)
+    // stays, as a wait on the task's notification.
+    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(_state.sendIntervalMs));
   }
 }
 
@@ -713,7 +744,11 @@ bool TelegramService::doOnCommand(uint32_t subId, const char* cmd, const char* h
   if (!cmd || !*cmd || !h || !findSub(subId)) return false;
   String name = cmd[0] == '/' ? String(cmd + 1) : String(cmd);
   name.toLowerCase();
-  xSemaphoreTake(_cmdMx, portMAX_DELAY);
+  // Any caller (loop task, other modules): a bounded wait, a miss is a refusal.
+  if (xSemaphoreTake(_cmdMx, pdMS_TO_TICKS(kCmdLockMs)) != pdTRUE) {
+    log_w("[tel] /%s not registered: command table busy", name.c_str());
+    return false;
+  }
   bool ok = _cmds.size() < kMaxCommands;
   for (const auto& c : _cmds) ok = ok && c.cmd != name;
   if (ok) {
@@ -729,7 +764,12 @@ void TelegramService::loop() {
   while (_inQ && xQueueReceive(_inQ, &in, 0) == pdPASS && in) {
     TelegramCommandHandler h;
     bool adminOnly = false;
-    xSemaphoreTake(_cmdMx, portMAX_DELAY);
+    // Loop task: a bounded wait; on a miss the command goes back to the
+    // head of the queue for the next pass.
+    if (xSemaphoreTake(_cmdMx, pdMS_TO_TICKS(kCmdLockMs)) != pdTRUE) {
+      if (xQueueSendToFront(_inQ, &in, 0) != pdPASS) delete in;
+      return;
+    }
     for (const auto& c : _cmds) {
       if (c.cmd == in->command) {
         h = c.h;
@@ -746,6 +786,11 @@ void TelegramService::loop() {
     }
     delete in;
   }
+}
+
+uint32_t TelegramService::loopWaitMs(uint32_t nowMs) const {
+  (void)nowMs;
+  return (_inQ && uxQueueMessagesWaiting(_inQ)) ? 0 : ESPRACK_LOOP_IDLE_WAIT_MS;
 }
 
 bool TelegramService::postJson(const String& token, const char* method, const String& payload) {
@@ -855,6 +900,8 @@ void TelegramService::pollCommands(const String& token) {
     if (xQueueSend(_inQ, &in, 0) != pdPASS) {
       delete in;
       ++_cmdDropped;
+    } else {
+      ESPRack::wakeLoop();  // loop() runs the handler
     }
   }
   if (_updOffset && _cmdsPublished != _cmdsRev) publishCommands(token);

@@ -2,6 +2,8 @@
 #include <WebManager.h>
 #include <web/Form.h>
 #include <HeapMonitor.h>
+#include <system/LoopWait.h>
+#include <algorithm>
 
 #include <Arduino.h>
 #include <esp_random.h>
@@ -284,10 +286,9 @@ void WireguardService::loop() {
   // ~line 1027. Walk netif_list once per loop iteration, lift the
   // counters into state. Throttled to once a second so the live
   // Tunnel-tab status push isn't doing this on every busy tick.
-  static uint32_t s_lastCountersMs = 0;
   uint32_t nowMs = millis();
-  if (actually_up && (nowMs - s_lastCountersMs >= 1000)) {
-    s_lastCountersMs = nowMs;
+  if (actually_up && (nowMs - _lastCountersMs >= 1000)) {
+    _lastCountersMs = nowMs;
     uint32_t tx = 0, rx = 0;
     for (struct netif* nif = netif_list; nif != nullptr; nif = nif->next) {
       if (nif->name[0] == 'w' && nif->name[1] == 'g') {
@@ -306,6 +307,26 @@ void WireguardService::loop() {
       }, "wg.counters");
     }
   }
+#endif
+}
+
+uint32_t WireguardService::loopWaitMs(uint32_t nowMs) const {
+#if HAVE_WIREGUARD_LIB
+  // Up or down, the lib's state is looked at once a second (up()/down() run
+  // on other tasks); the counters go with it.
+  uint32_t w = ESPRack::LoopWait::dueIn(nowMs, _lastCountersMs, 1000);
+  if (_wgUpAt_ms != 0) {
+    auto snap = [&](bool done, uint32_t atMs) {
+      if (!done) w = std::min(w, ESPRack::LoopWait::dueIn(nowMs, _wgUpAt_ms, atMs));
+    };
+    snap(_wgUpSnap200_done, 200);
+    snap(_wgUpSnap2s_done, 2000);
+    snap(_wgUpSnap10s_done, 10000);
+  }
+  return w;
+#else
+  (void)nowMs;
+  return ESPRACK_LOOP_IDLE_WAIT_MS;
 #endif
 }
 

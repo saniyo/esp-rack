@@ -935,6 +935,13 @@ const char* archiveStateString(FileSystemService::ArchiveJob::State s) {
 }
 }  // namespace
 
+// The archive walker and the hash job run on their own priority-1 tasks and
+// give the CPU away between steps: a one-tick wait on the task's own
+// notification (nobody gives it), so IDLE (the task watchdog) and lower-
+// priority work run. Not taskYIELD(): it only hands over to equal priority,
+// and IDLE would starve on a long walk.
+static inline void yieldStep() { (void)ulTaskNotifyTake(pdTRUE, 1); }
+
 // Walks the directory tree, populates job->entries.
 // Runs as a FreeRTOS task, yields between entries to keep WDT happy.
 static void archiveWalkerTask(void* arg) {
@@ -983,7 +990,7 @@ static void archiveWalkerTask(void* arg) {
     File dir = job->fs->open(curFs);
     if (!dir || !dir.isDirectory()) {
       if (dir) dir.close();
-      vTaskDelay(1);
+      yieldStep();
       continue;
     }
 
@@ -1011,11 +1018,11 @@ static void archiveWalkerTask(void* arg) {
         job->entries.push_back(std::move(fe));
         job->walkedCount = job->entries.size();
       }
-      vTaskDelay(1);
+      yieldStep();
       ent = dir.openNextFile();
     }
     dir.close();
-    vTaskDelay(1);
+    yieldStep();
   }
 
   job->totalBytes = totalBytes;
@@ -1170,7 +1177,7 @@ const char* hashStateString(FileSystemService::HashJob::State s) {
 }  // namespace
 
 // Streams the file in 4 KB chunks, hashing with HW SHA-256 + ROM CRC32.
-// vTaskDelay(1) between chunks keeps async_tcp and TWDT happy.
+// yieldStep() between chunks keeps async_tcp and TWDT happy.
 static void hashTask(void* arg) {
   using S = FileSystemService::HashJob::State;
   auto* job = static_cast<FileSystemService::HashJob*>(arg);
@@ -1224,7 +1231,7 @@ static void hashTask(void* arg) {
     COMPAT_SHA256_UPDATE(&ctx, buf, (size_t)n);
     crc = esp_rom_crc32_le(crc, buf, (uint32_t)n);
     job->bytesRead += (uint32_t)n;
-    vTaskDelay(1);
+    yieldStep();
   }
 
   uint8_t out[32];

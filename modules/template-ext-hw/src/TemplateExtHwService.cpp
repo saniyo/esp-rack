@@ -2,6 +2,8 @@
 
 #include <UpdateError.h>
 #include <WebManager.h>
+#include <App.h>  // ESPRack::wakeLoop
+#include <system/LoopWait.h>
 
 using ESPRack::HwDescriptor;
 using ESPRack::HwKind;
@@ -109,6 +111,7 @@ TemplateExtHwService::TemplateExtHwService(ESPRack::ExtHwModule& owner, ESPRack:
     if (_hw) _hw->update(_owner);  // new pins: re-claim (right away, not in loop)
     refreshHwState();
     _applyPending = true;          // the pins are switched in loop()
+    ESPRack::wakeLoop();
   }, false);
 }
 
@@ -178,8 +181,20 @@ void TemplateExtHwService::begin() {
 }
 
 void TemplateExtHwService::loop() {
-  if (_applyPending.exchange(false)) applyPins();
+  // Load + store, not exchange (no RMW atomics on a heap object).
+  if (_applyPending.load()) {
+    _applyPending.store(false);
+    applyPins();
+  }
   pollButton();
+}
+
+uint32_t TemplateExtHwService::loopWaitMs(uint32_t nowMs) const {
+  (void)nowMs;
+  if (_applyPending.load()) return 0;
+  // The button is polled (debounce) at the default cadence; an edge
+  // interrupt calling ESPRack::wakeLoopFromISR() would make it an event.
+  return _drivenButton >= 0 ? ESPRACK_LOOP_DEFAULT_WAIT_MS : ESPRACK_LOOP_IDLE_WAIT_MS;
 }
 
 void TemplateExtHwService::end() {
@@ -232,7 +247,10 @@ void TemplateExtHwService::refreshHwState() {
 
 void TemplateExtHwService::applyPins() {
   TemplateExtHwState s;
-  read([&](TemplateExtHwState& cur) { s = cur; });
+  if (!read([&](TemplateExtHwState& cur) { s = cur; })) {  // state lock timed out: the pins stay, the next pass
+    _applyPending.store(true);
+    return;
+  }
   const bool drive = s.hwState == HwState::Ok;
   const int out = drive ? s.outPin : -1;
   const int button = drive ? s.buttonPin : -1;

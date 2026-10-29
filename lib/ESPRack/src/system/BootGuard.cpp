@@ -14,6 +14,7 @@
 #include "WebManager.h"
 #include "power/FlashWriter.h"
 #include "power/WriteGate.h"
+#include "system/LoopWait.h"
 #include "time/TimeSync.h"
 
 namespace ESPRack {
@@ -447,6 +448,16 @@ void loop() {
     }
     (void)save();
   }
+}
+
+uint32_t loopWaitMs(uint32_t nowMs) {
+  if (!s_ready) return ESPRACK_LOOP_IDLE_WAIT_MS;
+  uint32_t w = LoopWait::dueIn(nowMs, s_lastUpS * 1000u, 10000);  // the uptime record
+  if (!s_info.stable) {
+    const uint32_t st = nowMs >= s_stableAfterMs ? 0 : s_stableAfterMs - nowMs;
+    if (st < w) w = st;
+  }
+  return w;
 }
 
 void registerManifest(WebManager* web) {

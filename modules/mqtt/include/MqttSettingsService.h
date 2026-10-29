@@ -484,6 +484,10 @@ class MqttSettingsService : public StatefulService<MqttSettings>,
 
   void begin();
   void loop();
+  // The nearest of: the "offline" ack timeout, the reconnect backoff; 0 for
+  // a pending reconfigure; idle otherwise. Whoever sets those (Wi-Fi events,
+  // the settings handler, the client's callbacks) wakes the loop.
+  uint32_t loopWaitMs(uint32_t nowMs) const;
   // Before a restart (MqttModule::onShutdown): goes offline as below,
   // waiting at most kOfflineAckShutdownMs for the broker's ack.
   void end();
@@ -583,6 +587,7 @@ class MqttSettingsService : public StatefulService<MqttSettings>,
   uint32_t _offlineSince{0};
   std::atomic<uint16_t> _offlineId{0};
   std::atomic<bool> _offlineAcked{false};
+  SemaphoreHandle_t _offlineAckSem{nullptr};  // given with _offlineAcked: end() waits on it
   void refreshAvailabilityTopic();
   bool publishOffline();            // true: queued, _offlineId set
   bool startGoingOffline();         // true: loop() calls finishGoingOffline()

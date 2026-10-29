@@ -224,6 +224,9 @@ class NTPSettingsService : public StatefulService<NTPSettings> {
 
   void begin();
   void loop();
+  // 0 while a reconfigure waits; the 1 s status push while the Status tab
+  // is open; idle otherwise (requestConfigure wakes the loop).
+  uint32_t loopWaitMs(uint32_t nowMs) const;
 
  private:
   ConfigDelegate<NTPSettings> _cfg;
@@ -231,6 +234,12 @@ class NTPSettingsService : public StatefulService<NTPSettings> {
   unsigned long _lastTickMs{0};
   char _serverBuf[2][NTP_SERVER_MAX]{};  // lwIP keeps a pointer to the SNTP server name (double-buffered)
   uint8_t _serverSel{0};
+  // The Wi-Fi events (arduino_events) and the settings handler (async_tcp)
+  // only ask for a reconfigure; loop() does it. The SNTP calls wait for the
+  // tcpip task and the lock may be held by another reader: neither belongs
+  // on arduino_events, whose stall backs up into sys_evt.
+  volatile bool _reconfigure{false};
+  void requestConfigure();
 
 #ifdef ESP32
   void onStationModeGotIP(WiFiEvent_t event, WiFiEventInfo_t info);
@@ -242,9 +251,9 @@ class NTPSettingsService : public StatefulService<NTPSettings> {
   void onStationModeDisconnected(const WiFiEventStationModeDisconnected& event);
 #endif
 
-  void configureNTP();
+  void configureNTP();  // loop task only (begin(), loop())
 #ifdef ESP32
-  void configureNTPLocked(const NTPSettings& s);  // caller holds the service lock
+  void applySntp(const NTPSettings& s);  // a copy of the settings, no lock held
 #endif
 };
 

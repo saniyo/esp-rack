@@ -32,6 +32,9 @@ class APModule : public ESPRack::Module {
 
   void onBegin() override { if (svc_) svc_->begin(); }
   void onLoop()  override { if (svc_) svc_->loop();  }
+  uint32_t loopWaitMs(uint32_t nowMs) const override {
+    return svc_ ? svc_->loopWaitMs(nowMs) : ESPRACK_LOOP_IDLE_WAIT_MS;
+  }
 
   APSettingsService* service() { return svc_.get(); }
 

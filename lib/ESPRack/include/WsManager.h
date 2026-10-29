@@ -21,12 +21,20 @@
 //   the CHANNEL name = feature id).
 // - State access through StatefulService<T>::read / update.
 // - Queues are FreeRTOS-free (portable) but correctly synchronised on ESP32.
+// - One task pumps the queues: the loop task (App::loop -> processAllQueues).
+//   WS events (async_tcp) and broadcasters only queue and wakeLoop(); the
+//   loop's wait is bounded by waitMs() (ping / heartbeat deadlines).
+// - No lock is held while sending (HGW-LIB-003): the roster lock covers map
+//   work only, and every wait on it has WS_LOCK_TIMEOUT_MS and an error path.
+//   A client being sent to is pinned (_pins): its disconnect, which frees it
+//   on async_tcp, waits for that one send instead.
 
 #include <Arduino.h>
 #include <ESPAsyncWebServer.h>
 #include <ArduinoJson.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
+#include <freertos/event_groups.h>
 
 #include <functional>
 #include <map>
@@ -39,9 +47,14 @@
 #include <freertos/portmacro.h>
 #endif
 
+#include "LockWait.h"
 #include "StatefulService.h"
 #include "StateFace.h"
 #include "WebAuth.h"
+
+namespace ESPRack {
+void wakeLoop();  // App.h: ends the loop task's wait now
+}
 
 #ifndef MWS_DEFAULT_JSON_CAP
 #define MWS_DEFAULT_JSON_CAP 2048
@@ -113,6 +126,22 @@
 #define WS_STUCK_MS 20000
 #endif
 
+// Bounded waits (HGW-LIB-003). The roster lock guards map work only (never a
+// send), so WS_LOCK_TIMEOUT_MS is reached only by a bug; a timeout drops that
+// one piece of work (a frame, a stat, a sub) and is counted (lock_timeouts).
+// A disconnect waits up to WS_SEND_WAIT_MS for a send to that client that is
+// in flight on another task. The frame-doc lock covers a state read, so it
+// waits for the state lock's timeout and a margin.
+#ifndef WS_LOCK_TIMEOUT_MS
+#define WS_LOCK_TIMEOUT_MS 500
+#endif
+#ifndef WS_SEND_WAIT_MS
+#define WS_SEND_WAIT_MS 1000
+#endif
+#ifndef WS_FRAME_LOCK_TIMEOUT_MS
+#define WS_FRAME_LOCK_TIMEOUT_MS (ESPRACK_STATE_LOCK_TIMEOUT_MS + 500)
+#endif
+
 // ---- Queue items ----
 // Tx: cid==0 means "fan out to every client SUBSCRIBED to `channel`";
 //     cid!=0 means "unicast to that client" (snapshot-on-subscribe).
@@ -145,12 +174,14 @@ class WsManager {
     // Guards the client roster (_clients incl. per-client subscription sets, and
     // _lastPong) against concurrent access from the two tasks that touch them:
     // async_tcp (WS events + form handlers/fillStats) and loopTask
-    // (processAllQueues from App::loop). Recursive so a locked path that
-    // re-enters (e.g. event -> processAllQueues -> processTx) can't self-deadlock.
+    // (processAllQueues from App::loop). Held for map work only, never across
+    // a send; recursive so a locked helper may call another one.
     _clientsMx = xSemaphoreCreateRecursiveMutex();
     // Guards the ONE shared outbound-build doc (_txDoc), reused for every
     // channel's state frame instead of a per-broadcast allocation.
     _txDocMx = xSemaphoreCreateRecursiveMutex();
+    // One bit per pin slot: a disconnect waiting for a send (see _pins).
+    _unpinned = xEventGroupCreate();
   }
 
   ~WsManager() {
@@ -161,6 +192,7 @@ class WsManager {
     if (_ws) { delete _ws; _ws = nullptr; }
     if (_clientsMx) vSemaphoreDelete(_clientsMx);
     if (_txDocMx) vSemaphoreDelete(_txDocMx);
+    if (_unpinned) vEventGroupDelete(_unpinned);
   }
 
   // =======================================================================
@@ -335,6 +367,10 @@ class WsManager {
   // since boot, and how many were closed by the caps / as stuck.
   size_t totalClients() const {
     ClientsLock g(_clientsMx);
+    if (!g) {
+      lockTimeout("count");
+      return 0;
+    }
     return liveCount();
   }
   size_t peakClients() const { return _peakClients; }
@@ -348,6 +384,12 @@ class WsManager {
   // (endpoints[].clients[]) so WebEndpointsService/WsDiag need no change.
   void fillStats(JsonObject& root) const {
     ClientsLock g(_clientsMx);
+    if (!g) {
+      lockTimeout("stats");
+      root["busy"] = true;
+      root["lock_timeouts"] = _lockTimeouts;
+      return;
+    }
     const unsigned long now = millis();
     auto sinceSec = [now](uint32_t ts) -> uint32_t {
       if (ts == 0) return 0;
@@ -402,6 +444,7 @@ class WsManager {
     root["backpressure_threshold"]   = (uint32_t)WS_BACKPRESSURE_THRESHOLD;
     root["stuck_evictions"]          = _stuckEvictions;
     root["backpressure_max"]         = (uint32_t)WS_MAX_QUEUED_MESSAGES;
+    root["lock_timeouts"]            = _lockTimeouts;
   }
 
   // Push current channel state to ALL its subscribers.
@@ -416,15 +459,16 @@ class WsManager {
     broadcast(channel, out, true);
   }
 
-  // Processing queues (call from loop)
+  // Processing queues: the loop task only (App::loop). Events and
+  // broadcasters queue and wake it; waitMs() says when it is due anyway.
   void processAllQueues() {
     // Reap closed clients. The cap itself is WS_EVT_CONNECT's: one above it,
     // so this can't close a second client while that one picks its victim.
     if (_ws) _ws->cleanupClients(ESPRACK_WS_MAX_CLIENTS + 1);
+    purgeGone();
     processRx();
     processTx();
-    // Keepalive — inline on the queue-pump task so ping/eviction share the
-    // same context (and lock) as the map mutations. Gated by interval.
+    // Keepalive, on the same task as the queue pump. Gated by interval.
     if (_pingIntervalSec &&
         (millis() - _lastPingTs >= (unsigned long)_pingIntervalSec * 1000UL)) {
       pingAll();          // updates _lastPingTs
@@ -434,6 +478,19 @@ class WsManager {
       _lastHeartbeatMs = millis();
       heartbeat();
     }
+  }
+
+  // How long the loop may wait from nowMs before processAllQueues() must run
+  // again: 0 with frames queued, else the nearer of the ping and heartbeat
+  // deadlines. Queueing a frame wakes the loop (ESPRack::wakeLoop).
+  uint32_t waitMs(uint32_t nowMs) const {
+    if (!_rxQ.empty() || !_txQ.empty()) return 0;
+    uint32_t w = ESPRack::msUntilDue(_lastHeartbeatMs, WS_HEARTBEAT_MS, nowMs);
+    if (_pingIntervalSec) {
+      const uint32_t p = ESPRack::msUntilDue((uint32_t)_lastPingTs, _pingIntervalSec * 1000u, nowMs);
+      if (p < w) w = p;
+    }
+    return w;
   }
 
   // Ping/Pong keepalive — cadence only; the pass runs inline in processAllQueues.
@@ -476,6 +533,13 @@ class WsManager {
       return true;
     }
 
+    bool empty() const {
+      lock();
+      const bool e = _size == 0;
+      unlock();
+      return e;
+    }
+
     bool pop(T*& out) {
       lock();
       if (_size == 0) {
@@ -498,12 +562,12 @@ class WsManager {
     size_t _size{0};
 
 #ifdef ESP32
-    portMUX_TYPE _mx = portMUX_INITIALIZER_UNLOCKED;
-    void lock() { portENTER_CRITICAL(&_mx); }
-    void unlock() { portEXIT_CRITICAL(&_mx); }
+    mutable portMUX_TYPE _mx = portMUX_INITIALIZER_UNLOCKED;
+    void lock() const { portENTER_CRITICAL(&_mx); }
+    void unlock() const { portEXIT_CRITICAL(&_mx); }
 #else
-    void lock() { noInterrupts(); }
-    void unlock() { interrupts(); }
+    void lock() const { noInterrupts(); }
+    void unlock() const { interrupts(); }
 #endif
   };
 
@@ -540,7 +604,7 @@ class WsManager {
     uint32_t overflowFrames{0};               // dropped: the state didn't fit the frame doc
 
     virtual ~ChannelBase() {}
-    virtual void readInto(JsonObject& out) = 0;
+    virtual bool readInto(JsonObject& out) = 0;  // false: state lock busy
     virtual StateUpdateResult apply(JsonObject& in, const String& origin) = 0;
   };
 
@@ -580,9 +644,9 @@ class WsManager {
     JsonStateReader<TState> reader;
     JsonStateUpdater<TState> updater;
 
-    void readInto(JsonObject& out) override {
-      if (!svc) return;
-      svc->read(out, reader);
+    bool readInto(JsonObject& out) override {
+      if (!svc) return false;
+      return svc->read(out, reader);
     }
 
     StateUpdateResult apply(JsonObject& in, const String& origin) override {
@@ -639,6 +703,11 @@ class WsManager {
     p.atMs = millis();
     {
       ClientsLock g(_clientsMx);
+      if (!g) {
+        // The connect finds no identity: Public, no write (fail closed).
+        lockTimeout("identity");
+        return true;
+      }
       // One entry per connection: drop this connection's older entry and
       // anything expired, then take a free slot (else the oldest).
       for (auto& e : _pendingIds) {
@@ -663,6 +732,10 @@ class WsManager {
 
   void dropIdentity(const void* tcp) {
     ClientsLock g(_clientsMx);
+    if (!g) {
+      lockTimeout("identity");
+      return;  // the entry ages out (kPendingIdentityTtlMs)
+    }
     for (auto& e : _pendingIds) {
       if (e.tcp == tcp) e = PendingIdentity{};
     }
@@ -700,6 +773,10 @@ class WsManager {
   // client (already gone) -> no rights.
   bool clientRights(uint32_t cid, WebAuthLevel& level, bool& canWrite) const {
     ClientsLock g(_clientsMx);
+    if (!g) {
+      lockTimeout("rights");
+      return false;
+    }
     auto cit = _clients.find(cid);
     if (cit == _clients.end()) return false;
     level = cit->second.level;
@@ -728,15 +805,115 @@ class WsManager {
   size_t _peakClients{0};
 
   SemaphoreHandle_t _clientsMx = nullptr;
+  // Recursive-mutex guard with a timeout: test it (`if (!g)`) and take the
+  // error path when the lock stayed busy.
   struct ClientsLock {
     SemaphoreHandle_t h;
-    explicit ClientsLock(SemaphoreHandle_t s) : h(s) {
-      if (h) xSemaphoreTakeRecursive(h, portMAX_DELAY);
-    }
-    ~ClientsLock() { if (h) xSemaphoreGiveRecursive(h); }
+    bool ok;
+    explicit ClientsLock(SemaphoreHandle_t s, uint32_t timeoutMs = WS_LOCK_TIMEOUT_MS)
+        : h(s), ok(!s || xSemaphoreTakeRecursive(s, pdMS_TO_TICKS(timeoutMs)) == pdTRUE) {}
+    ~ClientsLock() { if (h && ok) xSemaphoreGiveRecursive(h); }
+    explicit operator bool() const { return ok; }
     ClientsLock(const ClientsLock&) = delete;
     ClientsLock& operator=(const ClientsLock&) = delete;
   };
+  mutable uint32_t _lockTimeouts{0};  // any WsManager lock (stats: lock_timeouts)
+
+  // Lock timed out in `where`: count; log the 1st, 2nd, 4th...
+  void lockTimeout(const char* where) const {
+    const uint32_t n = ++_lockTimeouts;
+    if (ESPRack::logThisFail(n)) log_w("[ws] lock busy (%s), %u so far", where, (unsigned)n);
+  }
+
+  // Liveness of the library's clients. An AsyncWebSocketClient is freed by
+  // async_tcp (its destructor fires WS_EVT_DISCONNECT) while the loop task
+  // may be sending to it. A sender pins the client (pin/unpin, any task);
+  // the disconnect closes its entry and waits for those pins (releaseClient).
+  // The pointer comes from WS_EVT_CONNECT, so senders never walk the
+  // library's unlocked client list. Spinlock: a few loads/stores per call.
+  static constexpr size_t kPinSlots =
+      (2 * ESPRACK_WS_MAX_CLIENTS + 2) < 24 ? (2 * ESPRACK_WS_MAX_CLIENTS + 2) : 24;
+  ESPRack::PinTable<AsyncWebSocketClient, kPinSlots> _pins;
+  mutable portMUX_TYPE _pinMx = portMUX_INITIALIZER_UNLOCKED;
+  EventGroupHandle_t _unpinned = nullptr;
+
+  AsyncWebSocketClient* pin(uint32_t cid) {
+    const void* me = xTaskGetCurrentTaskHandle();
+    portENTER_CRITICAL(&_pinMx);
+    AsyncWebSocketClient* c = _pins.pin(cid, me);
+    portEXIT_CRITICAL(&_pinMx);
+    return c;
+  }
+
+  void unpin(uint32_t cid) {
+    const void* me = xTaskGetCurrentTaskHandle();
+    int slot = -1;
+    portENTER_CRITICAL(&_pinMx);
+    const bool wake = _pins.unpin(cid, me, slot);
+    portEXIT_CRITICAL(&_pinMx);
+    if (wake && _unpinned) xEventGroupSetBits(_unpinned, (EventBits_t)1 << slot);
+  }
+
+  // WS_EVT_DISCONNECT, inside the client's destructor: no new pins, then wait
+  // (WS_SEND_WAIT_MS) for a send in flight on another task. Timeout: logged,
+  // the destructor goes on.
+  void releaseClient(uint32_t cid) {
+    const void* me = xTaskGetCurrentTaskHandle();
+    portENTER_CRITICAL(&_pinMx);
+    const int slot = _pins.close(cid, me);
+    portEXIT_CRITICAL(&_pinMx);
+    if (slot < 0) return;
+    const EventBits_t bit = (EventBits_t)1 << slot;
+    const TickType_t t0 = xTaskGetTickCount();
+    const TickType_t limit = pdMS_TO_TICKS(WS_SEND_WAIT_MS);
+    for (;;) {
+      portENTER_CRITICAL(&_pinMx);
+      const bool busy = _pins.waiting(slot);
+      if (!busy) _pins.done(slot);
+      portEXIT_CRITICAL(&_pinMx);
+      if (!busy) break;
+      const TickType_t spent = xTaskGetTickCount() - t0;
+      if (!_unpinned || spent >= limit) {
+        log_e("[ws] client %u freed while a send to it is in flight", (unsigned)cid);
+        portENTER_CRITICAL(&_pinMx);
+        _pins.done(slot);
+        portEXIT_CRITICAL(&_pinMx);
+        break;
+      }
+      xEventGroupWaitBits(_unpinned, bit, pdTRUE, pdTRUE, limit - spent);
+    }
+    if (_unpinned) xEventGroupClearBits(_unpinned, bit);
+  }
+
+  // Whether the library client is connected (its entry open: not freed).
+  bool clientConnected(uint32_t cid) const {
+    portENTER_CRITICAL(&_pinMx);
+    const AsyncWebSocketClient* c = _pins.peek(cid);
+    const bool on = c && c->status() == WS_CONNECTED;
+    portEXIT_CRITICAL(&_pinMx);
+    return on;
+  }
+
+  // Roster entries whose client is gone without its disconnect getting the
+  // roster lock (a timeout there): dropped on the next pump.
+  void purgeGone() {
+    ClientsLock g(_clientsMx);
+    if (!g) {
+      lockTimeout("purge");
+      return;
+    }
+    for (auto it = _clients.begin(); it != _clients.end();) {
+      portENTER_CRITICAL(&_pinMx);
+      const bool known = _pins.has(it->first);
+      portEXIT_CRITICAL(&_pinMx);
+      if (known) {
+        ++it;
+        continue;
+      }
+      _lastPong.erase(it->first);
+      it = _clients.erase(it);
+    }
+  }
 
   // ONE shared outbound-build doc, reused for every channel's state frame
   // (sized to the LARGEST channel only — _maxWsCap, not the sum). Eliminates
@@ -773,7 +950,7 @@ class WsManager {
   // cap, and still connected for the library (client() is null once it is
   // closing, e.g. the page closed it; the same rule as its count()).
   bool isLive(const std::pair<const uint32_t, WsClientInfo>& kv) const {
-    return !kv.second.evicting && _ws && _ws->client(kv.first);
+    return !kv.second.evicting && clientConnected(kv.first);
   }
 
   // Under _clientsMx. Live clients (on `channel` if given).
@@ -819,20 +996,27 @@ class WsManager {
     return victim->id;
   }
 
-  // Closes a client picked by pickEviction. Takes _clientsMx (recursive):
-  // held, the client can't be freed between the lookup and close(); its
-  // disconnect event waits for the lock.
+  // Closes a client picked by pickEviction, with no lock held: the client is
+  // pinned, so its disconnect waits for close() to return.
   void evict(uint32_t cid, bool refused, const char* why) {
     if (!cid || !_ws) return;
-    ClientsLock g(_clientsMx);
     if (refused) ++_refusals;
     else ++_evictions;
     log_w("[ws] client %u %s: %s", (unsigned)cid, refused ? "refused" : "closed", why);
-    if (AsyncWebSocketClient* c = _ws->client(cid)) c->close(1000, refused ? "busy" : "evicted");
+    if (AsyncWebSocketClient* c = pin(cid)) {
+      c->close(1000, refused ? "busy" : "evicted");
+      unpin(cid);
+    }
   }
 
+  // Lock busy: 1, so a service still builds its push (processTx drops it
+  // when nobody is subscribed) instead of losing it.
   size_t subscriberCount(const String& channel) const {
     ClientsLock g(_clientsMx);
+    if (!g) {
+      lockTimeout("subs");
+      return 1;
+    }
     size_t n = 0;
     for (auto& kv : _clients) {
       if (kv.second.subs.find(channel) != kv.second.subs.end()) n++;
@@ -848,7 +1032,11 @@ class WsManager {
   // recursive-mutex RAII guard, reused here for _txDocMx.
   bool buildStateFrame(ChannelBase* base, const String& origin, String& out, ESPRack::StateFace face) {
     if (!base) return false;
-    ClientsLock g(_txDocMx);
+    ClientsLock g(_txDocMx, WS_FRAME_LOCK_TIMEOUT_MS);
+    if (!g) {
+      lockTimeout("frame");
+      return false;
+    }
     // readers can tell this frame (fixed buffer) from a REST read.
     ESPRack::StateFaceScope faceScope(face);
     const size_t want = _maxWsCap + 256;
@@ -862,7 +1050,9 @@ class WsManager {
     root["ch"] = base->name;
     root["origin_id"] = origin;
     JsonObject p = root.createNestedObject("p");
-    base->readInto(p);
+    // State lock busy (StatefulService timeout): no frame rather than an
+    // empty state; the next push or subscribe sends it.
+    if (!base->readInto(p)) return false;
     // A reader that outgrew the doc leaves a silently truncated tree: drop
     // the frame instead of sending half a state (as DataApi).
     if (_txDoc->overflowed()) {
@@ -886,68 +1076,81 @@ class WsManager {
     sendTo(channel, cid, out, true);
   }
 
+  // Both queues are pumped by the loop task: wake it.
   void enqueueTx(const String& channel, uint32_t cid, const String& payload, bool text) {
     auto* it = new WsTxItem{channel, cid, payload, text};
     if (!_txQ.push(it)) delete it;
+    else ESPRack::wakeLoop();
   }
 
   void enqueueRx(uint32_t cid, const String& payload, bool text) {
     auto* it = new WsRxItem{cid, payload, text};
     if (!_rxQ.push(it)) delete it;
+    else ESPRack::wakeLoop();
   }
 
+  // Per frame: the targets are copied under the roster lock; each send is
+  // outside it, to a pinned client; the result is booked under the lock.
+  // Lock busy: that frame is dropped (counted).
   void processTx() {
-    // Reads/updates the _clients roster per frame; lock so a WS
-    // connect/disconnect (async_tcp) can't erase an entry mid-iteration.
-    ClientsLock g(_clientsMx);
+    WsTxItem* it = nullptr;
     if (!_ws) {
-      WsTxItem* drain = nullptr;
-      while (_txQ.pop(drain)) delete drain;
+      while (_txQ.pop(it)) delete it;
       return;
     }
-    WsTxItem* it = nullptr;
-    const uint32_t nowMs = millis();
+    std::vector<uint32_t> to;
     while (_txQ.pop(it)) {
-      if (!it) continue;
-      if (it->cid == 0) {
-        // Broadcast to every client SUBSCRIBED to this channel.
-        for (auto& kv : _clients) {
-          if (kv.second.subs.find(it->channel) == kv.second.subs.end()) continue;
-          AsyncWebSocketClient* c = _ws->client(kv.first);
-          if (!c || c->status() != WS_CONNECTED) continue;
-          const bool slow = !c->canSend() || c->queueLen() >= WS_BACKPRESSURE_THRESHOLD;
-          if (slow) {
-            kv.second.droppedFrames++;
-            if (!kv.second.slowSinceMs) kv.second.slowSinceMs = nowMs ? nowMs : 1;
-            continue;
-          }
-          if (it->text) c->text(it->payload);
-          else c->binary(reinterpret_cast<const uint8_t*>(it->payload.c_str()), it->payload.length());
-          kv.second.lastTxMs = nowMs;
-          kv.second.slowSinceMs = 0;
+      std::unique_ptr<WsTxItem> item(it);
+      if (!item) continue;
+      to.clear();
+      {
+        ClientsLock g(_clientsMx);
+        if (!g) {
+          lockTimeout("tx");
+          continue;
         }
-      } else {
-        // Unicast (snapshot-on-subscribe).
-        AsyncWebSocketClient* c = _ws->client(it->cid);
-        if (c && c->status() == WS_CONNECTED) {
-          auto cit = _clients.find(it->cid);
-          const bool slow = !c->canSend() || c->queueLen() >= WS_BACKPRESSURE_THRESHOLD;
-          if (slow) {
-            if (cit != _clients.end()) {
-              cit->second.droppedFrames++;
-              if (!cit->second.slowSinceMs) cit->second.slowSinceMs = nowMs ? nowMs : 1;
-            }
-          } else {
-            if (it->text) c->text(it->payload);
-            else c->binary(reinterpret_cast<const uint8_t*>(it->payload.c_str()), it->payload.length());
-            if (cit != _clients.end()) {
-              cit->second.lastTxMs = nowMs;
-              cit->second.slowSinceMs = 0;
-            }
+        if (item->cid == 0) {
+          // Broadcast to every client SUBSCRIBED to this channel.
+          for (auto& kv : _clients) {
+            if (kv.second.subs.find(item->channel) != kv.second.subs.end()) to.push_back(kv.first);
           }
+        } else if (_clients.count(item->cid)) {
+          to.push_back(item->cid);  // unicast (snapshot-on-subscribe)
         }
       }
-      delete it;
+      for (uint32_t cid : to) sendFrame(cid, *item);
+    }
+  }
+
+  void sendFrame(uint32_t cid, const WsTxItem& item) {
+    AsyncWebSocketClient* c = pin(cid);
+    if (!c) return;
+    int8_t sent = -1;  // -1 not connected, 0 skipped (back-pressure), 1 queued
+    if (c->status() == WS_CONNECTED) {
+      if (!c->canSend() || c->queueLen() >= WS_BACKPRESSURE_THRESHOLD) {
+        sent = 0;
+      } else {
+        if (item.text) c->text(item.payload);
+        else c->binary(reinterpret_cast<const uint8_t*>(item.payload.c_str()), item.payload.length());
+        sent = 1;
+      }
+    }
+    unpin(cid);
+    if (sent < 0) return;
+    const uint32_t nowMs = millis();
+    ClientsLock g(_clientsMx);
+    if (!g) {
+      lockTimeout("tx");
+      return;
+    }
+    auto cit = _clients.find(cid);
+    if (cit == _clients.end()) return;
+    if (sent) {
+      cit->second.lastTxMs = nowMs;
+      cit->second.slowSinceMs = 0;
+    } else {
+      cit->second.droppedFrames++;
+      if (!cit->second.slowSinceMs) cit->second.slowSinceMs = nowMs ? nowMs : 1;
     }
   }
 
@@ -972,7 +1175,8 @@ class WsManager {
         if (strcmp(type, "vis") == 0) {
           // The page is shown or hidden (see the cap note at the top).
           ClientsLock g(_clientsMx);
-          auto cit = _clients.find(it->cid);
+          auto cit = g ? _clients.find(it->cid) : _clients.end();
+          if (!g) lockTimeout("vis");
           if (cit != _clients.end()) {
             const int8_t h = (root["hidden"] | false) ? 1 : 0;
             if (h && cit->second.hidden != 1) cit->second.hiddenSinceMs = millis();
@@ -986,21 +1190,25 @@ class WsManager {
               log_w("[ws] sub denied: cid=%u ch=%s", (unsigned)it->cid, ch.c_str());
             } else {
               uint32_t victim = 0;
+              bool subbed = false;
               {
                 ClientsLock g(_clientsMx);
-                auto cit = _clients.find(it->cid);
+                auto cit = g ? _clients.find(it->cid) : _clients.end();
+                if (!g) lockTimeout("sub");  // the page subscribes again on its next reconnect
                 if (cit != _clients.end()) {
                   cit->second.subs.insert(ch);
+                  subbed = true;
                   if (liveCount(&ch) > ESPRACK_WS_MAX_PER_CHANNEL) victim = pickEviction(&ch, it->cid);
                   if (victim == it->cid) cit->second.subs.erase(ch);
                 }
               }
               evict(victim, victim == it->cid, "over the per-channel cap");
-              if (victim != it->cid) pushSnapshot(ch, it->cid);   // a unicast; processTx (below) sends it
+              if (subbed && victim != it->cid) pushSnapshot(ch, it->cid);   // a unicast; processTx (below) sends it
             }
           } else if (strcmp(type, "unsub") == 0) {
             ClientsLock g(_clientsMx);
-            auto cit = _clients.find(it->cid);
+            auto cit = g ? _clients.find(it->cid) : _clients.end();
+            if (!g) lockTimeout("unsub");
             if (cit != _clients.end()) cit->second.subs.erase(ch);
           } else if (base && root["p"].is<JsonObject>() &&
                      (!known || !canWrite ||
@@ -1024,90 +1232,132 @@ class WsManager {
     }
   }
 
+  // async_tcp. Roster work under the lock (with a timeout); a frame goes to
+  // the rx queue and the loop task pumps it. Sends here go to this event's
+  // own client (alive for the event) or to a pinned one (evict).
   void handleWsEvent(AsyncWebSocketClient* c,
                      AwsEventType t,
                      void* a,
                      uint8_t* data,
                      size_t len) {
     const uint32_t id = c->id();
-    bool justConnected = false;
-    uint32_t victim = 0;
-    std::vector<uint32_t> replaced;  // this tab's older sockets
+    switch (t) {
+      case WS_EVT_CONNECT:
+        // `a` is the upgrade request, already DELETED by AsyncWebSocketClient's
+        // constructor — never dereference it.
+        onConnect(c);
+        break;
+
+      case WS_EVT_PONG: {
+        ClientsLock g(_clientsMx);
+        if (!g) {
+          lockTimeout("pong");
+          break;
+        }
+        _lastPong[id] = millis();
+        auto cit = _clients.find(id);
+        if (cit != _clients.end()) cit->second.lastRxMs = millis();
+        if (_lastPingTs) updRtt(millis() - _lastPingTs);
+      } break;
+
+      case WS_EVT_DISCONNECT:
+        // Fired from the client's destructor: wait for a send in flight to it.
+        releaseClient(id);
+        forget(id);
+        break;
+
+      case WS_EVT_ERROR:
+        // A close frame with an error code; the client lives on until its
+        // disconnect but gets no more frames.
+        forget(id);
+        break;
+
+      case WS_EVT_DATA: {
+        {
+          ClientsLock g(_clientsMx);
+          if (g) {
+            _lastPong[id] = millis();
+            auto cit = _clients.find(id);
+            if (cit != _clients.end()) cit->second.lastRxMs = cit->second.lastAppRxMs = millis();
+          } else {
+            lockTimeout("rx");  // the frame is queued all the same
+          }
+        }
+        AwsFrameInfo* info = reinterpret_cast<AwsFrameInfo*>(a);
+        if (info && info->final && info->index == 0 && info->opcode == WS_TEXT) {
+          String s(reinterpret_cast<char*>(data), len);
+          enqueueRx(id, s, true);  // wakes the loop task
+        }
+      } break;
+
+      default:
+        break;
+    }
+  }
+
+  // Lock busy: the roster entry stays until purgeGone (after the disconnect).
+  void forget(uint32_t id) {
+    ClientsLock g(_clientsMx);
+    if (!g) {
+      lockTimeout("disconnect");
+      return;
+    }
+    _lastPong.erase(id);
+    _clients.erase(id);
+  }
+
+  void onConnect(AsyncWebSocketClient* c) {
+    const uint32_t id = c->id();
+    portENTER_CRITICAL(&_pinMx);
+    const bool slot = _pins.add(id, c);
+    portEXIT_CRITICAL(&_pinMx);
 
     // The connection's identity was resolved at the handshake (stashIdentity).
-    // `a` on WS_EVT_CONNECT is the upgrade request, already DELETED by
-    // AsyncWebSocketClient's constructor — never dereference it.
     // No manager = open device (admin + operator).
-    (void)a;
     WebAuthLevel connLevel = WebAuthLevel::Admin;
     bool connCanWrite = true;
-
-    // Map mutations under the lock. ws sends (sendId) and queue pumping happen
-    // AFTER releasing it.
-    {
+    uint32_t victim = 0;
+    std::vector<uint32_t> replaced;  // this tab's older sockets
+    bool rostered = false;
+    if (slot) {
       ClientsLock g(_clientsMx);
-      switch (t) {
-        case WS_EVT_CONNECT: {
-          _lastPong[id] = millis();
-          WsClientInfo info;
-          info.id = id;
-          info.remoteIp = c->remoteIP().toString();
-          info.connectedAtMs = millis();
-          info.lastRxMs = millis();
-          info.lastAppRxMs = millis();
-          info.lastTxMs = 0;
-          takeIdentity(c->client(), connLevel, connCanWrite, info.tab);
-          info.level = connLevel;
-          info.canWrite = connCanWrite;
-          if (info.tab) {
-            for (auto& kv : _clients) {
-              if (kv.second.tab != info.tab || !isLive(kv)) continue;
-              kv.second.evicting = true;
-              replaced.push_back(kv.first);
-            }
+      if (!g) {
+        lockTimeout("connect");
+      } else {
+        _lastPong[id] = millis();
+        WsClientInfo info;
+        info.id = id;
+        info.remoteIp = c->remoteIP().toString();
+        info.connectedAtMs = millis();
+        info.lastRxMs = millis();
+        info.lastAppRxMs = millis();
+        info.lastTxMs = 0;
+        takeIdentity(c->client(), connLevel, connCanWrite, info.tab);
+        info.level = connLevel;
+        info.canWrite = connCanWrite;
+        if (info.tab) {
+          for (auto& kv : _clients) {
+            if (kv.second.tab != info.tab || !isLive(kv)) continue;
+            kv.second.evicting = true;
+            replaced.push_back(kv.first);
           }
-          _clients[id] = info;   // empty subs — state flows only after an explicit sub
-          justConnected = true;
-          if (liveCount() > ESPRACK_WS_MAX_CLIENTS) victim = pickEviction(nullptr, id);
-          if (liveCount() > _peakClients) _peakClients = liveCount();
-        } break;
-
-        case WS_EVT_PONG: {
-          _lastPong[id] = millis();
-          auto cit = _clients.find(id);
-          if (cit != _clients.end()) cit->second.lastRxMs = millis();
-          if (_lastPingTs) updRtt(millis() - _lastPingTs);
-        } break;
-
-        case WS_EVT_DISCONNECT:
-        case WS_EVT_ERROR:
-          _lastPong.erase(id);
-          _clients.erase(id);
-          break;
-
-        case WS_EVT_DATA: {
-          _lastPong[id] = millis();
-          auto cit = _clients.find(id);
-          if (cit != _clients.end()) cit->second.lastRxMs = cit->second.lastAppRxMs = millis();
-          AwsFrameInfo* info = reinterpret_cast<AwsFrameInfo*>(a);
-          if (info && info->final && info->index == 0 && info->opcode == WS_TEXT) {
-            String s(reinterpret_cast<char*>(data), len);
-            enqueueRx(id, s, true);
-          }
-        } break;
-
-        default:
-          break;
+        }
+        _clients[id] = info;   // empty subs — state flows only after an explicit sub
+        rostered = true;
+        if (liveCount() > ESPRACK_WS_MAX_CLIENTS) victim = pickEviction(nullptr, id);
+        if (liveCount() > _peakClients) _peakClients = liveCount();
       }
     }
-
-    if (justConnected) {
-      for (uint32_t old : replaced) evict(old, false, "its tab reconnected");
-      evict(victim, victim == id, "over the client cap");
-      if (victim != id) sendId(c);   // {"type":"id","id":"ws:<cid>"} — NO auto state broadcast; client subscribes
+    if (!rostered) {
+      // No pin slot or no roster entry: it could never subscribe. Refuse it.
+      ++_refusals;
+      log_w("[ws] client %u refused: %s", (unsigned)id, slot ? "roster busy" : "no slot");
+      c->close(1000, "busy");
+      return;
     }
-
-    processAllQueues();
+    for (uint32_t old : replaced) evict(old, false, "its tab reconnected");
+    evict(victim, victim == id, "over the client cap");
+    if (victim != id) sendId(c);   // {"type":"id","id":"ws:<cid>"} — NO auto state broadcast; client subscribes
   }
 
   void sendId(AsyncWebSocketClient* c) {
@@ -1119,9 +1369,19 @@ class WsManager {
     c->text(s);
   }
 
+  // Every open client, pinned one at a time (no lock held while pinging).
   void pingAll() {
     _lastPingTs = millis();
-    if (_ws) _ws->pingAll();
+    uint32_t ids[kPinSlots];
+    portENTER_CRITICAL(&_pinMx);
+    const size_t n = _pins.ids(ids, kPinSlots);
+    portEXIT_CRITICAL(&_pinMx);
+    for (size_t i = 0; i < n; ++i) {
+      AsyncWebSocketClient* c = pin(ids[i]);
+      if (!c) continue;
+      c->ping();  // a no-op unless connected
+      unpin(ids[i]);
+    }
   }
 
   void checkInactive() {
@@ -1129,6 +1389,10 @@ class WsManager {
     std::vector<uint32_t> expired;
     {
       ClientsLock g(_clientsMx);
+      if (!g) {
+        lockTimeout("pong check");
+        return;
+      }
       for (auto it = _lastPong.begin(); it != _lastPong.end();) {
         if (now - it->second > _pongTimeoutMs) {
           expired.push_back(it->first);
@@ -1143,41 +1407,49 @@ class WsManager {
 
   // See WS_HEARTBEAT_MS. A beat is skipped for a client whose queue is full;
   // one that stays full for WS_STUCK_MS is aborted (a close frame would only
-  // queue behind the stuck data), outside the lock: the disconnect event
-  // takes it again.
+  // queue behind the stuck data). Sends go to pinned clients, no lock held.
   void heartbeat() {
     if (!_ws) return;
     const uint32_t now = millis();
-    std::vector<uint32_t> stuck;
-    {
-      ClientsLock g(_clientsMx);
-      for (auto& kv : _clients) {
-        AsyncWebSocketClient* c = _ws->client(kv.first);
-        if (!c || c->status() != WS_CONNECTED) continue;
-        WsClientInfo& ci = kv.second;
-        if (!c->canSend() || c->queueLen() >= WS_BACKPRESSURE_THRESHOLD) {
-          if (!ci.slowSinceMs) ci.slowSinceMs = now ? now : 1;
-          else if (now - ci.slowSinceMs >= WS_STUCK_MS) stuck.push_back(kv.first);
-          continue;
-        }
-        ci.slowSinceMs = 0;
-        c->text("{\"type\":\"hb\"}");
-      }
-    }
-    for (uint32_t cid : stuck) {
-      ++_stuckEvictions;
-      log_w("[ws] client %u: queue stuck for %u s, dropping the connection", (unsigned)cid,
-            (unsigned)(WS_STUCK_MS / 1000));
-      AsyncWebSocketClient* c = _ws->client(cid);
+    uint32_t ids[kPinSlots];
+    portENTER_CRITICAL(&_pinMx);
+    const size_t n = _pins.ids(ids, kPinSlots);
+    portEXIT_CRITICAL(&_pinMx);
+    for (size_t i = 0; i < n; ++i) {
+      const uint32_t cid = ids[i];
+      AsyncWebSocketClient* c = pin(cid);
       if (!c) continue;
-      if (AsyncClient* tcp = c->client()) tcp->abort();
-      else c->close();
+      const bool on = c->status() == WS_CONNECTED;
+      const bool slow = on && (!c->canSend() || c->queueLen() >= WS_BACKPRESSURE_THRESHOLD);
+      bool stuck = false;
+      if (on) {
+        ClientsLock g(_clientsMx);
+        auto cit = g ? _clients.find(cid) : _clients.end();
+        if (!g) lockTimeout("heartbeat");
+        if (cit != _clients.end()) {
+          WsClientInfo& ci = cit->second;
+          if (!slow) ci.slowSinceMs = 0;
+          else if (!ci.slowSinceMs) ci.slowSinceMs = now ? now : 1;
+          else stuck = now - ci.slowSinceMs >= WS_STUCK_MS;
+        }
+      }
+      if (on && !slow) c->text("{\"type\":\"hb\"}");
+      if (stuck) {
+        ++_stuckEvictions;
+        log_w("[ws] client %u: queue stuck for %u s, dropping the connection", (unsigned)cid,
+              (unsigned)(WS_STUCK_MS / 1000));
+        if (AsyncClient* tcp = c->client()) tcp->abort();
+        else c->close();
+      }
+      unpin(cid);
     }
   }
 
   void closeClient(uint32_t cid) {
-    if (!_ws) return;
-    if (AsyncWebSocketClient* c = _ws->client(cid)) c->close();
+    if (AsyncWebSocketClient* c = pin(cid)) {
+      c->close();
+      unpin(cid);
+    }
   }
 
   void updRtt(unsigned long rttMs) {

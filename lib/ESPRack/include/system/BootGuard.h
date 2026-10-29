@@ -97,6 +97,9 @@ bool clearSafeMode();
 
 // Framework plumbing (App).
 void loop();                            // markStable() once uptime >= stableAfterMs
+// App::loop's wait: ms until loop() is due (markStable, the 10 s uptime
+// record). The boot's time waits for a valid clock: TimeSync wakes the loop.
+uint32_t loopWaitMs(uint32_t nowMs);
 void registerManifest(WebManager* web);  // admin action system.clearSafeMode
 // A write the gate put off is still in RAM.
 bool savePending();

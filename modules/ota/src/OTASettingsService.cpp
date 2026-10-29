@@ -9,6 +9,7 @@
 #endif
 #include <web/Form.h>
 #include <WebManager.h>
+#include <system/LoopWait.h>
 
 namespace {
 
@@ -69,11 +70,11 @@ OTASettingsService::OTASettingsService(ConfigManager* cfgMgr) :
                WiFiEvent_t::ARDUINO_EVENT_WIFI_STA_GOT_IP);
 #endif
   // POST /api/v1/ota/state → update() applies state → this handler
-  // runs after the response is queued, reconfigures ArduinoOTA, and
-  // persists via ConfigManager. OTA lives in the Config Manager tab
+  // runs after the response is queued, has loop() reconfigure ArduinoOTA,
+  // and persists via ConfigManager. OTA lives in the Config Manager tab
   // alongside every other config.
   addUpdateHandler([this](const String& origin) {
-    configureArduinoOTA();
+    requestConfigure();
     _cfg.saveIfChanged(origin);
   }, false);
 }
@@ -117,9 +118,24 @@ void OTASettingsService::begin() {
 }
 
 void OTASettingsService::loop() {
+  if (_reconfigure) {
+    _reconfigure = false;  // before the work: a request meanwhile runs it again
+    configureArduinoOTA();
+  }
   if (_state.enabled && _arduinoOTA) {
     _arduinoOTA->handle();
   }
+}
+
+uint32_t OTASettingsService::loopWaitMs(uint32_t nowMs) const {
+  (void)nowMs;
+  if (_reconfigure) return 0;
+  return (_state.enabled && _arduinoOTA) ? OTA_POLL_MS : ESPRACK_LOOP_IDLE_WAIT_MS;
+}
+
+void OTASettingsService::requestConfigure() {
+  _reconfigure = true;
+  ESPRack::wakeLoop();
 }
 
 void OTASettingsService::configureArduinoOTA() {
@@ -213,6 +229,6 @@ void OTASettingsService::configureArduinoOTA() {
 
 #ifdef ESP32
 void OTASettingsService::onStationModeGotIP(WiFiEvent_t event, WiFiEventInfo_t info) {
-  configureArduinoOTA();
+  requestConfigure();
 }
 #endif

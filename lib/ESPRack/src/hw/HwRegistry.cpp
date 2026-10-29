@@ -90,6 +90,17 @@ void HwRegistry::addRejected(const ExtHwModule& m, const char* version, const ch
   _rejected.push_back(r);
 }
 
+bool HwRegistry::lock(const char* who) const {
+  if (xSemaphoreTake(_mx, pdMS_TO_TICKS(ESPRACK_HW_LOCK_WAIT_MS)) == pdTRUE) return true;
+  log_e("[hw] %s: registry lock not had in %u ms", who, (unsigned)ESPRACK_HW_LOCK_WAIT_MS);
+  return false;
+}
+
+HwState HwRegistry::lastState(const ExtHwModule& who) const {
+  const Inst* x = instOf(who);  // the list is fixed after build
+  return x ? x->state : HwState::Ok;
+}
+
 ExtHwModule* HwRegistry::findInstance(const char* id) const {
   if (!id) return nullptr;
   for (const Inst& x : _inst) {
@@ -154,7 +165,7 @@ void HwRegistry::boot() {
     x.version = md.version ? md.version : "";
     HwDescriptor d;
     x.m->describeHw(d);  // module code: outside the lock
-    lock();
+    if (!lock("boot")) continue;  // stays NotConfigured: its hardware is left alone
     evaluate(x, d);
     const HwState st = x.state;
     char reason[sizeof(x.reason)];
@@ -172,7 +183,12 @@ void HwRegistry::boot() {
 
 HwCheck HwRegistry::validate(const ExtHwModule& who, const HwDescriptor& proposed) const {
   if (proposed.disabled) return HwCheck{};
-  lock();
+  if (!lock("validate")) {
+    HwCheck busy;
+    busy.ok = false;
+    strlcpy(busy.reason, "hardware registry busy, try again", sizeof(busy.reason));
+    return busy;
+  }
   HwCheck c = _claims.check(who.instanceId(), proposed);
   unlock();
   return c;
@@ -181,7 +197,7 @@ HwCheck HwRegistry::validate(const ExtHwModule& who, const HwDescriptor& propose
 HwState HwRegistry::update(ExtHwModule& who) {
   HwDescriptor d;
   who.describeHw(d);  // module code: outside the lock
-  lock();
+  if (!lock("update")) return lastState(who);  // claims not re-evaluated: the next update does it
   Inst* x = instOf(who);
   if (!x) {
     unlock();
@@ -206,7 +222,7 @@ HwState HwRegistry::update(ExtHwModule& who) {
 }
 
 HwState HwRegistry::state(const ExtHwModule& who) const {
-  lock();
+  if (!lock("state")) return lastState(who);
   const Inst* x = instOf(who);
   const HwState s = x ? x->state : HwState::Ok;
   unlock();
@@ -215,14 +231,17 @@ HwState HwRegistry::state(const ExtHwModule& who) const {
 
 void HwRegistry::stateReason(const ExtHwModule& who, char* buf, size_t len) const {
   if (!buf || !len) return;
-  lock();
+  if (!lock("stateReason")) {
+    buf[0] = '\0';
+    return;
+  }
   const Inst* x = instOf(who);
   strlcpy(buf, x ? x->reason : "", len);
   unlock();
 }
 
 bool HwRegistry::reserveGpio(int8_t pin, const char* reason) {
-  lock();
+  if (!lock("reserveGpio")) return false;
   BoardInfo& b = _claims.board();
   const bool ok = b.exists(pin) && b.addNote(pin, PinLevel::Reserved, reason ? reason : "reserved");
   unlock();
@@ -231,13 +250,13 @@ bool HwRegistry::reserveGpio(int8_t pin, const char* reason) {
 }
 
 void HwRegistry::released(const ExtHwModule& who) {
-  lock();
+  if (!lock("released")) return;  // stays "releasing" until the next released()
   _claims.released(who.instanceId());
   unlock();
 }
 
 void HwRegistry::setRuntimeNote(const ExtHwModule& who, const char* note, HwNoteLevel level) {
-  lock();
+  if (!lock("setRuntimeNote")) return;
   if (Inst* x = instOf(who)) {
     strlcpy(x->note, note ? note : "", sizeof(x->note));
     hwUtf8Trim(x->note);
@@ -248,7 +267,7 @@ void HwRegistry::setRuntimeNote(const ExtHwModule& who, const char* note, HwNote
 
 bool HwRegistry::reserve(HwKind kind, int16_t index, const char* reason, int8_t bus) {
   if (hwIsPin(kind)) return reserveGpio(static_cast<int8_t>(index), reason);
-  lock();
+  if (!lock("reserve")) return false;
   const bool ok = _claims.reserve(HwResource{kind, index, bus, 0, nullptr}, reason);
   unlock();
   if (!ok) log_w("[hw] reserve(%s %d) ignored", hwKindName(kind), index);
@@ -258,7 +277,7 @@ bool HwRegistry::reserve(HwKind kind, int16_t index, const char* reason, int8_t 
 bool HwRegistry::heldByOther(const ExtHwModule& who, HwKind kind, int index) const {
   const bool pin = hwIsPin(kind);
   bool held = false;
-  lock();
+  if (!lock("heldByOther")) return true;  // don't release what may be someone else's
   for (size_t i = 0; i < _claims.size() && !held; ++i) {
     const HwClaim& c = _claims.at(i);
     if (strcmp(c.owner, who.instanceId()) == 0 || c.res.index != index) continue;
@@ -269,7 +288,7 @@ bool HwRegistry::heldByOther(const ExtHwModule& who, HwKind kind, int index) con
 }
 
 void HwRegistry::claimsOf(HwKind kind, std::vector<ClaimRow>& out) const {
-  lock();
+  if (!lock("claimsOf")) return;
   for (const Inst& x : _inst) {
     for (uint8_t i = 0; i < x.desc.count; ++i) {
       if (x.desc.res[i].kind == kind) out.push_back(ClaimRow{x.m->instanceId(), x.desc.res[i], x.state});
@@ -285,7 +304,10 @@ bool i2cDeviceClaim(const HwRegistry* hw, const char* busId, uint8_t addr, const
 }
 
 bool HwRegistry::reserved(int gpio, const char** reason) const {
-  lock();
+  if (!lock("reserved")) {
+    if (reason) *reason = "hardware registry busy";
+    return true;  // keep away from it
+  }
   const PinNote* n = _claims.board().note(gpio);
   const bool r = n && n->level == PinLevel::Reserved;
   if (r && reason) *reason = n->reason;
@@ -388,6 +410,7 @@ void HwRegistry::registerManifest(WebManager* web) {
   act.successMessage = "Factory pins restored, restarting";
   act.handler = [this](AsyncWebServerRequest* r) {
     _restorePending = true;  // instances are touched on the loop task
+    wakeLoop();
     r->send(200, "application/json", "{\"queued\":true}");
   };
   web->registerAction(std::move(act));
@@ -493,7 +516,8 @@ void HwRegistry::buildForm(JsonObject& root, bool values) const {
   web::Form f(root, "hardware", kLabel);
   char line[160] = "";
 
-  lock();
+  const bool locked = lock("buildForm");
+  values = values && locked;  // no lock: the schema without values
   if (values) chipText(line, sizeof(line));
   f.add(web::Text("chip", line).readOnly().label("Chip").icon("Memory"));
   if (values) budgetText(line, sizeof(line));
@@ -515,7 +539,7 @@ void HwRegistry::buildForm(JsonObject& root, bool values) const {
             .col("reason", "Why", "text")
             .label("Reserved and caution resources"));
   if (values) fillPinRows(f.rowsOf("pins"));
-  unlock();
+  if (locked) unlock();
 
   if (!_inst.empty()) f.add(web::Action("a_restore").ref("system.restoreFactoryHw"));
 }
@@ -523,7 +547,7 @@ void HwRegistry::buildForm(JsonObject& root, bool values) const {
 // GET .../state: every field of the tab under its key, flat.
 void HwRegistry::buildState(JsonObject& root) const {
   char line[160];
-  lock();
+  if (!lock("buildState")) return;  // an empty state: the tab shows no values this time
   chipText(line, sizeof(line));
   root["chip"] = line;  // char arrays: copied
   budgetText(line, sizeof(line));

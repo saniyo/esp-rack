@@ -124,7 +124,7 @@ class HistoryService : public StatefulService<HistoryState>, public ESPRack::IHi
   static void taskEntry(void* self);
   void run();
   void flushAll(bool force);
-  uint32_t capBytes();
+  uint32_t capBytes(const HistorySettings& set);  // the settings of the pass (no 2nd read)
   void handleRest(AsyncWebServerRequest* r);
   void sendList(AsyncWebServerRequest* r);
   void sendRows(AsyncWebServerRequest* r, ESPRack::histmod::Series* s);
@@ -144,12 +144,15 @@ class HistoryService : public StatefulService<HistoryState>, public ESPRack::IHi
   bool _psram;
   uint32_t _internalBytes{0};
   TaskHandle_t _task{nullptr};
+  SemaphoreHandle_t _exited{nullptr};  // given by the "hist" task as it leaves; end() waits on it
   std::atomic<bool> _running{false};
   std::atomic<bool> _stop{false};
   std::atomic<bool> _flushNow{false};
   WebFeatureEntry<HistoryState>* _feature{nullptr};
 
-  // the "hist" task's view, read by the page
+  // the "hist" task's view, read by the page. One writer (the task): load +
+  // store, no read-modify-write (a heap object may sit in PSRAM on Xtensa,
+  // where RMW atomics fail).
   std::atomic<uint32_t> _lastFlushT{0};
   std::atomic<uint32_t> _bytesToday{0};
   std::atomic<uint32_t> _dayKey{0};

@@ -21,6 +21,13 @@
 //
 //   void loop() { app->loop(); }
 //
+// app->loop() blocks (HGW-LIB-003: no busy loop): after its own work and
+// every module's onLoop() it waits for the nearest deadline
+// (Module::loopWaitMs, ESPRACK_LOOP_MAX_WAIT_MS at most) or a wakeLoop(),
+// so the loop task leaves the CPU to others (IDLE too, single-core C3/C6
+// included). Code of your own beside app->loop() runs at the same pace: put
+// it in a module with its loopWaitMs(), or call wakeLoop() when it has work.
+//
 // App is NOT a singleton — multiple instances are unusual but legal.
 // Its destructor calls shutdown() if begin() ran.
 
@@ -94,6 +101,13 @@ const char* restartReason();
 //   * otherwise the hardware reason: "power-on", "ext", "panic", "int-wdt",
 //     "task-wdt", "wdt", "brownout", "deep-sleep", "usb", "jtag", "unknown".
 const char* lastRestartReason();
+
+// The loop task's wait (App::loop) ends now: call it where you set a flag
+// that an onLoop() reacts to. Any task; wakeLoopFromISR() from an ISR. Cheap
+// (a semaphore give, no allocation), safe before App::begin and after
+// shutdown (no-op while no App was built). Wakes coalesce.
+void wakeLoop();
+void wakeLoopFromISR();
 
 // Reasons used by the built-in modules (≤ 23 chars survive the reboot).
 static constexpr const char* kRestartUser          = "user";          // system.restart
@@ -250,6 +264,7 @@ class App {
   [[noreturn]] void finishAndRestart();    // hooks -> afterShutdown -> esp_restart
   void runAfterShutdownOnce();             // runs it, or waits for the task that does
   bool waitHooks(uint32_t ms) const;       // true when the hooks finished in time
+  uint32_t loopWaitMs() const;             // App::loop's wait: modules + the core's deadlines
   uint32_t shutdownGraceMs() const;
   uint32_t restartDeadlineMs() const;      // the hooks' share of the deadline
   static void onEspShutdown();             // esp_register_shutdown_handler hook

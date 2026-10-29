@@ -48,6 +48,11 @@ class TemplateModule : public ESPRack::Module {
 
   void onBegin() override    { if (svc_) svc_->begin(); }
   void onLoop() override     { if (svc_) svc_->loop();  }
+  // How long the loop may wait before onLoop must run again (its nearest
+  // timer); flags set on other tasks call ESPRack::wakeLoop() instead.
+  uint32_t loopWaitMs(uint32_t nowMs) const override {
+    return svc_ ? svc_->loopWaitMs(nowMs) : ESPRACK_LOOP_IDLE_WAIT_MS;
+  }
   void onShutdown() override { if (svc_) svc_->end();   }
 
  private:

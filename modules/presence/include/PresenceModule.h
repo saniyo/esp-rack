@@ -28,12 +28,14 @@ class PresenceModule : public ESPRack::Module {
   }
   void onLoop() override {
     if (!svc_) return;
-    static uint32_t last = 0;
     uint32_t now = millis();
-    if ((uint32_t)(now - last) >= 30000UL) {
-      last = now;
+    if ((uint32_t)(now - lastPurgeMs_) >= kPurgeMs) {
+      lastPurgeMs_ = now;
       svc_->purgeStale();
     }
+  }
+  uint32_t loopWaitMs(uint32_t nowMs) const override {
+    return svc_ ? ESPRack::LoopWait::dueIn(nowMs, lastPurgeMs_, kPurgeMs) : ESPRACK_LOOP_IDLE_WAIT_MS;
   }
   void onShutdown() override {
     // Log lines the write gate put off: written now, a short wait for a
@@ -41,7 +43,9 @@ class PresenceModule : public ESPRack::Module {
     if (svc_) svc_->flushLog(300);
   }
  private:
+  static constexpr uint32_t kPurgeMs = 30000;
   std::unique_ptr<PresenceService> svc_;
+  uint32_t lastPurgeMs_ = 0;
 };
 
 #endif

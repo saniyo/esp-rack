@@ -150,6 +150,9 @@ class APSettingsService : public StatefulService<APSettings> {
 
   void begin();
   void loop();
+  // The next 10 s management pass (0 right after a settings change, which
+  // wakes the loop itself).
+  uint32_t loopWaitMs(uint32_t nowMs) const;
 
   APNetworkStatus getAPNetworkStatus();
 

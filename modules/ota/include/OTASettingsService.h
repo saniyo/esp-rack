@@ -29,6 +29,13 @@
 
 #define OTA_SETTINGS_FILE "/config/otaSettings.json"
 
+// How often loop() asks ArduinoOTA for an invitation. Exception to "no
+// polling": ArduinoOTA keeps its UDP socket private and has no callback, so
+// handle() is the only way in; espota waits seconds for the answer.
+#ifndef OTA_POLL_MS
+#define OTA_POLL_MS 100
+#endif
+
 class OTASettings {
  public:
   bool   enabled{FACTORY_OTA_ENABLED};
@@ -92,11 +99,18 @@ class OTASettingsService : public StatefulService<OTASettings> {
 
   void begin();
   void loop();
+  // 0 for a pending reconfigure, OTA_POLL_MS while ArduinoOTA listens, idle
+  // otherwise.
+  uint32_t loopWaitMs(uint32_t nowMs) const;
 
  private:
   ConfigDelegate<OTASettings>   _cfg;
   WebFeatureEntry<OTASettings>* _feature{nullptr};
   ArduinoOTAClass*              _arduinoOTA{nullptr};
+  // GOT_IP (arduino_events) and the settings handler (async_tcp) only ask;
+  // loop() rebuilds ArduinoOTA, so handle() never runs on a deleted one.
+  volatile bool                 _reconfigure{false};
+  void requestConfigure();
 
   void configureArduinoOTA();
 #ifdef ESP32

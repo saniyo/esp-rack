@@ -27,11 +27,15 @@
 // per-packet HMAC + NVS epoch replay-hardening, anti-entropy /table + /digest.
 //
 // The table is read on the AsyncWebServer thread and written on the discovery
-// task → guarded by a mutex held only for the quick upsert / serialise.
+// task → guarded by a mutex held only for the quick upsert / serialise, taken
+// with a timeout (a miss drops that packet / leaves the peer list out once).
+//
+// The task waits in select() on its own lwIP socket (a packet, or the next
+// announce; 1 s at most, so a dropped link is seen), not in a poll loop. With
+// no link it waits on its notification (GOT_IP gives it), 1 s at most.
 
 #include <Arduino.h>
 #include <IPAddress.h>
-#include <WiFiUdp.h>
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -56,14 +60,14 @@ class DiscoveryService {
  private:
   void servePeers(AsyncWebServerRequest* request);
   bool openSocket();                                      // (re)join the multicast group
+  void closeSocket();                                     // leave it, close the socket
   void announceSelf();                                    // multicast our cached record
   void processPacket(char* buf, int len, IPAddress src);  // parse + verify + upsert
   void pruneStale(uint32_t now);                          // drop peers past the timeout
   static void taskTramp(void* arg);
   void discoveryLoop();
 
-  WiFiUDP           _udp;
-  bool              _udpReady{false};
+  int               _sock{-1};   // lwIP UDP socket (the task's own), -1 = closed
   uint32_t          _lastAnnounceMs{0};
 
   String            _psk;        // shared project key (the "internal key")

@@ -352,6 +352,7 @@ HistoryService::HistoryService(ESPRack::App* app, AsyncWebServer* server, Securi
 
 HistoryService::~HistoryService() {
   end();
+  if (_exited && !_running) vSemaphoreDelete(_exited);  // a task still leaving gives it later
   vSemaphoreDelete(_mx);
 }
 
@@ -530,6 +531,8 @@ void HistoryService::begin() {
                 _sm ? _sm->wrapRequest(del, AuthenticationPredicates::IS_ADMIN) : ArRequestHandlerFunction(del));
   }
   _stop = false;
+  if (!_exited) _exited = xSemaphoreCreateBinary();
+  if (_exited) xSemaphoreTake(_exited, 0);  // a stale give from an earlier run
   xTaskCreatePinnedToCore(taskEntry, "hist", 6144, this, 1, &_task, tskNO_AFFINITY);
 }
 
@@ -538,7 +541,10 @@ void HistoryService::end() {
   _stop = true;
   ESPRack::WriteGate::nudge();  // a step waiting for the write gate goes now
   xTaskNotifyGive(_task);
-  for (int i = 0; i < 300 && _running; ++i) vTaskDelay(pdMS_TO_TICKS(10));  // the task flushes, then leaves
+  // The task flushes, then leaves and says so: wait for that, 3 s at most.
+  if (!_exited || xSemaphoreTake(_exited, pdMS_TO_TICKS(3000)) != pdTRUE) {
+    if (_running) log_w("[hist] the task didn't stop within 3 s");
+  }
   _task = nullptr;
 }
 
@@ -547,15 +553,13 @@ void HistoryService::taskEntry(void* self) {
   vTaskDelete(nullptr);
 }
 
-uint32_t HistoryService::capBytes() {
-  HistorySettings set;
-  read([&](HistoryState& s) { set = s.set; });
+uint32_t HistoryService::capBytes(const HistorySettings& set) {
   return set.capKb ? uint32_t(set.capKb) * 1024 : uint32_t(ESPFS.totalBytes() / 4);
 }
 
 void HistoryService::flushAll(bool force) {
   if (!ESPRack::PowerGuard::writesAllowed()) {
-    ++_skippedPower;
+    _skippedPower.store(_skippedPower.load() + 1);
     return;
   }
   uint8_t* scratch = static_cast<uint8_t*>(
@@ -581,7 +585,7 @@ void HistoryService::flushAll(bool force) {
     while (left) {
       ESPRack::WriteSlot slot(0, &_stop, passSince);
       if (!slot.ok()) {  // PowerGuard paused writes: the rest stays queued
-        ++_skippedPower;
+        _skippedPower.store(_skippedPower.load() + 1);
         paused = true;
         break;
       }
@@ -595,12 +599,12 @@ void HistoryService::flushAll(bool force) {
   free(scratch);
   _lastFlushMs = millis();
   if (!written) return;
-  ++_flushes;
+  _flushes.store(_flushes.load() + 1);
   const time_t now = time(nullptr);
   if (now > kMinValidT) _lastFlushT = uint32_t(now);
-  _bytesToday += uint32_t(written);
+  _bytesToday.store(_bytesToday.load() + uint32_t(written));
   HistorySettings set;
-  read([&](HistoryState& s) { set = s.set; });
+  if (!read([&](HistoryState& s) { set = s.set; })) return;  // state lock timed out: the budget check next flush
   if (_bytesToday > uint32_t(set.budgetKb) * 1024 && _stretch < 16) {
     _stretch = _stretch * 2;
     log_w("[hist] %u KB written today (budget %d KB): flushing every %u min", unsigned(_bytesToday / 1024),
@@ -647,13 +651,17 @@ void HistoryService::run() {
       _stretch = 1;
     }
     HistorySettings set;
-    read([&](HistoryState& s) { set = s.set; });
+    if (!read([&](HistoryState& s) { set = s.set; })) continue;  // state lock timed out: this pass skipped
     if (set.heapSeries && millis() - _lastHeapMs >= ESPRACK_HISTORY_HEAP_SAMPLE_MS) {
       _lastHeapMs = millis();
       sampleHeap();
     }
     if (!set.enabled) continue;
-    bool due = _flushNow.exchange(false) || millis() - _lastFlushMs >= uint32_t(set.flushMin) * 60000UL * _stretch;
+    // Load + store, not exchange (no RMW atomics on the heap object): a
+    // request between the two is served by this very flush.
+    const bool asked = _flushNow.load();
+    if (asked) _flushNow.store(false);
+    bool due = asked || millis() - _lastFlushMs >= uint32_t(set.flushMin) * 60000UL * _stretch;
     for (Series* s : list) due = due || s->pressing();
     if (due) flushAll(false);
     if (millis() - _lastRetentionMs >= kRetentionMs && now > kMinValidT) {
@@ -672,7 +680,7 @@ void HistoryService::run() {
         }
       }
       std::vector<uint32_t> share(pooled.size());
-      ESPRack::hist::splitByNeed(capBytes(), need.data(), pooled.size(), share.data());
+      ESPRack::hist::splitByNeed(capBytes(set), need.data(), pooled.size(), share.data());
       for (size_t i = 0; i < pooled.size(); ++i) {
         pooled[i]->retention(ESPFS, uint32_t(now), share[i], steps.step());
         steps.finish();
@@ -681,6 +689,7 @@ void HistoryService::run() {
   }
   flushAll(true);  // shutdown, OTA, restart: what is waiting goes to flash (if power allows)
   _running = false;
+  if (_exited) xSemaphoreGive(_exited);
 }
 
 // ===================== REST =====================

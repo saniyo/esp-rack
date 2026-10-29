@@ -28,6 +28,7 @@
 #include <Arduino.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <freertos/semphr.h>
 
 #define CERT_MANAGER_FILE    "/config/cert.json"
 #define CERT_MANAGER_WS_PATH "/ws/certManager"
@@ -157,6 +158,8 @@ class CertManagerService : public StatefulService<CertManagerSettings>,
   void registerManifest(WebManager* web);
   void begin();
   void loop();
+  // The next 60 s state refresh.
+  uint32_t loopWaitMs(uint32_t nowMs) const;
 
   // Phase WG.3 — let the enroll flow include the device's WG
   // public key in the CSR payload so the mothership can pre-allocate
@@ -306,6 +309,12 @@ class CertManagerService : public StatefulService<CertManagerSettings>,
                           uint32_t& outNotAfterTs);
 
   TaskHandle_t _enrollTask{nullptr};
+  // The enroll task's waits (Wi-Fi, an enroll URL, the next poll) are waits
+  // on this, not sleeps: Wi-Fi up and a settings save end them early. A
+  // semaphore of the service, so a give never meets a task already gone.
+  SemaphoreHandle_t _enrollWake{nullptr};
+  void wakeEnroll() { if (_enrollWake) xSemaphoreGive(_enrollWake); }
+  void waitEnroll(uint32_t ms);
 
   // ── Phase 4a — proactive rotation ──
   //

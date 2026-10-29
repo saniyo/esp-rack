@@ -10,7 +10,8 @@
 // The framework pauses it where the loop legitimately blocks: an ArduinoOTA
 // transfer (the OTA module) and the shutdown hooks of a restart (bounded by
 // the restart deadline instead, App.h). pause()/resume() nest and may be
-// called from any task.
+// called from any task. Their lock is bounded (500 ms): a call that doesn't
+// get it is skipped and logged. App::loop waits half the timeout at most.
 //
 // Timeout: sdkconfig's CONFIG_ESP_TASK_WDT_TIMEOUT_S (5 s) unless arm() gets
 // one, or the build sets ESPRACK_LOOP_WDT_MS. The TWDT is one for all its

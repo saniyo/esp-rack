@@ -1375,7 +1375,12 @@ String MothershipService::actionConfigRestore(JsonObjectConst params) {
   }
   log_d("[mship.config.restore] %u entries match; restoring after shutdown",
         (unsigned)matching);
-  vTaskDelay(pdMS_TO_TICKS(500));   // let the action result reach the ring
+  // Let the action result reach the ring: 500 ms on the check-in task (it
+  // runs the actions), as a wait on its own notification. A setCadence
+  // notify meanwhile doesn't cut it short; the restart follows anyway.
+  for (const uint32_t t0 = millis(); (uint32_t)(millis() - t0) < 500;) {
+    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(500 - (millis() - t0)) + 1);
+  }
   // Reason = what happened (config restore); the initiator is in the log.
   ESPRack::restartDevice(ESPRack::kRestartConfigRestore, [mgr, blob]() {
     DynamicJsonDocument doc(blob->length() * 2 + 1024);

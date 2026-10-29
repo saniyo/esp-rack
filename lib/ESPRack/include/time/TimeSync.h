@@ -23,7 +23,8 @@
 //
 // Threading: readers (isValid, status, clockSane, utcMsAtMonoMs, getTimezone)
 // are safe from any task. submit(), begin(), loop() run on the loop task;
-// listeners are called only from loop().
+// listeners are called only from loop(). What other tasks hand over (SNTP,
+// operator time, a TZ change) wakes the loop (ESPRack::wakeLoop).
 
 #include <stddef.h>
 #include <stdint.h>
@@ -40,6 +41,11 @@
 #endif
 #ifndef ESPRACK_DEFAULT_TZ_LABEL
 #define ESPRACK_DEFAULT_TZ_LABEL "Etc/UTC"
+#endif
+#ifndef ESPRACK_TZ_LOCK_WAIT_MS
+// The TZ lock guards a few string copies and tzset(): a wait this long
+// means something is stuck, so the caller gives up (logged).
+#define ESPRACK_TZ_LOCK_WAIT_MS 200
 #endif
 #ifndef ESPRACK_TIMESYNC_MAX_LISTENERS
 #define ESPRACK_TIMESYNC_MAX_LISTENERS 6  // App uses one (manifest re-bake on TzChanged)
@@ -80,6 +86,9 @@ class TimeSync {
 
   void begin();  // App::begin, first thing (loop task)
   void loop();   // App::loop, first thing
+  // App::loop's wait: ms until loop() has work of its own (the hold record
+  // refresh); validity edges ride on the loop's bound.
+  uint32_t loopWaitMs(uint32_t nowMs) const;
 
   void registerSource(TimeSource s);
   // Loop task only. Stamp TimeSample::sampleMonoMs with TimeSync::monoMs()
@@ -109,10 +118,12 @@ class TimeSync {
   static bool clockSane();
 
   // false: not shaped like a POSIX TZ string (name, offset, optional rules)
-  // or too long. The check is syntactic; libc decides the meaning.
+  // or too long (the check is syntactic; libc decides the meaning), or the
+  // TZ lock was not had within ESPRACK_TZ_LOCK_WAIT_MS (logged).
   bool setTimezone(const char* posix, const char* ianaLabel);
+  // "" / "" when the TZ lock was not had in time (logged).
   void getTimezone(char* posix, size_t posixLen, char* iana, size_t ianaLen) const;
-  uint32_t tzRevision() const;
+  uint32_t tzRevision() const;  // 0 when the TZ lock was not had in time
 
   // step: the Stepped amount (also with BecameValid when the clock was
   // stepped while invalid), else 0.

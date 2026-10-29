@@ -21,6 +21,8 @@
 
 #include <atomic>
 
+#include "App.h"  // wakeLoop
+
 namespace ESPRack {
 
 namespace {
@@ -28,6 +30,14 @@ portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;  // arbiter + bookkeeping
 StaticSemaphore_t s_tzMutexBuf;
 SemaphoreHandle_t s_tzMutex = nullptr;               // TZ strings + setenv/tzset
 std::atomic<bool> s_tzEvent{false};
+
+// TZ strings + setenv/tzset: microseconds. Bounded all the same; false is
+// logged, the caller skips its work.
+bool tzLock(const char* who) {
+  if (xSemaphoreTake(s_tzMutex, pdMS_TO_TICKS(ESPRACK_TZ_LOCK_WAIT_MS)) == pdTRUE) return true;
+  log_e("[time] %s: TZ lock not had in %u ms — skipped", who, (unsigned)ESPRACK_TZ_LOCK_WAIT_MS);
+  return false;
+}
 
 constexpr uint32_t kOperatorAccuracyMs = 2000;
 constexpr int64_t kUnexplainedStepMs = 1000;
@@ -153,10 +163,11 @@ TimeSync::TimeSync() : _arb(withSaneFloor(TimeArbiterPolicy{})) {
 void TimeSync::begin() {
   if (_begun) return;
   _loopTask = xTaskGetCurrentTaskHandle();
-  xSemaphoreTake(s_tzMutex, portMAX_DELAY);
-  setenv("TZ", _tz, 1);
-  tzset();
-  xSemaphoreGive(s_tzMutex);
+  if (tzLock("begin")) {
+    setenv("TZ", _tz, 1);
+    tzset();
+    xSemaphoreGive(s_tzMutex);
+  }
 
   const TimeArbiter::Now now{sysUtcMs(), monoMs()};
   restoreHoldAtBoot(now);
@@ -292,6 +303,7 @@ bool TimeSync::queueOperatorTime(int64_t utcMs) {
   _opMono = mono;
   _opPending = true;
   portEXIT_CRITICAL(&s_mux);
+  wakeLoop();
   return true;
 }
 
@@ -307,6 +319,7 @@ void TimeSync::onSntpTime(int64_t utcMs) {
   _sntpMono = mono;
   _sntpPending = true;
   portEXIT_CRITICAL(&s_mux);
+  wakeLoop();
 }
 
 void TimeSync::loop() {
@@ -398,6 +411,13 @@ void TimeSync::loop() {
 
   // 4. Keep the hold record's "last valid" fresh.
   if (st.valid && now.monoMs - _holdSavedMono >= kHoldRefreshMs) saveHold(now.sysUtcMs);
+}
+
+uint32_t TimeSync::loopWaitMs(uint32_t nowMs) const {
+  (void)nowMs;  // the hold clock is monoMs()
+  if (!_begun || !_prevValid) return ESPRACK_LOOP_IDLE_WAIT_MS;
+  const uint64_t since = monoMs() - _holdSavedMono;
+  return since >= kHoldRefreshMs ? 0 : static_cast<uint32_t>(kHoldRefreshMs - since);
 }
 
 void TimeSync::emit(TimeEvent e, int64_t stepMs) {
@@ -492,7 +512,7 @@ bool TimeSync::setTimezone(const char* posix, const char* ianaLabel) {
     return false;
   }
   const char* label = ianaLabel ? ianaLabel : "";
-  xSemaphoreTake(s_tzMutex, portMAX_DELAY);
+  if (!tzLock("setTimezone")) return false;
   const bool changed = strcmp(_tz, posix) != 0 || strncmp(_tzLabel, label, sizeof(_tzLabel) - 1) != 0;
   if (changed) {
     strlcpy(_tz, posix, sizeof(_tz));
@@ -505,19 +525,24 @@ bool TimeSync::setTimezone(const char* posix, const char* ianaLabel) {
   if (changed) {
     log_i("[time] timezone %s (%s)", posix, label);
     s_tzEvent = true;
+    wakeLoop();
   }
   return true;
 }
 
 void TimeSync::getTimezone(char* posix, size_t posixLen, char* iana, size_t ianaLen) const {
-  xSemaphoreTake(s_tzMutex, portMAX_DELAY);
+  if (!tzLock("getTimezone")) {
+    if (posix && posixLen) posix[0] = '\0';
+    if (iana && ianaLen) iana[0] = '\0';
+    return;
+  }
   if (posix && posixLen) strlcpy(posix, _tz, posixLen);
   if (iana && ianaLen) strlcpy(iana, _tzLabel, ianaLen);
   xSemaphoreGive(s_tzMutex);
 }
 
 uint32_t TimeSync::tzRevision() const {
-  xSemaphoreTake(s_tzMutex, portMAX_DELAY);
+  if (!tzLock("tzRevision")) return 0;
   const uint32_t r = _tzRev;
   xSemaphoreGive(s_tzMutex);
   return r;

@@ -3,6 +3,8 @@
 #include <web/Form.h>
 #include <DeviceIdentity.h>
 #include <SecretsVault.h>
+#include <App.h>  // ESPRack::wakeLoop
+#include <system/LoopWait.h>
 
 // File-scope snapshot of the service's dual-AP selection. buildForm / wsRead
 // live on WiFiSettings (no service pointer), so the service writes here and
@@ -401,6 +403,9 @@ WiFiSettingsService::WiFiSettingsService(ConfigManager* cfgMgr)
   WiFi.onEvent(std::bind(&WiFiSettingsService::onStationModeStop, this,
                          std::placeholders::_1, std::placeholders::_2),
                WiFiEvent_t::ARDUINO_EVENT_WIFI_STA_STOP);
+  // A finished scan lets a held-back manageSTA / reconfigure go: wake the loop.
+  WiFi.onEvent([](WiFiEvent_t, WiFiEventInfo_t) { ESPRack::wakeLoop(); },
+               WiFiEvent_t::ARDUINO_EVENT_WIFI_SCAN_DONE);
 #endif
 
   // Defer FS write + WiFi.disconnect to the main loop task so the async
@@ -411,6 +416,7 @@ WiFiSettingsService::WiFiSettingsService(ConfigManager* cfgMgr)
     _pendingSaveOrigin = origin;
     _pendingSave = true;
     _pendingReconfigure = true;
+    ESPRack::wakeLoop();
   }, false);
 }
 
@@ -556,6 +562,14 @@ void WiFiSettingsService::loop() {
   s_activeAp = _activeAp;
 }
 
+uint32_t WiFiSettingsService::loopWaitMs(uint32_t nowMs) const {
+  if (_pendingSave || !_lastConnectionAttempt) return 0;
+  // A reconfigure held back by a scan waits for it: SCAN_DONE wakes the
+  // loop (and every wait is bounded, for the scan guard's 30 s expiry).
+  if (_pendingReconfigure && !isScanInProgress()) return 0;
+  return ESPRack::LoopWait::dueIn(nowMs, (uint32_t)_lastConnectionAttempt, WIFI_RECONNECTION_DELAY);
+}
+
 void WiFiSettingsService::reconfigureWiFiConnection() {
   // If a scan is in flight, defer the reconfigure — yanking the radio
   // mid-scan leaves the driver in a confused state and produces a string
@@ -579,6 +593,9 @@ void WiFiSettingsService::reconfigureWiFiConnection() {
   _invalidCredsLogged = false;
 
 #ifdef ESP32
+  // Exception (loop task, settings save only): the erase needs the link
+  // down first, so this waits up to 100 ms inside Arduino for the
+  // disconnect; there is no event-driven form of disconnect + erase.
   WiFi.disconnect(false, true);
   _stopping = false;
 #elif defined(ESP8266)
@@ -710,7 +727,8 @@ void WiFiSettingsService::onStationModeDisconnected(WiFiEvent_t, WiFiEventInfo_t
 
   // Do NOT reset _lastConnectionAttempt here: the 30 s backoff must apply
   // so we don't spin in a tight reconnect loop when no AP is in range.
-  WiFi.disconnect(false, false);
+  // Async: this runs on arduino_events, which must not wait on the link.
+  WiFi.disconnectAsync(false, false);
 }
 
 void WiFiSettingsService::onStationModeGotIP(WiFiEvent_t, WiFiEventInfo_t) {
@@ -723,6 +741,7 @@ void WiFiSettingsService::onStationModeStop(WiFiEvent_t, WiFiEventInfo_t) {
   if (_stopping) {
     _lastConnectionAttempt = 0;
     _stopping = false;
+    ESPRack::wakeLoop();
   }
 }
 #endif

@@ -117,6 +117,10 @@ class WiFiSettingsService : public StatefulService<WiFiSettings> {
 
   void begin();
   void loop();
+  // How long loop() may wait from nowMs (WiFiModule::loopWaitMs): the next
+  // 30 s connection cycle, 0 while deferred work is pending. The flags set
+  // on other tasks (POST handler, Wi-Fi events) wake the loop themselves.
+  uint32_t loopWaitMs(uint32_t nowMs) const;
 
   // Dual-AP active slot, exposed read-only for buildForm's Status tab.
   // 0 = primary, 1 = secondary.

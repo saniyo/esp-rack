@@ -5,6 +5,7 @@
 #include <App.h>
 #include <DeviceIdentity.h>
 #include <WebManager.h>
+#include <system/LoopWait.h>
 
 // mbedtls bindings for ECDSA-P256 keypair + PKCS#10 CSR + cert
 // metadata parsing. arduino-esp32 ships with mbedtls compiled in;
@@ -349,9 +350,13 @@ CertManagerService::CertManagerService(ConfigManager* cfgMgr,
            nullptr /*validator*/,
            CertManagerSettings::buildForm /*formReader for secret-key probe*/),
       _tls(tls) {
+  _enrollWake = xSemaphoreCreateBinary();
+  WiFi.onEvent([this](WiFiEvent_t, WiFiEventInfo_t) { wakeEnroll(); },
+               WiFiEvent_t::ARDUINO_EVENT_WIFI_STA_GOT_IP);
   addUpdateHandler([this](const String& origin) {
     refreshRuntimeState();
     _cfg.saveIfChanged(origin);
+    wakeEnroll();  // a new PKI URL / profile: the enroll task looks again
     // No broadcastWs here (LIB-FIX-009): the feature's WS binding pushes on
     // every propagated update, after this handler has refreshed state.
   }, false);
@@ -512,13 +517,24 @@ void CertManagerService::loop() {
   //   * if recovery completes externally → status_label refreshes
   // 60 s tick keeps the refresh cost negligible.
   uint32_t now_ms = millis();
-  if (now_ms - _lastStateRefreshMs > 60000) {
+  if (now_ms - _lastStateRefreshMs >= 60000) {
     _lastStateRefreshMs = now_ms;
     refreshRuntimeState();
   }
 
   // Auto-enrollment lives in its own FreeRTOS task spawned by
   // begin() — no work to do from this thread.
+}
+
+uint32_t CertManagerService::loopWaitMs(uint32_t nowMs) const {
+  return ESPRack::LoopWait::dueIn(nowMs, _lastStateRefreshMs, 60000);
+}
+
+void CertManagerService::waitEnroll(uint32_t ms) {
+  // Exception (own low-priority task): the retry cadence stays, as a wait
+  // that Wi-Fi up / a settings save end early.
+  if (_enrollWake) xSemaphoreTake(_enrollWake, pdMS_TO_TICKS(ms));
+  else ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(ms));
 }
 
 int32_t CertManagerService::daysUntilExpiry() const {
@@ -816,17 +832,17 @@ void CertManagerService::runEnrollmentLoop() {
   static constexpr uint32_t PENDING_INTERVAL_S = 30;
   static constexpr uint32_t ERROR_INTERVAL_S   = 60;
 
-  // 1) Wait for WiFi. Cheap to busy-wait at 1 Hz; the rest of the
-  //    framework is already up by now (begin() spawned us).
+  // 1) Wait for WiFi: GOT_IP ends the wait, the 1 s re-check stays as a
+  //    bound. The rest of the framework is already up (begin() spawned us).
   while (!WiFi.isConnected()) {
-    vTaskDelay(pdMS_TO_TICKS(1000));
+    waitEnroll(1000);
   }
 
   // 2) Wait for a resolvable enroll URL (Mothership profile picked).
   while (effectiveEnrollUrl().length() == 0) {
     log_d("[cert.enroll] waiting for enroll URL "
                     "(pick a Mothership profile or set PKI Base URL)");
-    vTaskDelay(pdMS_TO_TICKS(5000));
+    waitEnroll(5000);
   }
 
   // 3) Generate keypair + CSR ONCE. Reused across every poll so the
@@ -932,7 +948,7 @@ void CertManagerService::runEnrollmentLoop() {
                         : ERROR_INTERVAL_S;
     log_d("[cert.enroll] sleep %us before next poll",
                   (unsigned)sleep_s);
-    vTaskDelay(pdMS_TO_TICKS(sleep_s * 1000));
+    waitEnroll(sleep_s * 1000);
   }
 }
 

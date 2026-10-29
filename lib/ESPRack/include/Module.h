@@ -24,7 +24,9 @@
 //
 //   onLoop()      — cooperative tick. Called every iteration of the
 //                   consumer's main loop(). Must NOT block. Default
-//                   no-op.
+//                   no-op. Between iterations the loop task waits (it
+//                   doesn't spin): loopWaitMs() says how long this module
+//                   can wait, ESPRack::wakeLoop() (App.h) ends the wait.
 //
 //   onShutdown()  — graceful cleanup before any restart. Runs through
 //                   ESPRack::restartDevice() (all built-in reboot paths)
@@ -40,6 +42,8 @@
 
 #include <Arduino.h>
 #include <vector>
+
+#include "system/LoopWait.h"  // ESPRACK_LOOP_*_WAIT_MS
 
 class AsyncWebServer;
 class ConfigManager;
@@ -137,8 +141,23 @@ class Module {
   // Phase C. Network + peripherals are alive. Default no-op.
   virtual void onBegin() {}
 
-  // Phase D. Main loop tick. Default no-op.
-  virtual void onLoop() {}
+  // Phase D. Main loop tick. Default no-op: such a module has nothing for
+  // the loop, and the default loopWaitMs() counts it as idle from then on.
+  virtual void onLoop() { noLoop_ = true; }
+
+  // How long this module's onLoop may wait from nowMs (millis()) before it
+  // must run again: its nearest timer (LoopWait::dueIn helps), 0 = again at
+  // once. Asked after every pass; the loop waits for the smallest answer,
+  // ESPRACK_LOOP_MAX_WAIT_MS at most, or until a wakeLoop(). A module whose
+  // onLoop only reacts to flags other tasks set returns
+  // ESPRACK_LOOP_IDLE_WAIT_MS (or longer) and calls ESPRack::wakeLoop()
+  // where it sets the flag. The default keeps a module that overrides
+  // onLoop() but not this running every ESPRACK_LOOP_DEFAULT_WAIT_MS; one
+  // without an onLoop() of its own is idle (ESPRACK_LOOP_IDLE_WAIT_MS).
+  virtual uint32_t loopWaitMs(uint32_t nowMs) const {
+    (void)nowMs;
+    return noLoop_ ? ESPRACK_LOOP_IDLE_WAIT_MS : ESPRACK_LOOP_DEFAULT_WAIT_MS;
+  }
 
   // Phase E. Reverse-order shutdown before a restart (see header comment).
   // Must finish quickly (budget 500 ms) and must not block on the network.
@@ -155,6 +174,9 @@ class Module {
     (void)ifaceId;
     return nullptr;
   }
+
+ private:
+  bool noLoop_ = false;  // the base onLoop() ran: no loop work (loopTask only)
 };
 
 }  // namespace ESPRack

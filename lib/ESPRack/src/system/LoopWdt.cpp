@@ -17,12 +17,19 @@ bool s_armed = false;
 int s_paused = 0;
 uint32_t s_timeoutMs = CONFIG_ESP_TASK_WDT_TIMEOUT_S * 1000;
 
+// Held for an esp_task_wdt add/delete (microseconds); a wait this long
+// means something is stuck: the call is skipped (logged).
+constexpr TickType_t kLockWait = pdMS_TO_TICKS(500);
 struct Lock {
-  Lock() {
+  explicit Lock(const char* who) {
     if (!s_mx) s_mx = xSemaphoreCreateMutexStatic(&s_mxBuf);  // first call: early boot, one task
-    xSemaphoreTake(s_mx, portMAX_DELAY);
+    ok = xSemaphoreTake(s_mx, kLockWait) == pdTRUE;
+    if (!ok) log_e("[wdt] %s: lock not had in 500 ms — skipped", who);
   }
-  ~Lock() { xSemaphoreGive(s_mx); }
+  ~Lock() {
+    if (ok) xSemaphoreGive(s_mx);
+  }
+  bool ok;
 };
 }  // namespace
 
@@ -45,7 +52,8 @@ void reconfigure(uint32_t ms) {
 }
 
 void arm(uint32_t timeoutMs) {
-  Lock l;
+  Lock l("arm");
+  if (!l.ok) return;
   if (timeoutMs && timeoutMs != s_timeoutMs) reconfigure(timeoutMs);
   if (s_armed) return;
   s_armed = true;
@@ -53,12 +61,14 @@ void arm(uint32_t timeoutMs) {
 }
 
 void pause() {
-  Lock l;
+  Lock l("pause");  // skipped: the watchdog stays on (the safe side)
+  if (!l.ok) return;
   if (s_paused++ == 0 && s_armed) disableLoopWDT();
 }
 
 void resume() {
-  Lock l;
+  Lock l("resume");
+  if (!l.ok) return;
   if (s_paused == 0) return;  // unbalanced: ignore
   if (--s_paused == 0 && s_armed) enableLoopWDT();
 }

@@ -4,6 +4,9 @@
 #include <DeviceIdentity.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <freertos/semphr.h>
+#include <App.h>  // ESPRack::wakeLoop
+#include <system/LoopWait.h>
 #include <string.h>
 
 // ─── mqttTopicMatches ───────────────────────────────────────────────
@@ -86,6 +89,7 @@ MqttSettingsService::MqttSettingsService(ConfigManager* cfgMgr)
            nullptr /*validator*/,
            MqttSettings::buildForm /*formReader*/),
       _mqttClient() {
+  _offlineAckSem = xSemaphoreCreateBinary();
 #ifdef ESP32
   WiFi.onEvent(
       std::bind(&MqttSettingsService::onStationModeDisconnected, this, std::placeholders::_1, std::placeholders::_2),
@@ -104,7 +108,10 @@ MqttSettingsService::MqttSettingsService(ConfigManager* cfgMgr)
   // PUBACK of our retained "offline" (async_tcp task): the clean
   // DISCONNECT may go now.
   _mqttClient.onPublish([this](uint16_t packetId) {
-    if (packetId != 0 && packetId == _offlineId.load()) _offlineAcked = true;
+    if (packetId == 0 || packetId != _offlineId.load()) return;
+    _offlineAcked = true;
+    if (_offlineAckSem) xSemaphoreGive(_offlineAckSem);  // end() waits on it
+    ESPRack::wakeLoop();                                 // loop() finishes going offline
   });
   _mqttClient.onMessage(std::bind(&MqttSettingsService::onMqttMessage,
                                   this,
@@ -374,6 +381,13 @@ void MqttSettingsService::loop() {
   }
 }
 
+uint32_t MqttSettingsService::loopWaitMs(uint32_t nowMs) const {
+  if (_offlineWaiting) return _offlineAcked.load() ? 0 : ESPRack::LoopWait::dueIn(nowMs, _offlineSince, kOfflineAckMs);
+  if (_reconfigureMqtt) return 0;
+  if (_disconnectedAt) return ESPRack::LoopWait::dueIn(nowMs, (uint32_t)_disconnectedAt, MQTT_RECONNECTION_DELAY);
+  return ESPRACK_LOOP_IDLE_WAIT_MS;
+}
+
 /* ---------- legacy accessors ---------- */
 bool MqttSettingsService::isEnabled() {
   return _state.enabled;
@@ -448,6 +462,7 @@ void MqttSettingsService::onMqttDisconnect(AsyncMqttClientDisconnectReason reaso
 
   _state.disconnectReason = (uint8_t)reason;
   _disconnectedAt = millis();
+  ESPRack::wakeLoop();  // the reconnect backoff starts now
 
   // Broker session is gone — flush our cached "what we asked the
   // broker for" markers. onMqttConnect will re-issue from the
@@ -489,12 +504,13 @@ void MqttSettingsService::onMqttMessage(char* topic,
       if (len > MQTT_SEEN_PAYLOAD_MAX) body += "...";
     }
     // async_tcp context: mutate under the service lock — loopTask / WS
-    // readers serialise the same vectors (LIB-FIX-009).
-    beginTransaction();
-    upsertSeenTopic(t, body);
-    endTransaction();
-
-    if (_feature && _feature->hasSubscribers()) pushLive("mqtt");
+    // readers serialise the same vectors (LIB-FIX-009). Lock busy past
+    // its timeout: this row update is dropped (counted in lockTimeouts()).
+    if (beginTransaction()) {
+      upsertSeenTopic(t, body);
+      endTransaction();
+      if (_feature && _feature->hasSubscribers()) pushLive("mqtt");
+    }
   }
 
   // Hand off to subscription handlers (new IMqttProvider model).
@@ -720,6 +736,7 @@ void MqttSettingsService::brokerSubscribeIfNew(const String& pattern, uint8_t qo
 void MqttSettingsService::onConfigUpdated() {
   _reconfigureMqtt = true;
   _disconnectedAt = 0;
+  ESPRack::wakeLoop();  // Wi-Fi events (arduino_events), the settings handler
 }
 
 #ifdef ESP32
@@ -758,6 +775,7 @@ void MqttSettingsService::refreshAvailabilityTopic() {
 bool MqttSettingsService::publishOffline() {
   if (!_willActive || !_retainedWillTopic || !_mqttClient.connected()) return false;
   _offlineAcked = false;
+  if (_offlineAckSem) xSemaphoreTake(_offlineAckSem, 0);  // a stale ack of an earlier one
   const uint16_t id = _mqttClient.publish(_retainedWillTopic, 1, true, "offline");
   _offlineId = id;
   return id != 0;
@@ -793,8 +811,13 @@ void MqttSettingsService::end() {
   const char* task = pcTaskGetName(nullptr);
   if (task && (strcmp(task, "async_tcp") == 0 || strcmp(task, "tiT") == 0)) return;
   if (!publishOffline()) return;  // couldn't queue it: the will covers it
+  // The PUBACK handler gives _offlineAckSem: wait on it, kOfflineAckShutdownMs at most.
   const uint32_t t0 = millis();
-  while (!_offlineAcked.load() && (uint32_t)(millis() - t0) < kOfflineAckShutdownMs) vTaskDelay(pdMS_TO_TICKS(5));
+  while (!_offlineAcked.load() && _offlineAckSem) {
+    const uint32_t spent = millis() - t0;
+    if (spent >= kOfflineAckShutdownMs) break;
+    xSemaphoreTake(_offlineAckSem, ESPRack::LoopWait::ticksFor(kOfflineAckShutdownMs - spent, configTICK_RATE_HZ));
+  }
   const bool acked = _offlineAcked.load();
   _offlineId = 0;
   _willActive = false;

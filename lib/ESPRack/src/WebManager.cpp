@@ -1,4 +1,5 @@
 #include <WebManager.h>
+#include <App.h>  // wakeLoop
 #include <ESPFS.h>
 #include "SecretFields.h"
 #include "AdaptiveJson.h"
@@ -332,6 +333,7 @@ void WebManager::begin() {
         return idle ? idle : 1;
       }
       (void)swapBake(_bakeDue, true);
+      ESPRack::wakeLoop();  // App::loop bakes it (bakeIfDue)
       return ESPRack::FlashWriter::kDone;
     });
   }

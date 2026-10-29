@@ -4,6 +4,8 @@
 #include <WebManager.h>
 #include <soc/soc_caps.h>
 #include <system/BootGuard.h>
+#include <system/LoopWait.h>
+#include <App.h>  // ESPRack::wakeLoop
 
 #include <new>
 
@@ -138,6 +140,7 @@ struct BleService::Radio {
   bool scanParamsDirty = false;
   bool shuttingDown = false;
   std::atomic<bool> shutdownDone{false};  // the task has stopped the scan and the links
+  SemaphoreHandle_t shutdownSem = nullptr;  // given with shutdownDone: end() waits on it
 
   // Host state (written by the task).
   std::atomic<bool> hostUp{false};
@@ -161,7 +164,7 @@ struct BleService::Radio {
     void onResult(const NimBLEAdvertisedDevice* dev) override { radio->onResult(dev); }
     void onScanEnd(const NimBLEScanResults&, int) override {
       radio->scanning = false;
-      radio->scanGen++;
+      radio->scanGen.store(radio->scanGen.load() + 1);  // one writer; no RMW (Radio is on the heap)
       svc->wake();
     }
   } scanCb;
@@ -520,6 +523,7 @@ BleService::BleService(ConfigManager* cfgMgr)
            BleState::buildForm) {
   _radio = new Radio();
   _radio->mx = xSemaphoreCreateRecursiveMutex();
+  _radio->shutdownSem = xSemaphoreCreateBinary();
   for (uint8_t i = 0; i < kMaxLinks; i++) {
     Link& l = _radio->links[i];
     l.svc = this;
@@ -544,6 +548,7 @@ BleService::BleService(ConfigManager* cfgMgr)
   addUpdateHandler([this](const String& origin) {
     _cfg.saveIfChanged(origin);
     _applyPending = true;
+    ESPRack::wakeLoop();  // loop() hands them to the task
   }, false);
 }
 
@@ -614,11 +619,14 @@ void BleService::begin() {
 }
 
 void BleService::loop() {
-  if (_applyPending.exchange(false)) {
+  // Load + store, not exchange (no RMW atomics on the heap object): a save
+  // between the two is applied right here.
+  if (_applyPending.load()) {
+    _applyPending.store(false);
     // Settings saved: hand them to the task.
     const bool safe = ESPRack::BootGuard::info().safeMode;
     RadioLock lock(_radio);
-    read([&](BleState& s) {
+    const bool got = read([&](BleState& s) {
       String name = s.deviceName.length() ? s.deviceName
                                           : DeviceIdentity::projectName() + "-" + DeviceIdentity::uidHex8();
       if (name != _radio->name || s.txPower != _radio->txPower || s.mtu != _radio->mtu)
@@ -635,7 +643,8 @@ void BleService::loop() {
       _radio->activeScan = s.activeScan;
       _radio->scanMs = uint32_t(s.scanSeconds) * 1000;
     });
-    wake();
+    if (got) wake();
+    else _applyPending.store(true);  // state lock timed out: the radio keeps its settings, the next pass
   }
 
   const uint32_t now = millis();
@@ -644,6 +653,11 @@ void BleService::loop() {
     mirror();
     if (_feature && _feature->hasSubscribers()) _feature->broadcastWs("tick");
   }
+}
+
+uint32_t BleService::loopWaitMs(uint32_t nowMs) const {
+  if (_applyPending.load()) return 0;
+  return ESPRack::LoopWait::dueIn(nowMs, _lastMirrorMs, kMirrorMs);
 }
 
 void BleService::end() {
@@ -655,7 +669,10 @@ void BleService::end() {
     _radio->shuttingDown = true;
   }
   wake();
-  for (int i = 0; i < 30 && _radio->task && !_radio->shutdownDone.load(); i++) vTaskDelay(pdMS_TO_TICKS(10));
+  // The task gives shutdownSem once the scan and the links are down: wait
+  // for that, 300 ms at most (within the onShutdown budget).
+  if (_radio->task && !_radio->shutdownDone.load() && _radio->shutdownSem)
+    xSemaphoreTake(_radio->shutdownSem, pdMS_TO_TICKS(300));
 #endif
 }
 
@@ -833,7 +850,7 @@ void BleService::taskEntry(void* self) { static_cast<BleService*>(self)->taskLoo
 #if !ESPRACK_HAVE_NIMBLE
 
 void BleService::taskLoop() {
-  for (;;) vTaskDelay(portMAX_DELAY);
+  vTaskDelete(nullptr);  // never started without NimBLE
 }
 
 #else
@@ -948,7 +965,9 @@ void BleService::taskLoop() {
         if (l.client && l.client->isConnected()) l.client->disconnect();
       }
       r.shutdownDone = true;
-      vTaskDelay(portMAX_DELAY);
+      if (r.shutdownSem) xSemaphoreGive(r.shutdownSem);
+      // Parked until the restart (own task; nothing else is left to do).
+      for (;;) ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
     }
     if (up && !want) {
       // Radio off. Disconnect each client and wait for it (NimBLE refuses to
@@ -962,7 +981,10 @@ void BleService::taskLoop() {
         if (!l.client) continue;
         if (l.client->isConnected()) {
           l.client->disconnect();
-          for (int i = 0; i < 100 && l.client->isConnected(); i++) vTaskDelay(pdMS_TO_TICKS(20));
+          // onDisconnect wakes the task: wait for it, 2 s at most.
+          const uint32_t t0 = millis();
+          while (l.client->isConnected() && (uint32_t)(millis() - t0) < 2000)
+            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(2000 - (millis() - t0)) + 1);
         }
         if (!NimBLEDevice::deleteClient(l.client)) log_w("[ble] %s: client not deleted", l.spec.owner);
         l.client = nullptr;
@@ -1007,9 +1029,13 @@ void BleService::taskLoop() {
       }
     }
     if (!r.hostUp.load()) {
-      if (shutting) r.shutdownDone = true;
+      if (shutting) {
+        r.shutdownDone = true;
+        if (r.shutdownSem) xSemaphoreGive(r.shutdownSem);
+      }
       notifyStates();
-      ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(shutting ? portMAX_DELAY : 1000));
+      // Host off: re-check once a second; shutting down: parked until the restart.
+      ulTaskNotifyTake(pdTRUE, shutting ? portMAX_DELAY : pdMS_TO_TICKS(1000));
       continue;
     }
     if (hostDirty) {
@@ -1175,8 +1201,11 @@ void BleService::taskLoop() {
             fail("connect failed");
             break;
           }
-          // Let the peer settle (connection parameter update, its own GATT setup) before discovery.
-          vTaskDelay(pdMS_TO_TICKS(200));
+          // Let the peer settle (connection parameter update, its own GATT setup) before
+          // discovery: 200 ms as a wait on the task's notification (a wake meanwhile is
+          // seen on the next pass anyway), cut short only by a shutdown.
+          for (const uint32_t t0 = millis(); (uint32_t)(millis() - t0) < 200 && !r.shuttingDown;)
+            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(200 - (millis() - t0)) + 1);
           NimBLERemoteService* service = findService(l.client, l.spec.service);
           if (!service) {
             logServices(l.spec.owner, l.client);

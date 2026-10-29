@@ -5,6 +5,7 @@
 #include <App.h>  // ESPRack::restartDevice (LIB-FIX-006)
 #include <DeviceIdentity.h>
 #include <system/FirmwareUpdate.h>
+#include <system/LoopWait.h>
 
 #ifdef ESP32
 #include <HTTPClient.h>
@@ -88,6 +89,8 @@ AutoUpdateService::AutoUpdateService(ConfigManager* cfgMgr,
   _state.lastResult = "";
   _state.lastResultTime = "";
   _state.otaElapsedSec = 0;
+  // A settings change (enabled, interval) is looked at on the next pass.
+  addUpdateHandler([](const String&) { ESPRack::wakeLoop(); }, false);
 
 #ifdef ESP32
   WiFi.onEvent(
@@ -163,6 +166,13 @@ void AutoUpdateService::begin() {
 // LOOP — scheduler + timeout + state cleanup
 // ====================================================
 void AutoUpdateService::loop() {
+  // --- The restart a timeout scheduled ---
+  if (_restartPending) {
+    if ((uint32_t)(millis() - _restartAtMs) < kTimeoutRestartMs) return;
+    log_w("[AutoUpdate] OTA timeout — restarting");
+    ESPRack::restartDevice(ESPRack::kRestartAutoUpdate);
+  }
+
   // --- Timeout monitor for active OTA ---
   if (_otaState == AU_CHECKING || _otaState == AU_DOWNLOADING) {
     unsigned long elapsed = millis() - _otaStartMs;
@@ -187,10 +197,10 @@ void AutoUpdateService::loop() {
       }
       // OTA timeout leaves WiFi/HTTP stack in bad state → reboot.
       // ESP32 OTA is partition-safe: partial writes never get booted.
-      // vTaskDelay yields the scheduler instead of busy-blocking the loop.
-      vTaskDelay(pdMS_TO_TICKS(1000));
-      log_w("[AutoUpdate] OTA timeout — restarting");
-      ESPRack::restartDevice(ESPRack::kRestartAutoUpdate);
+      // In kTimeoutRestartMs (the top of loop()), the loop free meanwhile.
+      _restartAtMs = millis();
+      _restartPending = true;
+      return;
     }
   }
 
@@ -228,10 +238,26 @@ void AutoUpdateService::loop() {
   }
 }
 
+uint32_t AutoUpdateService::loopWaitMs(uint32_t nowMs) const {
+  if (_restartPending) return ESPRack::LoopWait::dueIn(nowMs, _restartAtMs, kTimeoutRestartMs);
+  // An update under way: its elapsed seconds and its deadline.
+  if (_otaState == AU_CHECKING || _otaState == AU_DOWNLOADING) return 1000;
+  if (_otaTaskHandle == nullptr && (_otaState == AU_FAILED || _otaState == AU_TIMEOUT)) return 0;
+  if (!_state.enabled || _state.checkInterval <= 0 || !_wifiConnected || _otaState != AU_IDLE)
+    return ESPRACK_LOOP_IDLE_WAIT_MS;
+  // Another image under way: nothing tells us when it ends.
+  if (ESPRack::FirmwareUpdate::active()) return ESPRACK_LOOP_MAX_WAIT_MS;
+#ifdef ESP32
+  if (ESPRack::OtaWriter::busy()) return ESPRACK_LOOP_MAX_WAIT_MS;
+#endif
+  return ESPRack::LoopWait::dueIn(nowMs, (uint32_t)_lastCheckMs, (uint32_t)_state.checkInterval * 60000UL);
+}
+
 void AutoUpdateService::otaTaskEntry(void* param) {
   AutoUpdateService* self = static_cast<AutoUpdateService*>(param);
   self->otaTaskRun();
   self->_otaTaskHandle = nullptr;
+  ESPRack::wakeLoop();  // loop() resets a failed state, schedules the next check
   vTaskDelete(nullptr);
 }
 
@@ -633,7 +659,9 @@ void AutoUpdateService::handleOtaResult(t_httpUpdate_return ret, const char* ser
       log_d("[AutoUpdate] %s: SUCCESS — rebooting", server);
       setOtaState(AU_SUCCESS);
       setLastResult("success");
-      vTaskDelay(pdMS_TO_TICKS(1000));
+      // Exception (the update task, its last step): a second for "success"
+      // to reach the page, as a wait on the task's own notification.
+      ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1000));
       ESPRack::restartDevice(ESPRack::kRestartAutoUpdate);
       break;
   }
@@ -650,6 +678,7 @@ void AutoUpdateService::onStationModeGotIP(WiFiEvent_t event, WiFiEventInfo_t in
     _lastCheckMs = 0;  // force immediate check
     log_d("[AutoUpdate] WiFi up — scheduling immediate check");
   }
+  ESPRack::wakeLoop();
 }
 
 void AutoUpdateService::onStationModeDisconnected(WiFiEvent_t event, WiFiEventInfo_t info) {

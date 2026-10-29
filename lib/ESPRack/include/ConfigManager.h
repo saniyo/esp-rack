@@ -33,6 +33,11 @@
 #ifndef CFGMGR_LOCK_WAIT_MS
 #define CFGMGR_LOCK_WAIT_MS 1000
 #endif
+// A deferred save whose service state lock timed out (StatefulService):
+// the FlashWriter tries it again after this long.
+#ifndef CFGMGR_BUSY_RETRY_MS
+#define CFGMGR_BUSY_RETRY_MS 1000
+#endif
 
 class ConfigManager {
  public:
@@ -144,8 +149,9 @@ class ConfigManager {
     // FlashWriter, the first step of a deferred save: the backup copy of
     // the file on flash. Unneeded: nothing to save any more (the state is
     // the saved one again; no longer deferred). Paused: PowerGuard paused
-    // writes, no copy made (it stays deferred).
-    enum class Backup : uint8_t { Unneeded, Made, Paused };
+    // writes, no copy made (it stays deferred). Busy: the service's state
+    // lock timed out, no copy made (it stays deferred, tried again soon).
+    enum class Backup : uint8_t { Unneeded, Made, Paused, Busy };
     virtual Backup backupForSave(ConfigManager&) { return Backup::Made; }
     // A save whose caller holds a gate slot (slotHeld: no gate here) and
     // has made the backup copy already (backupDone). saveIfChanged() is
@@ -282,6 +288,10 @@ class ConfigManager {
     _anyDeferred = true;
     ESPRack::FlashWriter::kick(_writerJob);
   }
+  // An entry's state lock timed out: its save stays deferred and the
+  // FlashWriter tries it again in CFGMGR_BUSY_RETRY_MS (not on a power
+  // event: nothing paused the writes).
+  void noteBusy() { _busyRetry.store(true); }
   bool hasDeferred() const { return _anyDeferred.load(); }
   size_t deferredCount() const;
   void flushDeferred();
@@ -478,7 +488,11 @@ class ConfigManager {
       }
       DynamicJsonDocument dataDoc(_d.bufferSize);
       JsonObject data = dataDoc.to<JsonObject>();
-      _d.service->read(data, _d.reader);
+      if (!_d.service->read(data, _d.reader)) {
+        mgr.unlock();
+        mgr.noteBusy();
+        return Backup::Busy;  // state lock timed out: nothing read, no copy
+      }
       if (_hasLastSavedCrc && ConfigManager::crc32OfJson(data) == _lastSavedCrc) {
         _deferred = false;  // back to what is on flash: nothing to write
         mgr.unlock();
@@ -613,7 +627,16 @@ class ConfigManager {
 
       DynamicJsonDocument dataDoc(_d.bufferSize);
       JsonObject data = dataDoc.to<JsonObject>();
-      _d.service->read(data, _d.reader);
+      // The state lock timed out: `data` is empty, never write it as the
+      // config. The save stays deferred; the FlashWriter tries it again.
+      if (!_d.service->read(data, _d.reader)) {
+        if (!_deferred) _deferredSince = ESPRack::WriteGate::now();
+        _deferred = true;
+        mgr.unlock();
+        mgr.noteBusy();
+        if (!slotHeld) mgr.markDeferred();  // the writer's own run reports it itself
+        return false;
+      }
 
       if (_d.validate && !_d.validate(data)) {
         mgr.unlock();
@@ -825,7 +848,7 @@ class ConfigManager {
     void cacheCrcFromReader(ConfigManager& mgr) {
       DynamicJsonDocument doc(_d.bufferSize);
       JsonObject data = doc.to<JsonObject>();
-      _d.service->read(data, _d.reader);
+      if (!_d.service->read(data, _d.reader)) return;  // lock timed out: no CRC, the next save writes
 
       _lastSavedCrc = ConfigManager::crc32OfJson(data);
       _hasLastSavedCrc = true;
@@ -851,6 +874,7 @@ class ConfigManager {
 
   std::vector<std::unique_ptr<IConfigEntry>> _entries;
   std::atomic<bool> _anyDeferred{false};  // marked from any task
+  std::atomic<bool> _busyRetry{false};    // noteBusy(), load/store only
   int8_t _writerJob = -1;                 // FlashWriter: writeDeferred()
   uint32_t writeDeferred();
 

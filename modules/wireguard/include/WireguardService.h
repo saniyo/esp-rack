@@ -90,6 +90,8 @@ class WireguardService : public StatefulService<WireguardSettings>,
   void registerManifest(WebManager* web);
   void begin();
   void loop();
+  // The 1 s counters / up-down refresh, or a heap snapshot due sooner.
+  uint32_t loopWaitMs(uint32_t nowMs) const;
 
   // ── IWireguardProvider ──
   const String& publicKey() const override   { return _state.pub_key; }
@@ -135,6 +137,7 @@ class WireguardService : public StatefulService<WireguardSettings>,
   // +200 ms / +2 s / +10 s after up(), revealing the actual
   // ECDH + lwIP-glue allocation timeline.
   uint32_t _wgUpAt_ms{0};
+  uint32_t _lastCountersMs{0};  // loop(): the 1 s counters refresh
   bool _wgUpSnap200_done{true};
   bool _wgUpSnap2s_done{true};
   bool _wgUpSnap10s_done{true};

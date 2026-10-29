@@ -1,6 +1,7 @@
 #include "PersistentTlsClient.h"
 #include "ITLSProvider.h"
 
+#include <lwip/sockets.h>  // select
 #include <time.h>
 
 #include "time/TimeSync.h"
@@ -218,6 +219,23 @@ bool PersistentTlsClient::ensureConnected() {
   return true;
 }
 
+bool PersistentTlsClient::waitReadable(uint32_t deadline_ms) {
+  // Bytes already in WiFiClient's own buffer: select() can't see them.
+  if (_tcp.available() > 0) return true;
+  const int fd = _tcp.fd();
+  const uint32_t now = millis();
+  if (fd < 0 || now >= deadline_ms) return false;
+  const uint32_t left = deadline_ms - now;
+  fd_set rd;
+  FD_ZERO(&rd);
+  FD_SET(fd, &rd);
+  struct timeval tv;
+  tv.tv_sec = left / 1000;
+  tv.tv_usec = (left % 1000) * 1000;
+  // Readable also on EOF / error: the caller's connected() check sees it.
+  return select(fd + 1, &rd, nullptr, nullptr, &tv) > 0;
+}
+
 String PersistentTlsClient::readLine(uint32_t deadline_ms,
                                      size_t max_len) {
   String out;
@@ -229,12 +247,12 @@ String PersistentTlsClient::readLine(uint32_t deadline_ms,
         // Socket dropped and buffer drained.
         return out;
       }
-      delay(1);
+      if (!waitReadable(deadline_ms)) return out;  // timed out
       continue;
     }
     int c = _ssl.read();
     if (c < 0) {
-      delay(1);
+      if (!waitReadable(deadline_ms)) return out;
       continue;
     }
     if (c == '\n') {
@@ -383,7 +401,7 @@ int PersistentTlsClient::post(const String& url,
       int got = _ssl.read(buf, to_read);
       if (got <= 0) {
         if (!_ssl.connected() && _ssl.available() <= 0) break;
-        delay(1);
+        if (!waitReadable(deadline)) break;  // timed out: "body short" below
         continue;
       }
       if (out_response.length() < _max_response_bytes) {

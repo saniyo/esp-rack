@@ -159,6 +159,9 @@ class PersistentTlsClient {
   // deadline (ms since boot). Returns the line WITHOUT the CRLF.
   // Empty string means timeout or socket close.
   String readLine(uint32_t deadline_ms, size_t max_len);
+  // Block until the socket has bytes for BearSSL (or the peer closed it)
+  // or the deadline: select(), no polling. false: deadline or no socket.
+  bool waitReadable(uint32_t deadline_ms);
 };
 
 }  // namespace ESPRack

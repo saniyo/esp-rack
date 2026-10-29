@@ -113,6 +113,7 @@ class BleService : public StatefulService<BleState>, public ESPRack::IBleProvide
   void registerManifest(WebManager* web);  // onInstall
   void begin();                            // onBegin
   void loop();                             // onLoop
+  uint32_t loopWaitMs(uint32_t nowMs) const;  // 0 for saved settings, else the 1 s mirror
   void end();                              // onShutdown
 
   // ---- IBleProvider (any task) ----

@@ -66,6 +66,7 @@ class TemplateExtHwService : public StatefulService<TemplateExtHwState> {
   const char* title() const { return _title; }
   void begin();                            // onBegin
   void loop();                             // onLoop
+  uint32_t loopWaitMs(uint32_t nowMs) const;  // loopWaitMs
   void end();                              // onShutdown
 
   void describeHw(ESPRack::HwDescriptor& d);  // loads the config first

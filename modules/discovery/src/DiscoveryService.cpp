@@ -3,6 +3,8 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <string.h>
+#include <errno.h>
+#include <lwip/sockets.h>
 #include "mbedtls/md.h"
 
 #include <AsyncJson.h>
@@ -43,7 +45,8 @@ const char*    DISCOVERY_GROUP       = "239.42.7.1";   // org-local multicast gr
 const uint16_t DISCOVERY_PORT        = 7711;
 const uint32_t ANNOUNCE_INTERVAL_MS  = 8000;    // self-announce cadence
 const uint32_t PEER_TIMEOUT_MS       = 30000;   // ~3.75 missed announces -> drop
-const uint32_t RX_IDLE_DELAY_MS      = 50;      // poll yield when no packet
+const uint32_t LINK_CHECK_MS         = 1000;    // longest wait: a dropped link is seen within it
+const uint32_t PEER_LOCK_MS          = 100;     // peer table lock (held for microseconds)
 const size_t   MAX_PKT               = 320;     // one announce fits comfortably
 const char     PKT_MAGIC             = 'E';     // "E5|2|..." wire prefix
 const uint8_t  PKT_VER               = 2;
@@ -152,6 +155,12 @@ void DiscoveryService::begin() {
   // the WiFiUDP recv + parse path is ~2.4 KB (stack_free 1688), so 4096 keeps a
   // healthy ~1.7 KB margin. Re-measure stack_free in System->Resources if the
   // SWIM probing phase adds depth.
+  // GOT_IP ends the task's no-link wait at once (its own notification; the
+  // task is static and never deleted, so the handle stays valid).
+  WiFi.onEvent([this](WiFiEvent_t, WiFiEventInfo_t) {
+    if (_task) xTaskNotifyGive(_task);
+  }, WiFiEvent_t::ARDUINO_EVENT_WIFI_STA_GOT_IP);
+
   if (_task == nullptr) {
     constexpr uint32_t kStackWords = 4096 / sizeof(StackType_t);
     static StackType_t  s_taskStack[kStackWords];
@@ -172,26 +181,63 @@ void DiscoveryService::taskTramp(void* arg) {
   static_cast<DiscoveryService*>(arg)->discoveryLoop();
 }
 
-bool DiscoveryService::openSocket() {
-  // beginMulticast joins the group AND binds the listen port in one call.
+namespace {
+in_addr_t groupAddr() {
   IPAddress group;
   group.fromString(DISCOVERY_GROUP);
-  if (_udp.beginMulticast(group, DISCOVERY_PORT) != 1) {
-    log_w("[discovery] beginMulticast(%s:%u) failed", DISCOVERY_GROUP, DISCOVERY_PORT);
+  return (in_addr_t)(uint32_t)group;
+}
+}  // namespace
+
+bool DiscoveryService::openSocket() {
+  // What WiFiUDP::beginMulticast does (bind the port on any address, join
+  // the group on the default interface), on a socket of our own: WiFiUDP
+  // keeps its descriptor private, and select() needs it.
+  _sock = socket(AF_INET, SOCK_DGRAM, 0);
+  if (_sock < 0) {
+    log_w("[discovery] socket() failed: %d", errno);
     return false;
   }
+  int yes = 1;
+  setsockopt(_sock, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+  sockaddr_in addr{};
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons(DISCOVERY_PORT);
+  addr.sin_addr.s_addr = htonl(INADDR_ANY);
+  ip_mreq mreq{};
+  mreq.imr_multiaddr.s_addr = groupAddr();
+  mreq.imr_interface.s_addr = htonl(INADDR_ANY);
+  if (bind(_sock, (sockaddr*)&addr, sizeof(addr)) < 0 ||
+      setsockopt(_sock, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) < 0) {
+    log_w("[discovery] joining %s:%u failed: %d", DISCOVERY_GROUP, DISCOVERY_PORT, errno);
+    close(_sock);
+    _sock = -1;
+    return false;
+  }
+  fcntl(_sock, F_SETFL, O_NONBLOCK);
   log_i("[discovery] listening on %s:%u", DISCOVERY_GROUP, DISCOVERY_PORT);
   return true;
 }
 
+void DiscoveryService::closeSocket() {
+  if (_sock < 0) return;
+  ip_mreq mreq{};
+  mreq.imr_multiaddr.s_addr = groupAddr();
+  mreq.imr_interface.s_addr = htonl(INADDR_ANY);
+  setsockopt(_sock, IPPROTO_IP, IP_DROP_MEMBERSHIP, &mreq, sizeof(mreq));
+  close(_sock);
+  _sock = -1;
+}
+
 void DiscoveryService::announceSelf() {
-  if (_announceLen <= 0) return;
-  if (_udp.beginMulticastPacket() != 1) {
-    log_d("[discovery] beginMulticastPacket failed");
-    return;
+  if (_announceLen <= 0 || _sock < 0) return;
+  sockaddr_in to{};
+  to.sin_family = AF_INET;
+  to.sin_port = htons(DISCOVERY_PORT);
+  to.sin_addr.s_addr = groupAddr();
+  if (sendto(_sock, _announceBuf, _announceLen, 0, (sockaddr*)&to, sizeof(to)) < 0) {
+    log_d("[discovery] announce failed: %d", errno);
   }
-  _udp.write((const uint8_t*)_announceBuf, _announceLen);
-  _udp.endPacket();
 }
 
 void DiscoveryService::processPacket(char* buf, int len, IPAddress src) {
@@ -223,8 +269,7 @@ void DiscoveryService::processPacket(char* buf, int len, IPAddress src) {
   uint32_t ipRaw  = (uint32_t)src;
   uint16_t port   = (uint16_t)atoi(f[8]);
 
-  if (!_mutex) return;
-  xSemaphoreTake(_mutex, portMAX_DELAY);
+  if (!_mutex || xSemaphoreTake(_mutex, pdMS_TO_TICKS(PEER_LOCK_MS)) != pdTRUE) return;  // the next announce
   // Find existing row by deviceId, else first free slot.
   int slot = -1, freeSlot = -1;
   for (int i = 0; i < DISCOVERY_MAX_PEERS; ++i) {
@@ -254,8 +299,7 @@ void DiscoveryService::processPacket(char* buf, int len, IPAddress src) {
 }
 
 void DiscoveryService::pruneStale(uint32_t now) {
-  if (!_mutex) return;
-  xSemaphoreTake(_mutex, portMAX_DELAY);
+  if (!_mutex || xSemaphoreTake(_mutex, pdMS_TO_TICKS(PEER_LOCK_MS)) != pdTRUE) return;  // the next round
   for (int i = 0; i < DISCOVERY_MAX_PEERS; ++i) {
     if (s_peers[i].used && (now - s_peers[i].lastSeenMs) > PEER_TIMEOUT_MS) {
       s_peers[i].used = false;
@@ -268,24 +312,41 @@ void DiscoveryService::discoveryLoop() {
   char buf[MAX_PKT];
   for (;;) {
     // Wait for STA to actually have an IP before touching the socket.
+    // Exception (own task, priority 1): the 1 s re-check stays, as a wait on
+    // the task's notification that GOT_IP ends early.
     if (WiFi.status() != WL_CONNECTED || WiFi.localIP() == IPAddress((uint32_t)0)) {
-      if (_udpReady) { _udp.stop(); _udpReady = false; }
-      vTaskDelay(pdMS_TO_TICKS(1000));
+      closeSocket();
+      ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(LINK_CHECK_MS));
       continue;
     }
-    if (!_udpReady) {
-      if (!openSocket()) { vTaskDelay(pdMS_TO_TICKS(1000)); continue; }
-      _udpReady = true;
+    if (_sock < 0) {
+      if (!openSocket()) { ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(LINK_CHECK_MS)); continue; }
       announceSelf();                 // announce immediately on (re)join
       _lastAnnounceMs = millis();
     }
 
-    int sz = _udp.parsePacket();
-    if (sz > 0) {
-      int n = _udp.read((uint8_t*)buf, sizeof(buf) - 1);
-      if (n > 0) processPacket(buf, n, _udp.remoteIP());
-    } else {
-      vTaskDelay(pdMS_TO_TICKS(RX_IDLE_DELAY_MS));
+    // Block in select() until a packet lands or the next announce is due.
+    uint32_t wait = millis() - _lastAnnounceMs;
+    wait = wait >= ANNOUNCE_INTERVAL_MS ? 0 : ANNOUNCE_INTERVAL_MS - wait;
+    if (wait > LINK_CHECK_MS) wait = LINK_CHECK_MS;
+    fd_set rd;
+    FD_ZERO(&rd);
+    FD_SET(_sock, &rd);
+    timeval tv;
+    tv.tv_sec = wait / 1000;
+    tv.tv_usec = (wait % 1000) * 1000;
+    const int ready = select(_sock + 1, &rd, nullptr, nullptr, &tv);
+    if (ready < 0) {
+      log_w("[discovery] select failed: %d, reopening", errno);
+      closeSocket();
+      ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(LINK_CHECK_MS));
+      continue;
+    }
+    if (ready > 0 && FD_ISSET(_sock, &rd)) {
+      sockaddr_in src{};
+      socklen_t slen = sizeof(src);
+      const int n = recvfrom(_sock, buf, sizeof(buf) - 1, MSG_DONTWAIT, (sockaddr*)&src, &slen);
+      if (n > 0) processPacket(buf, n, IPAddress((uint32_t)src.sin_addr.s_addr));
     }
 
     uint32_t now = millis();
@@ -311,7 +372,12 @@ void DiscoveryService::servePeers(AsyncWebServerRequest* request) {
     self["ip"]        = WiFi.localIP().toString();
 
     JsonArray arr = root.createNestedArray("peers");
-    if (_mutex) xSemaphoreTake(_mutex, portMAX_DELAY);
+    // async_tcp: a bounded wait for the table; on a miss the list is left
+    // out this once (the page asks again).
+    if (!_mutex || xSemaphoreTake(_mutex, pdMS_TO_TICKS(PEER_LOCK_MS)) != pdTRUE) {
+      root["busy"] = true;
+      return;
+    }
     uint32_t now = millis();
     for (int i = 0; i < DISCOVERY_MAX_PEERS; ++i) {
       const PeerRow& p = s_peers[i];
@@ -328,6 +394,6 @@ void DiscoveryService::servePeers(AsyncWebServerRequest* request) {
       o["compatible"] = p.compatible;
       o["age_ms"]     = (uint32_t)(now - p.lastSeenMs);
     }
-    if (_mutex) xSemaphoreGive(_mutex);
+    xSemaphoreGive(_mutex);
   }, 512);
 }
