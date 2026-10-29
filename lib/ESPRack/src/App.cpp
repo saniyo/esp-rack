@@ -17,6 +17,7 @@
 #include "system/CrashDump.h"
 #include "system/LoopWait.h"
 #include "system/LoopWdt.h"
+#include "system/TlsMemory.h"
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/event_groups.h>
@@ -347,6 +348,10 @@ void App::begin() {
       log_w("[restart] no deadline timer — a hanging onShutdown() can keep the device down");
     }
   }
+
+  // Before the first TLS connection: mbedTLS's large blocks to PSRAM, so a
+  // handshake neither needs nor cuts a big internal block.
+  TlsMemory::begin();
 
   // Time first: restores a soft-reset hold and owns the TZ
   // before any module looks at the clock. system.setTime is registered here,
