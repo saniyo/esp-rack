@@ -102,6 +102,11 @@ import CalendarMonth from '@mui/icons-material/CalendarMonth';
 import HistoryIcon from '@mui/icons-material/History';
 import ReportProblem from '@mui/icons-material/ReportProblem';
 import CheckCircle from '@mui/icons-material/CheckCircle';
+// power flow nodes
+import SolarPower from '@mui/icons-material/SolarPower';
+import Power from '@mui/icons-material/Power';
+import BatteryChargingFull from '@mui/icons-material/BatteryChargingFull';
+import ElectricalServices from '@mui/icons-material/ElectricalServices';
 
 export const ICON_MAP: Record<string, SvgIconComponent> = {
   Update,
@@ -189,6 +194,10 @@ export const ICON_MAP: Record<string, SvgIconComponent> = {
   History: HistoryIcon,
   ReportProblem,
   CheckCircle,
+  SolarPower,
+  Power,
+  BatteryChargingFull,
+  ElectricalServices,
 };
 
 export function resolveIcon(name?: string | null): SvgIconComponent | null {

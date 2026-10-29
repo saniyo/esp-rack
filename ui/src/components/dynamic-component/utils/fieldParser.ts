@@ -37,7 +37,10 @@ export const fieldConfigurations = {
   ip: { options: ['r', 'rw', 'pl', 'icon', 'color', 'colorMap', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const },
   // Read-only bar: value against mn..mx, or a live max from
   // maxKey; a marker at markerKey; thr = % -> colour steps.
-  progress: { options: ['r', 'rw', 'mn', 'mx', 'f', 'unit', 'maxKey', 'markerKey', 'thr', 'icon', 'color', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const }
+  progress: { options: ['r', 'rw', 'mn', 'mx', 'f', 'unit', 'maxKey', 'markerKey', 'thr', 'icon', 'color', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const },
+  // Power flow: nodes in a row, edges between neighbours; every value from a
+  // sibling key (nodes=/edges=, see FlowNodeSpec / FlowEdgeSpec).
+  flow: { options: ['r', 'rw', 'nodes', 'edges', 'icon', 'color', 'showIf', 'card', 'cardTitle', 'cardDeletable', 'hideAvatar', 'refetchForm', 'loadingIf'] as const }
 };
 
 export type FieldType = keyof typeof fieldConfigurations;
@@ -83,6 +86,33 @@ const parseRefLines = (list: string): RefLineSpec[] =>
     })
     .filter((r) => r.key);
 
+// flow `nodes=id,title,icon,valueKey,unit,subKey|…` (empty = none)
+export interface FlowNodeSpec {
+  id: string;
+  title: string;
+  icon: string;
+  valueKey: string;
+  unit: string;
+  subKey: string;
+}
+
+// flow `edges=from,to,valueKey,unit,dirKey,subKey|…`; the dir key's value:
+// +1 = to -> from, -1 = from -> to, 0 = idle.
+export interface FlowEdgeSpec {
+  from: string;
+  to: string;
+  valueKey: string;
+  unit: string;
+  dirKey: string;
+  subKey: string;
+}
+
+const flowParts = (list: string): string[][] =>
+  list
+    .split('|')
+    .map((spec) => spec.split(',').map((x) => x.trim()))
+    .filter((p) => p[0]);
+
 export interface BadgeSpec {
   field: string;
   unit: string;
@@ -105,6 +135,8 @@ export interface ParsedFieldOption {
     | ColorMap
     | ThresholdStep[]
     | RefLineSpec[]
+    | FlowNodeSpec[]
+    | FlowEdgeSpec[]
     | string[][]
     | undefined;
 }
@@ -394,6 +426,20 @@ const optionParsers: Record<string, (option: string) => ParsedFieldOption> = {
     const n = parseInt(getAfter(opt, 'hgt'), 10);
     return { key: 'hgt', value: Number.isFinite(n) && n > 0 ? n : undefined };
   },
+
+  // flow: the nodes and the edges (an edge without both ends is dropped).
+  nodes: (opt) => ({
+    key: 'nodes',
+    value: flowParts(getAfter(opt, 'nodes')).map(
+      ([id, title = '', icon = '', valueKey = '', unit = '', subKey = '']) => ({ id, title: title || id, icon, valueKey, unit, subKey })
+    ),
+  }),
+  edges: (opt) => ({
+    key: 'edges',
+    value: flowParts(getAfter(opt, 'edges'))
+      .filter((p) => p[1])
+      .map(([from, to, valueKey = '', unit = '', dirKey = '', subKey = '']) => ({ from, to, valueKey, unit, dirKey, subKey })),
+  }),
 
   // table `layout=grid|cards` picks between data-grid and avatar-card list.
   layout: (opt) => ({ key: 'layout', value: getAfter(opt, 'layout').trim() }),

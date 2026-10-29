@@ -492,6 +492,7 @@ access flag: `rw` by default, `.readOnly()` for `r`.
 | `web::DateTime(key, int32_t seconds)` | epoch seconds | `.dateOnly() .timeOnly() .dateTime()`. `.timeOfDay()`: the value is **seconds since local midnight** (0..86399) shown as HH:MM with no timezone conversion; clamp it in the updater |
 | `web::Trend(key)` | read-only chart | `.mode("lineChart"/"barChart"/"pieChart")`, `.xAxis("timestamp")`, `.line(key, color, type)`, `.legend() .tooltip() .maxPoints(n)`. Also: `.xFormat("epoch"/"time"/"date"/"datetime"/"dom"/"month")`, where x is epoch seconds (≥ 1e11 = ms) labelled in the **device** timezone; without it x shows raw. `.category()`: x is the `xAxis` key and every push replaces the rows. `.stack(a, b[, c])` stacks bars. `.refLine(key, color, label)` draws a horizontal line at a sibling value; `.vrefLine(key, color, label)` a vertical one at the x it names (the equal category, else the nearest x; hidden when there is none), labelled "label value" on top. `.yMin(v)` / `.yMax(v)` fix an end of the y axis; `.yAuto(pad)` lets the free ends follow the visible data with a margin of pad × span instead of starting at 0. History mode (History module): `.history(seriesId)` adds a period switch (Live, 24 h, 7 d, 30 d, 1 y, a day; `.periods(csv)`, `.period(p)`, `.liveLabel(s)`), `.unit(u)`, and `.histCol(col, sign)` after a `.line()` names its history column (`key`, `key[i]`, `key[min]`) and sign. A category chart shows each element over the period; a time series reads the period at a resolution it needs (about 340 rows). `.liveSince(key)`: a state key with the epoch the Live data starts at. `.zero()`: 0 always on the y axis, with a zero line. `.height(px)`: the plot height (default 400). `.overlay(back, front)`: bars of two series over each other in the same category place, `back` behind (a row without `back` shows `front` alone). `.tipKey(key)`: a row's text the tooltip adds under the values. `.signedArea(pos, neg)` after a `.line()` (lineChart): the area under that line, `pos` above 0 and `neg` below (a gradient split at 0), e.g. a day's load `.line("p", "#555", "monotone").signedArea("#1e88e5", "#eb6834")`; a colour may be a theme palette key (`info`, `warning`, …). |
 | `web::Progress(key, double)` | read-only bar | `.min() .max()`, `.maxKey(k)` (live max from a sibling), `.markerKey(k)` (marker at a sibling value, e.g. a plan), `.unit() .format("0.0")`, `.thresholds("0:error,60:warning,95:success")` (% of max → colour) |
+| `web::Flow(key)` | read-only power flow, the whole row | `.node(id, title, icon)` and `.edge(from, to)`, each followed by `.valueKey(k) .unit(u) .subKey(k)` (they apply to the last node or edge); `.dirKey(k)` on an edge. See *Power flow* below |
 | `web::Table(key)` | rows (initially `[]`) | `.col(key, label, type[, fmt])`: type `text`/`number`/`boolean`, or in the device timezone `date` (fmt `month` → "Oct 2026"), `time` (fmt `tod`: seconds of day), `datetime`, `duration` (fmt `s`/`ms`/`min` → "2h 05m"); `.mode("append"/"upsert"/"replace")`, `.maxRows(n)`, `.layout("grid"/"cards")`, `.primary() .secondary() .avatar() .badge()`, `.rowFill() .rowFillFallback() .rowNav()`; seed rows with `form.rowsOf(key)` |
 | `web::Files(key, restBase)` | path | `.initial(path) .uploadBase(path)` |
 | `web::Upload(key, url)` | — | `.accept(mime)` |
@@ -513,6 +514,27 @@ form.add(web::Number("soc", s.soc).format("0").unit("%").label("Battery")
 form.add(web::Text("mode", s.mode).label("Mode").tile());
 ```
 
+**Power flow.** `web::Flow(key)` draws nodes in a row (a column when the
+widget is narrower than 420 px) in the order given, with an edge between
+neighbours (`edge(a, b)` or `edge(b, a)`; an edge between non-neighbours is
+not drawn). A node shows its title, its icon, its `valueKey` value big with
+the unit and the `subKey` text under it (a line break starts a second line).
+An edge shows its value with the unit over a moving dashed line, the `subKey`
+text under it, and the direction from `dirKey`: `+1` = flow `to -> from`
+(e.g. charge, blue), `-1` = `from -> to` (discharge, orange), `0` = idle
+(grey, no arrow). Colours come from the theme (info / warning / disabled).
+The manifest carries only the keys; every value is a sibling value (below),
+so send the signed power as text through `subKey` if it should show. Up to
+6 nodes and 5 edges; ids, titles, icons, keys and units must not contain
+`, ; : | =` (refused and logged).
+
+```cpp
+form.add(web::Flow("pf").label("Power flow")
+    .node("bat", "Battery", "BatteryFull").valueKey("soc").unit("%").subKey("bat_sub")
+    .node("inv", "Inverter", "SolarPower").valueKey("inv_w").unit("W")
+    .edge("bat", "inv").valueKey("p_kw").unit("kW").dirKey("p_dir").subKey("p_sub"));
+```
+
 Rules worth knowing:
 
 - The value key is emitted **before** `"o"` because the live renderer reads
@@ -529,7 +551,7 @@ Rules worth knowing:
 - Colors baked into the form (`.color()`) only change on refetch. WS ticks
   update values only (`NTPSettingsService.h:128-132`).
 - **Sibling values** (`Progress.maxKey/markerKey`, `Trend.refLine/vrefLine`,
-  `Number/Text.subKey`) name
+  `Number/Text.subKey`, every `Flow` key) name
   another state key. On a live tab that can be any key of the WS reader
   (it doesn't have to be a field). On a REST-only tab it must be a field of
   the same form.

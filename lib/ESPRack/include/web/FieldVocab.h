@@ -58,6 +58,7 @@ constexpr const char* Message   = "message";
 constexpr const char* TimeZones = "timezones";
 constexpr const char* Ip        = "ip";
 constexpr const char* Progress  = "progress";
+constexpr const char* Flow      = "flow";
 }  // namespace FieldType
 
 // ── Access flag — second segment. r = read-only, rw = editable. ──
@@ -132,6 +133,10 @@ constexpr const char* TipKey        = "tip";          // trend — a row key who
 constexpr const char* MaxKey        = "maxKey";       // progress — max from a sibling key
 constexpr const char* MarkerKey     = "markerKey";    // progress — marker at a sibling key's value
 constexpr const char* Thresholds    = "thr";          // progress — "pct:color,…" ascending
+
+// Flow (nodes in a row, edges between neighbours; values from sibling keys).
+constexpr const char* Nodes         = "nodes";        // flow — "id,title,icon,valueKey,unit,subKey|…"
+constexpr const char* Edges         = "edges";        // flow — "from,to,valueKey,unit,dirKey,subKey|…"
 
 // Files / upload.
 constexpr const char* Base          = "base";         // files

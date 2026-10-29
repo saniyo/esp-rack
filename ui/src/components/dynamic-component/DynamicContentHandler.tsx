@@ -30,6 +30,7 @@ import Textarea from './elements/TextArea';
 import RadioField from './elements/RadioField';
 import TrendChart from './elements/TrendChart';
 import ProgressField from './elements/ProgressField';
+import FlowField from './elements/FlowField';
 import FilesField from './elements/FilesField';
 import UploadField from './elements/UploadField';
 import TableField from './elements/TableField';
@@ -229,6 +230,8 @@ const DynamicContentHandler: FC<DynamicContentHandlerProps> = ({
         return (
           <ProgressField key={fieldKey} field={field} value={formState[field.label]} getSibling={getSibling} />
         );
+      case 'flow':
+        return <FlowField key={fieldKey} field={field} getSibling={getSibling} />;
       case 'files': {
         const { optionMap: om } = parseFieldOptions(field.label, field.o);
         const base = ((om as any).base?.value as string) || '/api/v1/fs';

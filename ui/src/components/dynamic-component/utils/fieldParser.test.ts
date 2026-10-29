@@ -7,6 +7,8 @@ import { describe, expect, it } from '@jest/globals';
 import { parseFieldOptions, RefLineSpec, ThresholdStep } from './fieldParser';
 import { decimalsOf, gridColumnFor, tileOf } from './formLayout';
 import { tileColor, tileText } from '../elements/TileField';
+import { flowDir, flowHeading, flowLinks } from '../elements/FlowField';
+import { FlowEdgeSpec, FlowNodeSpec } from './fieldParser';
 import {
   formatCellTime,
   formatDuration,
@@ -98,6 +100,69 @@ describe('Tile', () => {
     expect(tileColor(map, 'Fault', 'Fault')).toBe('error');
     expect(tileColor(map, '50.0', 50)).toBe('info');
     expect(tileColor(undefined, '1', 1)).toBeUndefined();
+  });
+});
+
+describe('Flow', () => {
+  // web::Flow("pf")
+  //   .node("bat", "Battery", "BatteryFull").valueKey("soc").unit("%").subKey("bat_sub")
+  //   .node("inv", "Inverter", "SolarPower").valueKey("inv_w").unit("W")
+  //   .edge("bat", "inv").valueKey("p_kw").unit("kW").dirKey("p_dir").subKey("p_sub")
+  const o =
+    'flow;r;nodes=bat,Battery,BatteryFull,soc,%,bat_sub|inv,Inverter,SolarPower,inv_w,W,;' +
+    'edges=bat,inv,p_kw,kW,p_dir,p_sub';
+
+  it('parses the nodes and the edges', () => {
+    const p = parseFieldOptions('pf', o);
+    expect(p.finalType).toBe('flow');
+    expect(p.optionMap.r?.value).toBe(true);
+    expect(p.optionMap.nodes?.value as FlowNodeSpec[]).toEqual([
+      { id: 'bat', title: 'Battery', icon: 'BatteryFull', valueKey: 'soc', unit: '%', subKey: 'bat_sub' },
+      { id: 'inv', title: 'Inverter', icon: 'SolarPower', valueKey: 'inv_w', unit: 'W', subKey: '' },
+    ]);
+    expect(p.optionMap.edges?.value as FlowEdgeSpec[]).toEqual([
+      { from: 'bat', to: 'inv', valueKey: 'p_kw', unit: 'kW', dirKey: 'p_dir', subKey: 'p_sub' },
+    ]);
+  });
+
+  it('fills the missing parts, drops an edge without both ends', () => {
+    const p = parseFieldOptions('pf', 'flow;r;nodes=g|h,,,v;edges=g|g,h');
+    expect(p.optionMap.nodes?.value).toEqual([
+      { id: 'g', title: 'g', icon: '', valueKey: '', unit: '', subKey: '' },
+      { id: 'h', title: 'h', icon: '', valueKey: 'v', unit: '', subKey: '' },
+    ]);
+    expect(p.optionMap.edges?.value).toEqual([{ from: 'g', to: 'h', valueKey: '', unit: '', dirKey: '', subKey: '' }]);
+    expect(parseFieldOptions('t', 'text;r;nodes=a').optionMap.nodes).toBeUndefined();
+  });
+
+  it('joins neighbours either way round', () => {
+    const p = parseFieldOptions('pf', 'flow;r;nodes=a|b|c|d;edges=b,a|c,d');
+    const links = flowLinks(p.optionMap.nodes?.value as FlowNodeSpec[], p.optionMap.edges?.value as FlowEdgeSpec[]);
+    expect(links).toHaveLength(3);
+    expect(links[0]).toMatchObject({ edge: { from: 'b', to: 'a' }, fromFirst: false });
+    expect(links[1]).toBeNull();  // b-c: no edge
+    expect(links[2]).toMatchObject({ edge: { from: 'c', to: 'd' }, fromFirst: true });
+    expect(flowLinks([], [])).toEqual([]);
+  });
+
+  it('reads the direction and points the arrow', () => {
+    expect(flowDir(1)).toBe(1);
+    expect(flowDir('-1')).toBe(-1);
+    expect(flowDir(-0.3)).toBe(-1);
+    expect(flowDir(0)).toBe(0);
+    expect(flowDir('idle')).toBe(0);
+    expect(flowDir(undefined)).toBe(0);
+    // edge(bat, inv), bat first: -1 = bat -> inv (towards the later node)
+    expect(flowHeading(-1, true)).toBe(1);
+    expect(flowHeading(1, true)).toBe(-1);   // +1 = inv -> bat (charge)
+    expect(flowHeading(-1, false)).toBe(-1);
+    expect(flowHeading(1, false)).toBe(1);
+    expect(flowHeading(0, true)).toBe(0);
+  });
+
+  it('takes the whole row', () => {
+    expect(gridColumnFor('flow', undefined, false, 4, true)).toBe('1 / -1');
+    expect(gridColumnFor('flow', undefined, false, undefined, false)).toBe('1 / -1');
   });
 });
 

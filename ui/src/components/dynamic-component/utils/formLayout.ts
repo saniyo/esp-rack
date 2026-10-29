@@ -20,9 +20,9 @@ export const markerFromRaw = (raw: any, idx: number) => {
 // Types that take the whole row unless told otherwise. Read-only (Status
 // tabs): only what can't be a tile; a read-only text is a tile.
 const FULL_TYPES = new Set([
-  'text', 'textarea', 'secret', 'table', 'trend', 'message', 'action', 'files', 'upload', 'progress', 'radio',
+  'text', 'textarea', 'secret', 'table', 'trend', 'message', 'action', 'files', 'upload', 'progress', 'radio', 'flow',
 ]);
-const FULL_TYPES_RO = new Set(['textarea', 'table', 'trend', 'message', 'action', 'files', 'upload']);
+const FULL_TYPES_RO = new Set(['textarea', 'table', 'trend', 'message', 'action', 'files', 'upload', 'flow']);
 
 export const spanOf = (o?: string): number | undefined => {
   const m = /(?:^|;)sp=(\d+)/.exec(o ?? '');

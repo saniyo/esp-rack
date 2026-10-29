@@ -604,6 +604,102 @@ class Progress : public FieldSpec<Progress> {
   double _min = 0, _max = 100;
 };
 
+// ── Flow (power flow between nodes; read-only) ──────────────────────────--
+//   web::Flow("pf")
+//     .node("bat", "Battery", "BatteryFull").valueKey("soc").unit("%").subKey("bat_sub")
+//     .node("inv", "Inverter", "SolarPower").valueKey("inv_w").unit("W")
+//     .edge("bat", "inv").valueKey("p_kw").unit("kW").dirKey("p_dir").subKey("p_sub")
+// Nodes stand in a row (a column on a narrow screen) in the order given; an
+// edge joins two neighbours. valueKey / unit / subKey apply to the last
+// node or edge. The keys name sibling state keys, as refLine does: a node
+// shows its value big and the sub key's text under it (a line break starts
+// a second line); an edge shows its value, the sub text and the direction
+// from dirKey: +1 = to -> from, -1 = from -> to, 0 = idle. Strings are kept
+// as pointers until add() (like the other builders); one with , ; : | = is
+// refused (logged, left out), as is a node or edge past the limit.
+class Flow : public FieldSpec<Flow> {
+ public:
+  static constexpr uint8_t kMaxNodes = 6;
+  static constexpr uint8_t kMaxEdges = 5;
+  explicit Flow(const char* key) : FieldSpec(key) { _af = Access::Read; }
+  Flow& node(const char* id, const char* title, const char* iconName = nullptr) {
+    _last = 0;
+    if (_nn >= kMaxNodes || bad(id, true) || bad(title) || bad(iconName)) return refuse("node", id);
+    _nodes[_nn++] = Item{id, title, iconName};
+    _last = 1;
+    return *this;
+  }
+  Flow& edge(const char* from, const char* to) {
+    _last = 0;
+    if (_ne >= kMaxEdges || bad(from, true) || bad(to, true)) return refuse("edge", from);
+    _edges[_ne++] = Item{from, to};
+    _last = 2;
+    return *this;
+  }
+  Flow& valueKey(const char* k) { if (Item* it = last(k)) it->val = k; return *this; }
+  Flow& unit(const char* u)     { if (Item* it = last(u)) it->unit = u; return *this; }
+  Flow& subKey(const char* k)   { if (Item* it = last(k)) it->sub = k; return *this; }
+  // The last edge's direction key (+1 / -1 / 0); ignored after a node.
+  Flow& dirKey(const char* k)   { if (_last == 2 && !bad(k)) _edges[_ne - 1].dir = k; return *this; }
+  void writeTo(JsonArray& fields) const {
+    JsonObject f = fields.createNestedObject();
+    f[_key] = "";  // value FIRST (see emit); the values come from the keys
+    String o = head(FieldType::Flow);
+    if (_nn) {
+      o += ';'; o += Opt::Nodes; o += '=';
+      for (uint8_t i = 0; i < _nn; ++i) {
+        const Item& n = _nodes[i];
+        if (i) o += '|';
+        put(o, n.a, false); put(o, n.b); put(o, n.c); put(o, n.val); put(o, n.unit); put(o, n.sub);
+      }
+    }
+    if (_ne) {
+      o += ';'; o += Opt::Edges; o += '=';
+      for (uint8_t i = 0; i < _ne; ++i) {
+        const Item& e = _edges[i];
+        if (i) o += '|';
+        put(o, e.a, false); put(o, e.b); put(o, e.val); put(o, e.unit); put(o, e.dir); put(o, e.sub);
+      }
+    }
+    o += tail();
+    f["o"] = o;
+  }
+ private:
+  // node: a = id, b = title, c = icon; edge: a = from, b = to.
+  struct Item {
+    const char* a = nullptr;
+    const char* b = nullptr;
+    const char* c = nullptr;
+    const char* val = nullptr;
+    const char* unit = nullptr;
+    const char* sub = nullptr;
+    const char* dir = nullptr;
+  };
+  Item _nodes[kMaxNodes];
+  Item _edges[kMaxEdges];
+  uint8_t _nn = 0, _ne = 0;
+  uint8_t _last = 0;  // 0 none (or refused), 1 node, 2 edge
+
+  static bool bad(const char* s, bool required = false) {
+    if (!s || !s[0]) return required;
+    return strpbrk(s, ",;:|=") != nullptr;
+  }
+  Flow& refuse(const char* what, const char* id) {
+    log_w("[form] %s: %s \"%s\" refused", _key, what, id ? id : "");
+    return *this;
+  }
+  Item* last(const char* v) {
+    if (bad(v)) { log_w("[form] %s: \"%s\" refused", _key, v); return nullptr; }
+    if (_last == 1) return &_nodes[_nn - 1];
+    if (_last == 2) return &_edges[_ne - 1];
+    return nullptr;
+  }
+  static void put(String& o, const char* s, bool sep = true) {
+    if (sep) o += ',';
+    if (s) o += s;
+  }
+};
+
 // ── Action (button firing an HTTP call or referencing a manifest action) ──
 class Action : public FieldSpec<Action> {
  public:

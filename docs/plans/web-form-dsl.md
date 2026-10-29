@@ -68,7 +68,7 @@ to shorten now — revisit if the option-string size budget bites.
 - Per-type builders expose **only** their valid options (so `.min()` exists on
   `Number` but not `Text` — compile error otherwise): `Text Secret Textarea Ip
   TimeZones Checkbox Switch Button Number Slider Dropdown Radio Trend Table
-  Files Upload DateTime Action Message`.
+  Files Upload DateTime Action Message Progress Flow`.
 - `Form(root, name, desc)` wraps the old `createForm`; `form.add(Field…)`
   materializes a builder into the `fields` array — same value-object pattern as
   `WebFeature(...).tab(WebTab(...))`.
@@ -98,6 +98,14 @@ page's REST/WS keys, as `refLine` does.
   and another below, a gradient whose stop sits at 0. A lineChart with such
   a line renders as a recharts ComposedChart; the area stays out of the
   tooltip and the legend. Colours: CSS or a theme palette key.
+- **Flow** — `web::Flow(key)`, field type `flow`, `nodes=id,title,icon,valueKey,unit,subKey|…`
+  and `edges=from,to,valueKey,unit,dirKey,subKey|…` (positional, empty =
+  none). `.node()` / `.edge()` then `.valueKey() .unit() .subKey()` on the
+  last one, `.dirKey()` on an edge. The builder keeps fixed arrays of
+  pointers (6 nodes, 5 edges) and writes the option string in `add()`, like
+  the others: no heap per item. Nodes in a row (a column under 420 px),
+  edges between neighbours with CSS-animated dashes; dir +1 = to -> from
+  (info colour), -1 = from -> to (warning), 0 = idle (disabled, no arrow).
 
 ## Migration — incremental (chosen)
 
