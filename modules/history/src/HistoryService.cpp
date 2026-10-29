@@ -45,6 +45,7 @@ void readConfig(HistoryState& s, JsonObject& root) {
   root["flush_min"] = s.set.flushMin;
   root["budget_kb"] = s.set.budgetKb;
   root["cap_kb"] = s.set.capKb;
+  root["heap_series"] = s.set.heapSeries;
 }
 
 StateUpdateResult updateSettings(JsonObject& root, HistorySettings& c) {
@@ -55,6 +56,7 @@ StateUpdateResult updateSettings(JsonObject& root, HistorySettings& c) {
   changed |= FormBuilder::updateValue(src, "flush_min", c.flushMin);
   changed |= FormBuilder::updateValue(src, "budget_kb", c.budgetKb);
   changed |= FormBuilder::updateValue(src, "cap_kb", c.capKb);
+  changed |= FormBuilder::updateValue(src, "heap_series", c.heapSeries);
   return changed ? StateUpdateResult::CHANGED : StateUpdateResult::UNCHANGED;
 }
 
@@ -444,6 +446,45 @@ IHistorySeries* HistoryService::series(const HistSeriesDef& def, const char** wh
 
 namespace {
 
+// "sys.heap": the lowest free / largest block per bucket (a leak shows as a
+// slope, a fragment as a falling largest block), the highest client count.
+const ESPRack::HistColumn kHeapCols[] = {
+    {"int_free", "B", ESPRack::HistAgg::Min, 1, ESPRack::HistType::U32, 1},
+    {"int_largest", "B", ESPRack::HistAgg::Min, 1, ESPRack::HistType::U32, 1},
+    {"int_min", "B", ESPRack::HistAgg::Min, 1, ESPRack::HistType::U32, 1},
+    {"psram_free", "B", ESPRack::HistAgg::Min, 1, ESPRack::HistType::U32, 1},
+    {"ws_clients", "", ESPRack::HistAgg::Max, 1, ESPRack::HistType::U16, 1},
+};
+const ESPRack::HistTier kHeapTiers[] = {{60, 3 * 86400}, {900, 30 * 86400}};
+const ESPRack::HistSeriesDef kHeapDef{"sys.heap", "Device memory", kHeapCols, 5, kHeapTiers, 2};
+
+}  // namespace
+
+void HistoryService::sampleHeap() {
+  if (!_heap) {
+    const char* why = nullptr;
+    _heap = series(kHeapDef, &why);
+    if (!_heap) {
+      log_w("[hist] sys.heap not recorded: %s", why ? why : "?");
+      return;
+    }
+  }
+  const time_t now = time(nullptr);
+  if (now <= kMinValidT) return;  // no valid time yet: the series takes none
+  constexpr uint32_t kInt = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+  WsManager* ws = _app ? _app->wsManager() : nullptr;
+  const double v[5] = {
+      double(heap_caps_get_free_size(kInt)),
+      double(heap_caps_get_largest_free_block(kInt)),
+      double(heap_caps_get_minimum_free_size(kInt)),
+      double(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)),
+      double(ws ? ws->totalClients() : 0),
+  };
+  (void)_heap->add(uint32_t(now), v, 5);
+}
+
+namespace {
+
 // A slot of the flash write gate (power/WriteGate.h) per step of a series'
 // mount / retention / erase, given back as soon as the step's write is
 // over. One wait clock per operation (finish() ends it), so maxWaitMs
@@ -607,6 +648,10 @@ void HistoryService::run() {
     }
     HistorySettings set;
     read([&](HistoryState& s) { set = s.set; });
+    if (set.heapSeries && millis() - _lastHeapMs >= ESPRACK_HISTORY_HEAP_SAMPLE_MS) {
+      _lastHeapMs = millis();
+      sampleHeap();
+    }
     if (!set.enabled) continue;
     bool due = _flushNow.exchange(false) || millis() - _lastFlushMs >= uint32_t(set.flushMin) * 60000UL * _stretch;
     for (Series* s : list) due = due || s->pressing();
@@ -883,6 +928,8 @@ void HistoryService::buildForm(HistoryState& s, JsonObject& root) {
               .label("Write budget a day (past it, writes get rarer)").icon("DataUsage"));
   set.add(web::Number("cap_kb", c.capKb).min(0).format("0").unit("KB")
               .label("Space for all history (0 = a quarter of the flash)").icon("Storage"));
+  set.add(web::Switch("heap_series", c.heapSeries).label("Record the device's memory (series sys.heap)")
+              .icon("Memory"));
   set.add(web::Message("m_hist", "History is kept in RAM and written to flash in batches, so the flash isn't worn by "
                                  "every sample. An unexpected reset loses what was waiting for the next write.")
               .level("info"));

@@ -58,7 +58,7 @@ class Series;
 }
 }  // namespace ESPRack
 
-#define HISTORY_MODULE_VERSION "0.1.0"
+#define HISTORY_MODULE_VERSION "0.1.1"
 
 #ifndef FACTORY_HISTORY_FLUSH_MIN
 #define FACTORY_HISTORY_FLUSH_MIN 15
@@ -68,6 +68,17 @@ class Series;
 #endif
 #ifndef FACTORY_HISTORY_CAP_KB
 #define FACTORY_HISTORY_CAP_KB 0  // all series together; 0 = a quarter of the flash volume
+#endif
+// The device's own memory as a series ("sys.heap"): the internal heap (free,
+// largest block, lowest since boot), PSRAM free and the WebSocket clients,
+// sampled every ESPRACK_HISTORY_HEAP_SAMPLE_MS (the lowest / highest per
+// minute kept). For a leak's slope on the chart. A setting; this is its
+// factory value.
+#ifndef FACTORY_HISTORY_HEAP_SERIES
+#define FACTORY_HISTORY_HEAP_SERIES false
+#endif
+#ifndef ESPRACK_HISTORY_HEAP_SAMPLE_MS
+#define ESPRACK_HISTORY_HEAP_SAMPLE_MS 10000
 #endif
 #ifndef ESPRACK_HISTORY_MAX_SERIES
 #define ESPRACK_HISTORY_MAX_SERIES 16
@@ -81,6 +92,7 @@ struct HistorySettings {
   int flushMin = FACTORY_HISTORY_FLUSH_MIN;
   int budgetKb = FACTORY_HISTORY_BUDGET_KB;
   int capKb = FACTORY_HISTORY_CAP_KB;
+  bool heapSeries = FACTORY_HISTORY_HEAP_SERIES;  // record "sys.heap"
 };
 
 class HistoryState {
@@ -146,6 +158,9 @@ class HistoryService : public StatefulService<HistoryState>, public ESPRack::IHi
   std::atomic<uint32_t> _skippedPower{0};
   uint32_t _lastFlushMs{0};      // the task's own
   uint32_t _lastRetentionMs{0};
+  uint32_t _lastHeapMs{0};
+  ESPRack::IHistorySeries* _heap{nullptr};  // "sys.heap" once registered (the hist task)
+  void sampleHeap();
 
   // Last member: its constructor already runs buildForm (the secret-key probe),
   // and the form reads the members above.
