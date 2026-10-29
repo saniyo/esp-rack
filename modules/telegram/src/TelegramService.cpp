@@ -660,6 +660,7 @@ void TelegramService::runWorker() {
     // ask for commands every cmd_poll_s while any is registered.
     const bool polling = _state.enabled && !_state.botToken.isEmpty() && WiFi.isConnected() && !_cmds.empty();
     const uint32_t pollMs = static_cast<uint32_t>(_state.cmdPollS) * 1000u;
+    if (_state.enabled && _cmds.empty()) noteCmd("not polling: no command registered");
     if (polling && static_cast<uint32_t>(millis() - _lastPollMs) >= pollMs) {
       _lastPollMs = millis();
       pollCommands(_state.botToken);
@@ -829,12 +830,25 @@ void TelegramService::pollCommands(const String& token) {
   _cli.stop();
   _cli.setHandshakeTimeout(8);
   _cli.setTimeout(5000);
-  if (!_cli.connect(host, 443, 5000)) return;
+  if (!_cli.connect(host, 443, 5000)) {
+    noteCmd("poll failed: no connection to api.telegram.org");
+    return;
+  }
   // Not primed yet: only the newest update, to skip the backlog.
   const String offset = _updOffset ? String(_updOffset) : String("-1");
   _cli.print(String("GET /bot") + token + "/getUpdates?timeout=0&limit=4&offset=" + offset +
              "&allowed_updates=%5B%22message%22%5D HTTP/1.0\r\nHost: " + host + "\r\n\r\n");
-  const bool httpOk = _cli.readStringUntil('\n').indexOf(" 200 ") >= 0;
+  const String statusLine = _cli.readStringUntil('\n');
+  const bool httpOk = statusLine.indexOf(" 200 ") >= 0;
+  if (!httpOk) {
+    // 409: a webhook is set for this bot, or another device polls the same
+    // token; 401: the token is wrong. Either way no command arrives here.
+    const int sp = statusLine.indexOf(' ');
+    const int code = sp >= 0 ? statusLine.substring(sp + 1, sp + 4).toInt() : 0;
+    noteCmd(String("poll failed: HTTP ") + code +
+            (code == 409 ? " (a webhook is set, or another device polls this bot)"
+             : code == 401 ? " (bad token)" : ""));
+  }
   while (httpOk && _cli.connected()) {  // headers
     const String line = _cli.readStringUntil('\n');
     if (line.length() <= 1) break;
@@ -850,9 +864,16 @@ void TelegramService::pollCommands(const String& token) {
   DynamicJsonDocument doc(2048);
   const bool parsed = httpOk && !deserializeJson(doc, _cli, DeserializationOption::Filter(filter));
   _cli.stop();
-  if (!parsed) return;
+  if (!parsed) {
+    if (httpOk) noteCmd("poll failed: the reply could not be read");
+    return;
+  }
 
-  const bool primed = _updOffset != 0;
+  // The first poll only skips the backlog. An empty first reply primes too:
+  // otherwise the first command after a quiet boot was taken for backlog.
+  const bool primed = _primed;
+  _primed = true;
+  uint32_t seen = 0;
   for (JsonObject u : doc["result"].as<JsonArray>()) {
     const long long id = u["update_id"] | 0LL;
     if (id + 1 > _updOffset) _updOffset = id + 1;
@@ -864,6 +885,7 @@ void TelegramService::pollCommands(const String& token) {
     snprintf(chat, sizeof(chat), "%lld", msg["chat"]["id"] | 0LL);
     snprintf(from, sizeof(from), "%lld", msg["from"]["id"] | 0LL);
     const int32_t topic = msg["message_thread_id"] | 0;
+    ++seen;
 
     bool known = false, adminCmd = false;
     xSemaphoreTake(_cmdMx, portMAX_DELAY);
@@ -876,10 +898,14 @@ void TelegramService::pollCommands(const String& token) {
     }
     xSemaphoreGive(_cmdMx);
     const bool admin = tgcmd::inList(_state.adminUserIds.c_str(), from);
-    const tgcmd::Verdict v = tgcmd::decide(
-        tgcmd::chatAllowed(_state.allowedChatIds.c_str(), chat, topic, _state.chatId.c_str()), known, adminCmd, admin);
+    const bool chatOk = tgcmd::chatAllowed(_state.allowedChatIds.c_str(), chat, topic, _state.chatId.c_str());
+    const tgcmd::Verdict v = tgcmd::decide(chatOk, known, adminCmd, admin);
     if (v == tgcmd::Verdict::Ignore) {
       ++_cmdIgnored;
+      // Why, with the ids as Telegram sent them: what "Allowed chats" needs.
+      noteCmd(String("ignored /") + p.command.c_str() + " from chat " + chat +
+              (topic ? String(" topic ") + topic : String()) +
+              (!chatOk ? ": chat not allowed (Allowed chats, or the default chat)" : ": no such command"));
       continue;
     }
     if (v == tgcmd::Verdict::AdminOnly) {
@@ -904,7 +930,16 @@ void TelegramService::pollCommands(const String& token) {
       ESPRack::wakeLoop();  // loop() runs the handler
     }
   }
-  if (_updOffset && _cmdsPublished != _cmdsRev) publishCommands(token);
+  if (!primed) noteCmd(_updOffset ? "polling (older updates skipped)" : "polling");
+  else if (seen) noteCmd(String("polling: ") + seen + " command(s) in the last poll, " + _cmdIgnored + " ignored since boot");
+  else if (_state.cmdStatus.startsWith("poll failed")) noteCmd("polling");
+  if (_cmdsPublished != _cmdsRev) publishCommands(token);
+}
+
+void TelegramService::noteCmd(const String& text) {
+  if (_state.cmdStatus == text) return;
+  _state.cmdStatus = text;
+  log_i("[tel] commands: %s", text.c_str());
 }
 
 void TelegramService::fillSubscriptionRows(JsonArray rows) const {

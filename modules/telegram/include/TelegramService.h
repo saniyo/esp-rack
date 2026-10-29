@@ -150,7 +150,8 @@ class TelegramService : public StatefulService<TelegramSettings>,
   // The worker's waits (offline re-check, retry pause, send pacing) are
   // waits on its own notification: a settings save or Wi-Fi up ends them.
   void wakeWorker() { if (_task) xTaskNotifyGive(_task); }
-  long long _updOffset{0};                 // 0 = backlog not skipped yet
+  long long _updOffset{0};                 // the next update to ask for; 0 = the newest (offset -1)
+  bool _primed{false};                     // the first poll (the backlog) is done
   uint32_t _lastPollMs{0};
   struct AdminNag {
     String fromId;
@@ -159,6 +160,7 @@ class TelegramService : public StatefulService<TelegramSettings>,
   AdminNag _nags[8];                       // "admin only" at most once a minute per user
   uint32_t _cmdIgnored{0}, _cmdDropped{0};
   void pollCommands(const String& token);
+  void noteCmd(const String& text);        // _state.cmdStatus, logged once per change
   void publishCommands(const String& token);
   bool postJson(const String& token, const char* method, const String& payload);
 

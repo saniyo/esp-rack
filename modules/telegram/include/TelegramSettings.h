@@ -59,6 +59,7 @@ struct TelegramSettings {
   String        lastMessage;       // text of the most recent attempt
   uint32_t      lastSendAt_s{0};   // seconds since boot
   bool          lastSendOk{false};
+  String        cmdStatus;         // incoming commands: polling, why one was ignored, poll errors
 
   // ── Manual-send composer (Status tab) ────────────────────────────────
   // The text input lives in state so it survives REST refetches; the

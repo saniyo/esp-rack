@@ -111,6 +111,11 @@ void TelegramSettings::buildForm(TelegramSettings& s, JsonObject& root) {
                 .label("Last attempt").icon(s.lastSendOk ? "Check" : "ErrorOutline"));
   }
 
+  if (s.cmdStatus.length() > 0) {
+    sta.add(web::Text("commands", s.cmdStatus.c_str()).readOnly()
+                .label("Commands").icon("Info"));
+  }
+
   // Composer card — textarea + Send action button. The action's
   // refetchForm() decorator pushes a Status GET right after firing so
   // the new log row lands without a manual reload.
@@ -194,6 +199,7 @@ void TelegramSettings::staRead(TelegramSettings& s, JsonObject& root) {
   root["status"]     = s.statusLabel;
   root["qsize"]      = s.qSize;
   root["manualText"] = s.manualText;
+  if (s.cmdStatus.length() > 0) root["commands"] = s.cmdStatus;
 
   // Settings echo: the static schema takes each field's value
   // from here. The bot token never: it stays masked in the schema.
