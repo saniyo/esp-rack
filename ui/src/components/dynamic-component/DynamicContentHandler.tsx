@@ -265,10 +265,11 @@ const DynamicContentHandler: FC<DynamicContentHandlerProps> = ({
         const ref = (om as any).ref?.value as string | undefined;
         const url = (om as any).url?.value as string | undefined;
         if (ref && !findAction(manifest, ref)) {
-          // A feature's own action may still be on its way.
+          // A feature's own action may still be on its way, or the loaded
+          // list predates a firmware update: fetched once more first.
           const owner = ownerOfAction(ref);
-          if (owner && manifest.features.some((x) => x.id === owner) && !actionsLoaded(owner)) {
-            ensureActions(owner);
+          if (owner && manifest.features.some((x) => x.id === owner) && !actionsLoaded(owner, ref)) {
+            ensureActions(owner, ref);
             return <React.Fragment key={fieldKey} />;
           }
           return (

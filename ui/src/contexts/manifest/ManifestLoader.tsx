@@ -128,8 +128,21 @@ const ManifestLoader: FC<RequiredChildrenProps> = (props) => {
   // a feature's own actions arrive on demand and join the list.
   const requestedActions = useRef(new Set<string>());
   const [actionsDone, setActionsDone] = useState<Set<string>>(() => new Set());
-  const ensureActions = useCallback((featureId: string) => {
-    if (!featureId || requestedActions.current.has(featureId)) return;
+  const actionsDoneRef = useRef(actionsDone);
+  actionsDoneRef.current = actionsDone;
+  // An action a form names but the loaded list lacks: the list may be from
+  // the firmware before an update (the page stayed open), so it is fetched
+  // once more per such action before the form calls it missing.
+  const retriedRefs = useRef(new Set<string>());
+  const retryPending = useRef(new Set<string>());
+  const ensureActions = useCallback((featureId: string, missingRef?: string) => {
+    if (!featureId) return;
+    if (missingRef && actionsDoneRef.current.has(featureId) && !retriedRefs.current.has(missingRef)) {
+      retriedRefs.current.add(missingRef);
+      retryPending.current.add(missingRef);
+      requestedActions.current.delete(featureId);
+    }
+    if (requestedActions.current.has(featureId)) return;
     requestedActions.current.add(featureId);
     ManifestApi.readFeatureActions(featureId)
       .then((r) => {
@@ -139,9 +152,17 @@ const ManifestLoader: FC<RequiredChildrenProps> = (props) => {
       .catch(() => {
         requestedActions.current.delete(featureId);  // try again next time
       })
-      .finally(() => setActionsDone((d) => new Set(d).add(featureId)));
+      .finally(() => {
+        if (missingRef) retryPending.current.delete(missingRef);
+        setActionsDone((d) => new Set(d).add(featureId));
+      });
   }, []);
-  const actionsLoaded = useCallback((featureId: string) => actionsDone.has(featureId), [actionsDone]);
+  const actionsLoaded = useCallback(
+    (featureId: string, missingRef?: string) =>
+      actionsDone.has(featureId) &&
+      (!missingRef || (retriedRefs.current.has(missingRef) && !retryPending.current.has(missingRef))),
+    [actionsDone]
+  );
 
   const value: ManifestContextValue = useMemo(
     () => ({ manifest, loaded, error, findFeature, reload: loadManifest, ensureActions, actionsLoaded }),

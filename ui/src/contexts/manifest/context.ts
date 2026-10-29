@@ -11,9 +11,11 @@ export interface ManifestContextValue {
   // the JWT lands so the stub manifest (anonymous response containing
   // brand only) gets swapped for the full authenticated map.
   reload: () => Promise<void>;
-  // fetch a feature's own actions once; true once they're in.
-  ensureActions: (featureId: string) => void;
-  actionsLoaded: (featureId: string) => boolean;
+  // fetch a feature's own actions once; true once they're in. With
+  // missingRef (an action a form names but the list lacks, e.g. after a
+  // firmware update with the page still open): fetch the list once more.
+  ensureActions: (featureId: string, missingRef?: string) => void;
+  actionsLoaded: (featureId: string, missingRef?: string) => boolean;
 }
 
 const EMPTY_MANIFEST: UiManifest = {
