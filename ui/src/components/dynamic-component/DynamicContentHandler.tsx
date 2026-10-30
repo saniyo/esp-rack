@@ -318,7 +318,8 @@ const DynamicContentHandler: FC<DynamicContentHandlerProps> = ({
   // Between card groups, consecutive non-card fields get wrapped in a single
   // <List> — each field renders as a <ListItem> internally, so without a
   // parent <ul> inset Dividers (component="li") would be stray.
-  // fields between layout markers form one CSS grid.
+  // fields between layout markers form one CSS grid. A grid right after
+  // another one keeps the rows' gap (Cols(4) then Cols(5) don't touch).
   const renderGrid = (entries: { f: Field; i: number }[], keyBase: string): React.ReactNode[] =>
     segmentFields(entries, (e) => e.f).map((seg, s) => (
       <Box
@@ -326,6 +327,7 @@ const DynamicContentHandler: FC<DynamicContentHandlerProps> = ({
         sx={{
           display: 'grid',
           gap: 2,
+          mt: s ? 2 : 0,
           alignItems: 'stretch',
           gridTemplateColumns: gridTemplateFor(seg.cols),
         }}

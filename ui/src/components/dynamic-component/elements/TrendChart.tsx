@@ -108,6 +108,7 @@ const CustomLegend: React.FC<CustomLegendProps> = ({
   onClick,
   interactive,
 }) => {
+  const { palette } = useTheme();
   return (
     <ul
       style={{
@@ -134,7 +135,7 @@ const CustomLegend: React.FC<CustomLegendProps> = ({
               cursor: interactive && !isNegative ? 'pointer' : 'default',
               display: 'flex',
               alignItems: 'center',
-              color: isHidden ? '#999' : '#000',
+              color: isHidden ? palette.text.disabled : palette.text.primary,
               textDecoration: isHidden ? 'line-through' : 'none',
               transition: 'color 0.3s, text-decoration 0.3s',
               opacity: isNegative ? 0.6 : 1,
@@ -151,7 +152,7 @@ const CustomLegend: React.FC<CustomLegendProps> = ({
             />
             {value}
             {isNegative && (
-              <span style={{ marginLeft: 3, fontSize: '10px', color: '#555' }}>
+              <span style={{ marginLeft: 3, fontSize: '10px', color: palette.text.secondary }}>
                 (Negative)
               </span>
             )}
@@ -192,6 +193,7 @@ const CustomTooltipComponent: React.FC<CustomTooltipProps> = ({
   unit,
   tipKey,
 }) => {
+  const { palette } = useTheme();
   // Без серій з tooltipType="none" (signed area); на наведеній серії — лише вона
   const visible = active && payload ? tooltipEntries(payload, null) : [];
   if (visible.length) {
@@ -199,9 +201,10 @@ const CustomTooltipComponent: React.FC<CustomTooltipProps> = ({
     const filteredPayload = tooltipEntries(visible, hoveredDataKey);
 
     const tooltipStyle: React.CSSProperties = {
-      backgroundColor: '#fff',
+      backgroundColor: palette.background.paper,
+      color: palette.text.primary,
       padding: '8px',
-      border: '1px solid #ccc',
+      border: `1px solid ${palette.divider}`,
       borderRadius: '4px',
       boxShadow: '0 2px 8px rgba(0,0,0,0.15)',
       pointerEvents: 'none',
@@ -1077,10 +1080,12 @@ const TrendChart: React.FC<TrendChartProps> = ({ field, value = [], getSibling }
           sx={{
             width: '100%',
             height: plotHeight,
-            border: '1px solid #ccc',
+            // The theme's paper and divider: right in light and dark alike.
+            border: 1,
+            borderColor: 'divider',
             position: 'relative',
             overflow: 'visible',
-            backgroundColor: '#ffffff',
+            bgcolor: 'background.paper',
           }}
         >
           {hist.active && hist.loading && <LinearProgress sx={{ position: 'absolute', top: 0, left: 0, right: 0, height: 2 }} />}
