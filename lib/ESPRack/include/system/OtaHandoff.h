@@ -18,6 +18,8 @@
 // A new layout is a new version: the other side refuses the record
 // (OtherVersion) rather than misread it, so an app and a loader of
 // different record versions fall back to "no handoff" / "no result".
+// The one exception: decode() still takes a version 1 handoff (an app
+// from before version 2) and gives it as a version 2 one (HandoffV1).
 //
 // The contract around the records:
 //   - the app writes the handoff, sets the boot partition to factory and
@@ -55,7 +57,8 @@ constexpr const char* kNvsResultKey = "result";
 
 constexpr uint32_t kHandoffMagic = 0x3148544Fu;  // bytes 'O','T','H','1'
 constexpr uint32_t kResultMagic = 0x3152544Fu;   // bytes 'O','T','R','1'
-constexpr uint16_t kHandoffVersion = 1;
+constexpr uint16_t kHandoffVersion = 2;
+constexpr uint16_t kHandoffVersionV1 = 1;  // still decoded (HandoffV1)
 constexpr uint16_t kResultVersion = 1;
 
 // Handoff::mode
@@ -72,12 +75,27 @@ enum class Outcome : uint8_t {
   FailedAfterWrite = 3,   // the app slot was written in part: the loader keeps trying
   Aborted = 4             // given up without an image (e.g. push mode, nobody uploaded): the old app boots again
 };
+// Handoff::adminKdf: how the upload page's password is checked.
+enum class AdminKdf : uint8_t {
+  None = 0,          // no password: the page is open (it warns)
+  Sha256 = 1,        // adminKey = SHA-256(password): a version 1 handoff
+  Pbkdf2Sha256 = 2   // adminKey = PBKDF2-HMAC-SHA256(password, adminSalt, adminIter, 32 B):
+                     // the app's stored user record (SecurityHash.h), so the loader asks
+                     // for that admin's own password
+};
 const char* modeName(uint8_t mode);        // "none" "push" "pull" "?"
 const char* outcomeName(uint8_t outcome);  // "none" "ok" "failed-before-write" "failed-after-write" "aborted" "?"
 
 constexpr size_t kSha256Len = 32;
 constexpr size_t kSigMax = 72;  // an ECDSA P-256 signature in DER: 70-72 bytes, rarely less
+constexpr size_t kAdminSaltMax = 32;
+constexpr size_t kAdminKeyLen = 32;
+constexpr uint32_t kAdminIterMax = 100000;  // PBKDF2 rounds a loader runs per password check, at most
+constexpr size_t kApPassMin = 8;   // WPA2-PSK passphrase: 8..63 printable ASCII
+constexpr size_t kApPassMax = 63;
 
+// Version 2. The first 544 bytes are version 1's (HandoffV1); its
+// adminHash went, the admin record and the rest came.
 struct Handoff {
   uint32_t magic;
   uint16_t version;
@@ -93,14 +111,48 @@ struct Handoff {
   char wifiSsid[33];        // the station the app was on ("" with useShared)
   char wifiPass[65];
   uint8_t useShared;        // 1: the Wi-Fi settings the loader keeps itself (IDF's stored station config)
-  char adminHash[65];       // hex SHA-256 of the upload page's password, "" none (the page warns)
+  // The upload page's password check (AdminKdf; None: the page is open and warns).
+  uint8_t adminKdf;
+  uint8_t adminSaltLen;     // 1..kAdminSaltMax with Pbkdf2Sha256
+  uint32_t adminIter;       // PBKDF2 rounds, 1..kAdminIterMax
+  uint8_t adminSalt[32];
+  uint8_t adminKey[32];     // what the password must derive to
+  char adminUser[32];       // whose password it is (shown on the page), "" not known
+  char apPass[64];          // the loader's fallback AP: WPA2-PSK with this (8..63 chars), "" open (it warns)
+  char deviceId[64];        // the device's id for the image server (x-ESPRack-Device-Id), "" none
   uint32_t crc;
 };
 static_assert(offsetof(Handoff, url) == 8, "handoff layout");
 static_assert(offsetof(Handoff, size) == 304, "handoff layout");
 static_assert(offsetof(Handoff, sigLen) == 412, "handoff layout");
-static_assert(offsetof(Handoff, adminHash) == 544, "handoff layout");
-static_assert(offsetof(Handoff, crc) == 612 && sizeof(Handoff) == 616, "handoff layout");
+static_assert(offsetof(Handoff, adminKdf) == 544 && offsetof(Handoff, adminIter) == 548, "handoff layout");
+static_assert(offsetof(Handoff, adminUser) == 616 && offsetof(Handoff, apPass) == 648, "handoff layout");
+static_assert(offsetof(Handoff, crc) == 776 && sizeof(Handoff) == 780, "handoff layout");
+
+// Version 1 (an app from before version 2 wrote it): the same first 544
+// bytes, then the hex SHA-256 of the upload page's password. decode()
+// gives it as a version 2 Handoff (adminKdf Sha256, no AP password, no
+// device id).
+struct HandoffV1 {
+  uint32_t magic;
+  uint16_t version;
+  uint8_t mode;
+  uint8_t attemptsAllowed;
+  char url[200];
+  char token[96];
+  uint32_t size;
+  uint8_t sha256[32];
+  uint8_t sig[72];
+  uint8_t sigLen;
+  char targetVersion[32];
+  char wifiSsid[33];
+  char wifiPass[65];
+  uint8_t useShared;
+  char adminHash[65];       // hex SHA-256 of the upload page's password, "" none
+  uint32_t crc;
+};
+static_assert(offsetof(HandoffV1, adminHash) == offsetof(Handoff, adminKdf), "handoff v1 layout");
+static_assert(offsetof(HandoffV1, crc) == 612 && sizeof(HandoffV1) == 616, "handoff v1 layout");
 
 struct Result {
   uint32_t magic;
@@ -128,10 +180,14 @@ enum class Verdict : uint8_t {
 const char* verdictName(Verdict v);
 
 // Seal in place: magic, version, every string terminated, padding zeroed,
-// CRC. The struct is then the blob (sizeof bytes).
+// CRC. The struct is then the blob (sizeof bytes). Fields out of range
+// are cleared first (as decode() does): a sigLen past kSigMax, an admin
+// record that can't be checked, an AP password that WPA2 doesn't take.
 void encode(Handoff& h);
 void encode(Result& r);
-// A stored blob of len bytes into out (only on Ok; strings terminated).
+// A stored blob of len bytes into out (only on Ok; strings terminated,
+// fields out of range cleared as by encode()). A handoff may be version
+// 1 or 2 (HandoffV1); out is always version 2.
 Verdict decode(const void* blob, size_t len, Handoff& out);
 Verdict decode(const void* blob, size_t len, Result& out);
 
@@ -154,6 +210,10 @@ void toHex(const uint8_t* in, size_t n, char* out);
 bool sigFromHex(const char* hex, uint8_t (&der)[kSigMax], uint8_t& len);
 // sha256 all zero: not given.
 bool hasSha256(const Handoff& h);
+// The upload page has a password to check (adminKdf not None).
+bool hasAdmin(const Handoff& h);
+// A WPA2-PSK passphrase: 8..63 printable ASCII characters.
+bool apPassOk(const char* pass);
 
 // One line for a page or a log: "ok: 1.2 -> 1.3, 1 attempt, 1250000 B in 42 s"
 // ("failed-before-write: <error> (the old app kept)", ...). Returns the

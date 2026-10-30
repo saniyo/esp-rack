@@ -1,6 +1,7 @@
 // Host tests of the app <-> loader records (system/OtaHandoff): encode /
-// decode, the CRC, truncated and foreign blobs, another version, and the
-// signature trailer of a signed image (parse, encode, streaming hold-back).
+// decode, the CRC, truncated and foreign blobs, another version, a version
+// 1 handoff read as version 2, fields out of range, and the signature
+// trailer of a signed image (parse, encode, streaming hold-back).
 
 #include <unity.h>
 
@@ -29,8 +30,43 @@ Handoff pullHandoff() {
   setText(h.wifiSsid, "site-ap");
   setText(h.wifiPass, "secret");
   h.attemptsAllowed = 5;
+  h.adminKdf = uint8_t(AdminKdf::Pbkdf2Sha256);
+  h.adminSaltLen = 16;
+  h.adminIter = 2000;
+  for (size_t i = 0; i < 16; ++i) h.adminSalt[i] = uint8_t(0x10 + i);
+  for (size_t i = 0; i < kAdminKeyLen; ++i) h.adminKey[i] = uint8_t(0xC0 ^ i);
+  setText(h.adminUser, "admin");
+  setText(h.apPass, "k7mq-4hzt-p9xw");
+  setText(h.deviceId, "gw-404cca4798f4-1a2b3c4d");
   return h;
 }
+
+// What an app of handoff version 1 stored: the same first fields, then the
+// hex SHA-256 of the page's password (SHA-256("admin") here).
+std::vector<uint8_t> v1Blob(const char* adminHash) {
+  HandoffV1 v;
+  memset(&v, 0, sizeof(v));
+  v.magic = kHandoffMagic;
+  v.version = kHandoffVersionV1;
+  v.mode = uint8_t(Mode::Push);
+  v.attemptsAllowed = 3;
+  setText(v.url, "http://h/x.bin");
+  setText(v.token, "tok");
+  v.size = 4096;
+  v.sha256[0] = 0xAB;
+  v.sigLen = 70;
+  v.sig[69] = 0x5A;
+  setText(v.targetVersion, "1.3");
+  setText(v.wifiSsid, "site-ap");
+  setText(v.wifiPass, "secret");
+  v.useShared = 0;
+  setText(v.adminHash, adminHash);
+  v.crc = crc32Ieee(&v, offsetof(HandoffV1, crc));
+  const uint8_t* p = reinterpret_cast<const uint8_t*>(&v);
+  return std::vector<uint8_t>(p, p + sizeof(v));
+}
+
+const char kSha256Admin[] = "8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918";
 
 }  // namespace
 
@@ -53,6 +89,126 @@ void test_handoff_round_trip() {
   TEST_ASSERT_EQUAL_STRING("site-ap", out.wifiSsid);
   TEST_ASSERT_EQUAL_UINT8(5, out.attemptsAllowed);
   TEST_ASSERT_TRUE(hasSha256(out));
+  TEST_ASSERT_EQUAL_UINT16(2, out.version);
+  TEST_ASSERT_TRUE(hasAdmin(out));
+  TEST_ASSERT_EQUAL_UINT8(uint8_t(AdminKdf::Pbkdf2Sha256), out.adminKdf);
+  TEST_ASSERT_EQUAL_UINT8(16, out.adminSaltLen);
+  TEST_ASSERT_EQUAL_UINT32(2000, out.adminIter);
+  TEST_ASSERT_EQUAL_UINT8(0x1F, out.adminSalt[15]);
+  TEST_ASSERT_EQUAL_UINT8(0xC0 ^ 31, out.adminKey[31]);
+  TEST_ASSERT_EQUAL_STRING("admin", out.adminUser);
+  TEST_ASSERT_EQUAL_STRING("k7mq-4hzt-p9xw", out.apPass);
+  TEST_ASSERT_EQUAL_STRING("gw-404cca4798f4-1a2b3c4d", out.deviceId);
+}
+
+void test_v1_handoff_is_read_as_v2() {
+  const std::vector<uint8_t> blob = v1Blob(kSha256Admin);
+  TEST_ASSERT_EQUAL_UINT(616, blob.size());
+  Handoff out;
+  memset(&out, 0x77, sizeof(out));
+  TEST_ASSERT_TRUE(decode(blob.data(), blob.size(), out) == Verdict::Ok);
+  TEST_ASSERT_EQUAL_UINT16(kHandoffVersion, out.version);
+  TEST_ASSERT_EQUAL_UINT8(uint8_t(Mode::Push), out.mode);
+  TEST_ASSERT_EQUAL_UINT8(3, out.attemptsAllowed);
+  TEST_ASSERT_EQUAL_STRING("http://h/x.bin", out.url);
+  TEST_ASSERT_EQUAL_STRING("tok", out.token);
+  TEST_ASSERT_EQUAL_UINT32(4096, out.size);
+  TEST_ASSERT_EQUAL_UINT8(0xAB, out.sha256[0]);
+  TEST_ASSERT_EQUAL_UINT8(70, out.sigLen);
+  TEST_ASSERT_EQUAL_UINT8(0x5A, out.sig[69]);
+  TEST_ASSERT_EQUAL_STRING("1.3", out.targetVersion);
+  TEST_ASSERT_EQUAL_STRING("secret", out.wifiPass);
+  // Its password hash: an SHA-256 record; the version 2 fields empty.
+  TEST_ASSERT_EQUAL_UINT8(uint8_t(AdminKdf::Sha256), out.adminKdf);
+  TEST_ASSERT_EQUAL_UINT8(0x8c, out.adminKey[0]);
+  TEST_ASSERT_EQUAL_UINT8(0x18, out.adminKey[31]);
+  TEST_ASSERT_EQUAL_UINT8(0, out.adminSaltLen);
+  TEST_ASSERT_EQUAL_UINT32(0, out.adminIter);
+  TEST_ASSERT_EQUAL_STRING("", out.adminUser);
+  TEST_ASSERT_EQUAL_STRING("", out.apPass);
+  TEST_ASSERT_EQUAL_STRING("", out.deviceId);
+  // Sealed again it is a version 2 record of the same content.
+  Handoff again = out;
+  encode(again);
+  Handoff back;
+  TEST_ASSERT_TRUE(decode(&again, sizeof(again), back) == Verdict::Ok);
+  TEST_ASSERT_EQUAL_INT(0, memcmp(&again, &back, sizeof(back)));
+
+  // No password (or not 64 hex digits): no check.
+  TEST_ASSERT_TRUE(decode(v1Blob("").data(), 616, out) == Verdict::Ok);
+  TEST_ASSERT_FALSE(hasAdmin(out));
+  TEST_ASSERT_TRUE(decode(v1Blob("8c69").data(), 616, out) == Verdict::Ok);
+  TEST_ASSERT_FALSE(hasAdmin(out));
+  // A v1 record is checked as one: its CRC, its size.
+  std::vector<uint8_t> bad = blob;
+  bad[300] ^= 1;
+  TEST_ASSERT_TRUE(decode(bad.data(), bad.size(), out) == Verdict::BadCrc);
+  TEST_ASSERT_TRUE(decode(blob.data(), blob.size() - 4, out) == Verdict::BadSize);
+  std::vector<uint8_t> longer = blob;
+  longer.resize(sizeof(Handoff), 0);
+  TEST_ASSERT_TRUE(decode(longer.data(), longer.size(), out) == Verdict::BadSize);
+}
+
+void test_out_of_range_fields_are_cleared() {
+  // encode() clears what decode() would: the stored record is always sane.
+  Handoff h = pullHandoff();
+  h.sigLen = kSigMax + 1;
+  h.adminIter = kAdminIterMax + 1;
+  setText(h.apPass, "short");
+  encode(h);
+  TEST_ASSERT_EQUAL_UINT8(0, h.sigLen);
+  TEST_ASSERT_FALSE(hasAdmin(h));
+  TEST_ASSERT_EQUAL_UINT8(0, h.adminSaltLen);
+  TEST_ASSERT_EQUAL_UINT8(0, h.adminKey[5]);
+  TEST_ASSERT_EQUAL_STRING("", h.apPass);
+
+  // A writer that sealed them anyway (CRC good): decode() clears them.
+  struct Case {
+    uint8_t kdf, saltLen;
+    uint32_t iter;
+    bool admin;
+  };
+  const Case cases[] = {
+      {uint8_t(AdminKdf::Pbkdf2Sha256), 16, 2000, true},
+      {uint8_t(AdminKdf::Pbkdf2Sha256), 0, 2000, false},
+      {uint8_t(AdminKdf::Pbkdf2Sha256), kAdminSaltMax + 1, 2000, false},
+      {uint8_t(AdminKdf::Pbkdf2Sha256), 16, 0, false},
+      {uint8_t(AdminKdf::Pbkdf2Sha256), 16, kAdminIterMax, true},
+      {uint8_t(AdminKdf::Sha256), 0, 0, true},
+      {7, 16, 2000, false},
+  };
+  for (const Case& c : cases) {
+    Handoff r = pullHandoff();
+    encode(r);
+    r.adminKdf = c.kdf;
+    r.adminSaltLen = c.saltLen;
+    r.adminIter = c.iter;
+    r.crc = crc32Ieee(&r, offsetof(Handoff, crc));
+    Handoff out;
+    TEST_ASSERT_TRUE(decode(&r, sizeof(r), out) == Verdict::Ok);
+    TEST_ASSERT_EQUAL(c.admin, hasAdmin(out));
+    if (!c.admin) TEST_ASSERT_EQUAL_UINT32(0, out.adminIter);
+  }
+  for (const char* pass : {"1234567", "pässwort1", "tab\there!"}) {
+    Handoff r = pullHandoff();
+    encode(r);
+    setText(r.apPass, pass);
+    r.crc = crc32Ieee(&r, offsetof(Handoff, crc));
+    Handoff out;
+    TEST_ASSERT_TRUE(decode(&r, sizeof(r), out) == Verdict::Ok);
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("", out.apPass, pass);
+  }
+}
+
+void test_ap_pass_rules() {
+  TEST_ASSERT_TRUE(apPassOk("12345678"));
+  TEST_ASSERT_TRUE(apPassOk(std::string(63, 'x').c_str()));
+  TEST_ASSERT_TRUE(apPassOk("with space ~!"));
+  TEST_ASSERT_FALSE(apPassOk("1234567"));
+  TEST_ASSERT_FALSE(apPassOk(std::string(64, 'x').c_str()));
+  TEST_ASSERT_FALSE(apPassOk("caf\xc3\xa9-1234"));
+  TEST_ASSERT_FALSE(apPassOk(""));
+  TEST_ASSERT_FALSE(apPassOk(nullptr));
 }
 
 void test_result_round_trip_and_describe() {
@@ -101,8 +257,8 @@ void test_padding_is_zeroed_so_the_blob_is_stable() {
   // two seals of the same content are the same bytes and the same CRC.
   Handoff a = pullHandoff();
   Handoff b = pullHandoff();
-  memset(reinterpret_cast<uint8_t*>(&b) + offsetof(Handoff, adminHash) + sizeof(b.adminHash), 0xEE,
-         offsetof(Handoff, crc) - offsetof(Handoff, adminHash) - sizeof(b.adminHash));
+  memset(reinterpret_cast<uint8_t*>(&b) + offsetof(Handoff, adminSaltLen) + 1, 0xEE,
+         offsetof(Handoff, adminIter) - offsetof(Handoff, adminSaltLen) - 1);
   encode(a);
   encode(b);
   TEST_ASSERT_EQUAL_INT(0, memcmp(&a, &b, sizeof(a)));
@@ -145,10 +301,12 @@ void test_other_version_is_refused_whatever_its_size() {
   h.crc = crc32Ieee(&h, offsetof(Handoff, crc));
   Handoff out;
   TEST_ASSERT_TRUE(decode(&h, sizeof(h), out) == Verdict::OtherVersion);
-  // A larger v2 record is still "another version", not a bad size.
-  std::vector<uint8_t> v2(sizeof(h) + 40, 0);
-  memcpy(v2.data(), &h, sizeof(h));
-  TEST_ASSERT_TRUE(decode(v2.data(), v2.size(), out) == Verdict::OtherVersion);
+  // A larger v3 record is still "another version", not a bad size.
+  std::vector<uint8_t> v3(sizeof(h) + 40, 0);
+  memcpy(v3.data(), &h, sizeof(h));
+  TEST_ASSERT_TRUE(decode(v3.data(), v3.size(), out) == Verdict::OtherVersion);
+  h.version = 0;
+  TEST_ASSERT_TRUE(decode(&h, sizeof(h), out) == Verdict::OtherVersion);
   Result r;
   clear(r, Outcome::Ok);
   encode(r);
@@ -164,7 +322,9 @@ void test_strings_are_cut_and_terminated() {
   TEST_ASSERT_FALSE(setText(h.url, longUrl.c_str()));
   TEST_ASSERT_EQUAL_UINT(sizeof(h.url) - 1, strlen(h.url));
   TEST_ASSERT_TRUE(setText(h.wifiSsid, std::string(32, 's').c_str()));  // 32: the longest SSID fits
-  TEST_ASSERT_TRUE(setText(h.adminHash, std::string(64, 'a').c_str()));
+  TEST_ASSERT_TRUE(setText(h.apPass, std::string(63, 'a').c_str()));
+  TEST_ASSERT_FALSE(setText(h.adminUser, std::string(32, 'u').c_str()));
+  TEST_ASSERT_EQUAL_UINT(31, strlen(h.adminUser));
   TEST_ASSERT_TRUE(setText(h.token, nullptr));
   TEST_ASSERT_EQUAL_STRING("", h.token);
   // A writer that left a field unterminated: decode() terminates the copy.
@@ -307,6 +467,9 @@ void test_tail_hold_streams_the_image_and_keeps_the_trailer() {
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_handoff_round_trip);
+  RUN_TEST(test_v1_handoff_is_read_as_v2);
+  RUN_TEST(test_out_of_range_fields_are_cleared);
+  RUN_TEST(test_ap_pass_rules);
   RUN_TEST(test_result_round_trip_and_describe);
   RUN_TEST(test_crc_catches_any_flipped_byte);
   RUN_TEST(test_padding_is_zeroed_so_the_blob_is_stable);

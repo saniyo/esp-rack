@@ -1,0 +1,4 @@
+# ESP32-C3: DIO 80 MHz (the demo's C3 env sets board_build.flash_mode = dio;
+# a board on QIO: -DLOADER_FLASH_MODE=qio)
+CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y

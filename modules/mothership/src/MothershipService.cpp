@@ -554,7 +554,7 @@ bool MothershipService::performOneCheckin(bool& outBurst) {
   // platformio.ini), so the TLS layer no longer fragments heap on
   // reconnect.
 
-  // Body: {deviceId, fwVer, hwVer, hwRev, uptimeSec, freeHeap, action_results[]}
+  // Body: {deviceId, fwVer, hwVer, hwRev, uptimeSec, freeHeap, action_results[], loaderResult}
   // All identity fields come from the single source of truth in
   // DeviceIdentity so this payload stays in lockstep with the X.509
   // cert subject + AutoUpdate URL + Identity tab readout. mTLS
@@ -690,6 +690,26 @@ bool MothershipService::performOneCheckin(bool& outBurst) {
                   (unsigned)emitted, (unsigned)_resultRing.size());
   }
 
+  // The update loader's Result (the loader scheme, system/OtaLoader.h),
+  // once: the first check-in the server takes after a boot from the loader
+  // carries it, so the server learns how its update went (a pull it queued,
+  // an upload, a crash-loop entry): {outcome ("ok", "failed-before-write",
+  // "failed-after-write", "aborted"), from, to, attempts, bytes,
+  // durationMs, lastError}. fwVer already says what runs now.
+  static bool s_loaderResultSent = false;  // this task only
+  ESPRack::ota::Result loaderResult;
+  const bool withLoaderResult = !s_loaderResultSent && ESPRack::OtaLoader::lastResult(loaderResult);
+  if (withLoaderResult) {
+    JsonObject lr = req.createNestedObject("loaderResult");
+    lr["outcome"]    = ESPRack::ota::outcomeName(loaderResult.outcome);
+    lr["from"]       = loaderResult.from;  // char[]: copied into the doc
+    lr["to"]         = loaderResult.to;
+    lr["attempts"]   = loaderResult.attempts;
+    lr["bytes"]      = loaderResult.bytes;
+    lr["durationMs"] = loaderResult.durationMs;
+    lr["lastError"]  = loaderResult.lastError;
+  }
+
   // Bounds-check the BSS pool before we serialise — _reqDoc is sized to
   // the observed body shape (3 KB). If a future build emits more chunks
   // or a heavier action payload, this fires before we send a truncated
@@ -752,6 +772,7 @@ bool MothershipService::performOneCheckin(bool& outBurst) {
   // Success — clear the failure streak so we don't carry stale counts
   // across transient blips.
   s_consec_failures = 0;
+  if (withLoaderResult) s_loaderResultSent = true;  // the server has it
 
   // Anchor the post-warmup heap baseline. The very first successful
   // checkin is when BearSSL just bound the cert chain; this snapshot

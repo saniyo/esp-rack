@@ -62,3 +62,12 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 # OTA: the loader boots ota_0; no rollback in this scheme
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=n
 CONFIG_PARTITION_TABLE_CUSTOM=y
+
+# This project's bootloader (written only with a boot button pin,
+# CMakeLists.txt) behaves as Arduino's: no image check on a deep-sleep
+# wake, and so the same 16-byte RTC record at the top of RTC fast memory
+# (BOOTLOADER_RESERVE_RTC_MEM, as the Arduino libs reserve it).
+CONFIG_BOOTLOADER_SKIP_VALIDATE_IN_DEEP_SLEEP=y
+
+# Flash mode and frequency per chip: sdkconfig.defaults.<target> (the
+# Arduino boards' bootloaders), else CMakeLists.txt's LOADER_FLASH_*.

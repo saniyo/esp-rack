@@ -218,7 +218,32 @@ custom_ota_sign = yes            ; firmware.signed.bin + .signed.json after each
   keygen`), or `ESPRACK_OTA_KEY`. Without one a dev key is made on first use: images
   still install, with a "dev signing key" warning. Never commit a key.
 - **The loader**: `ota_sign.py export-pubkey`, then `pio run -d ..\esp-rack\loader -e
-  <esp32|esp32c3|esp32c6|esp32s3>` (one build per chip, every flash size).
+  <esp32|esp32c3|esp32c6|esp32s3>` (one build per chip, every flash size), or where
+  that fails (PlatformIO Core 6.2 and ESP-IDF projects):
+  `powershell -File ..\esp-rack\loader\build.ps1 -Target <chip>`.
+- **The boot button** (optional, none by default): `build.ps1 -Target <chip> -BootPin
+  <gpio> [-BootLevel low|high] [-BootHoldS 5]` builds the loader's own bootloader with
+  the IDF's factory-reset GPIO: held right after a reset, the device boots into the
+  loader's upload page even when the app crashes before any of its code runs (only
+  the boot choice, otadata, is erased; NVS and files stay). `flash_loader.ps1` then
+  writes that bootloader instead of the app's, after checking its flash mode and
+  frequency against the app's. On the boards' BOOT button (GPIO 0 / 9, a strapping
+  pin) press it just after the reset, not during it. A board whose flash settings
+  differ from the demo boards': `-FlashMode` / `-FlashFreq` (table in
+  `docs/plans/lib-ota-loader.md` §10.2).
+- **In update mode** the loader joins the device's Wi-Fi; without it it opens the AP
+  `esprack-loader-XXXX`, WPA2 with this device's AP password or a generated one the
+  update page shows; entered by a crash loop (before the app's Wi-Fi is up) or the
+  boot button, that AP is open and the loader warns. Its page asks for the password of
+  the admin who pressed "Restart into update mode" (checked as the security module
+  stores it: PBKDF2); without user accounts, after a pull, a crash loop or by the boot
+  button it is open and says so. With a
+  production key it refuses an unsigned file before sending it.
+- **Update servers**: the loader downloads with `Authorization: Bearer <token>`,
+  `x-ESP32-STA-MAC`, `x-ESPRack-Device-Id`, `x-ESP32-version`, `x-ESP32-mode: sketch`;
+  it needs `x-SHA256` / `x-Signature` (auto-update) or `sha256` / `sig` (mothership)
+  with a production key; the mothership check-in after the update carries
+  `loaderResult` once. The contract: `docs/plans/lib-ota-loader.md` §5.1.
 - **First install, and every switch of scheme, over USB only** (a partition table is
   never rewritten over the air):
   `..\esp-rack\tools\flash_loader.ps1 -Chip <esp32|c3|c6|s3> -PioEnv my-board-loader -Port COMx`

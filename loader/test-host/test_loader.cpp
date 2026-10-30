@@ -1,7 +1,8 @@
 // Host tests of the loader's IDF-free parts: the image head check, the
-// announced size, the retry pauses, the HTTP download's URL / head / chunked parsing, and the
+// announced size, the retry pauses, the HTTP download's URL / head / chunked parsing, the
 // signature check against vectors from tools/ota_sign.py and Python's
-// cryptography (the same mbedtls calls as on the chip).
+// cryptography, and the upload page's password check (PBKDF2 against
+// RFC 7914 and Python's hashlib; the same mbedtls calls as on the chip).
 
 #include <unity.h>
 
@@ -120,10 +121,57 @@ void test_retry_pauses() {
   TEST_ASSERT_EQUAL(3, attemptsAllowed(3));
 }
 
-void test_hex_equal() {
-  TEST_ASSERT_TRUE(hexEqual("abCD01", "ABcd01"));
-  TEST_ASSERT_FALSE(hexEqual("abcd01", "abcd02"));
-  TEST_ASSERT_FALSE(hexEqual("abcd", "abcd01"));
+// ---- The upload page's password -------------------------------------------
+
+void hexTo(const char* hex, uint8_t* out, size_t n) { TEST_ASSERT_TRUE(ESPRack::ota::fromHex(hex, out, n)); }
+
+void test_pbkdf2_vectors() {
+  uint8_t key[32], want[32];
+  // RFC 7914 §11: PBKDF2-HMAC-SHA256("passwd", "salt", 1), its first 32 bytes.
+  TEST_ASSERT_TRUE(pbkdf2Sha256("passwd", 6, reinterpret_cast<const uint8_t*>("salt"), 4, 1, key, sizeof(key)));
+  hexTo("55ac046e56e3089fec1691c22544b605f94185216dde0465e68b9d57c20dacbc", want, 32);
+  TEST_ASSERT_EQUAL_INT(0, memcmp(key, want, 32));
+  // The app's format (SecurityHash.h: 16-byte salt, 2000 rounds), hashlib.pbkdf2_hmac.
+  uint8_t salt[16];
+  for (size_t i = 0; i < sizeof(salt); ++i) salt[i] = uint8_t(0x10 + i);
+  TEST_ASSERT_TRUE(pbkdf2Sha256("admin", 5, salt, sizeof(salt), 2000, key, sizeof(key)));
+  hexTo("7158b7b47d51e8b1f7bf0a4f7217ee297fc5ed5f5c2f94ac73f983c49abaa957", want, 32);
+  TEST_ASSERT_EQUAL_INT(0, memcmp(key, want, 32));
+}
+
+void test_admin_password_check() {
+  namespace ota = ESPRack::ota;
+  // A version 2 handoff: the stored PBKDF2 record of user "admin" (UTF-8 password).
+  ota::Handoff h;
+  ota::clear(h, ota::Mode::Push);
+  h.adminKdf = uint8_t(ota::AdminKdf::Pbkdf2Sha256);
+  h.adminSaltLen = 16;
+  h.adminIter = 2000;
+  for (size_t i = 0; i < 16; ++i) h.adminSalt[i] = uint8_t(0x10 + i);
+  hexTo("168931b295c3b9b3ef14eeabf67097f90870722ac5098df7c02cc16966573de7", h.adminKey, 32);
+  const char* pw = "p\xc3\xa4ssw\xc3\xb6rd";  // "pässwörd"
+  TEST_ASSERT_TRUE(adminPasswordOk(h, pw, strlen(pw)));
+  TEST_ASSERT_FALSE(adminPasswordOk(h, "passwrd", 7));
+  TEST_ASSERT_FALSE(adminPasswordOk(h, "", 0));
+  h.adminIter = 1999;  // the record's own rounds, not a fixed count
+  TEST_ASSERT_FALSE(adminPasswordOk(h, pw, strlen(pw)));
+  h.adminIter = ota::kAdminIterMax + 1;  // out of range: never checked
+  TEST_ASSERT_FALSE(adminPasswordOk(h, pw, strlen(pw)));
+  // The app's password "admin" in its format.
+  h.adminIter = 2000;
+  hexTo("7158b7b47d51e8b1f7bf0a4f7217ee297fc5ed5f5c2f94ac73f983c49abaa957", h.adminKey, 32);
+  TEST_ASSERT_TRUE(adminPasswordOk(h, "admin", 5));
+  TEST_ASSERT_FALSE(adminPasswordOk(h, "Admin", 5));
+  // A version 1 handoff: SHA-256("admin"), decoded into the same record.
+  h.adminKdf = uint8_t(ota::AdminKdf::Sha256);
+  h.adminSaltLen = 0;
+  h.adminIter = 0;
+  hexTo("8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918", h.adminKey, 32);
+  TEST_ASSERT_TRUE(adminPasswordOk(h, "admin", 5));
+  TEST_ASSERT_FALSE(adminPasswordOk(h, "admin ", 6));
+  // No record: no password matches (the page is open instead: loader_web).
+  h.adminKdf = uint8_t(ota::AdminKdf::None);
+  TEST_ASSERT_FALSE(adminPasswordOk(h, "admin", 5));
 }
 
 // ---- URL ------------------------------------------------------------------
@@ -349,7 +397,8 @@ int main() {
   RUN_TEST(test_head_refusals);
   RUN_TEST(test_head_long_strings_terminated);
   RUN_TEST(test_retry_pauses);
-  RUN_TEST(test_hex_equal);
+  RUN_TEST(test_pbkdf2_vectors);
+  RUN_TEST(test_admin_password_check);
   RUN_TEST(test_url_forms);
   RUN_TEST(test_url_refusals);
   RUN_TEST(test_redirects);

@@ -1,6 +1,8 @@
 // esprack-loader: Wi-Fi. A station when one is known (the handoff's, kept
 // in IDF's Wi-Fi storage for a later entry without one), else or besides an
-// open AP "esprack-loader-XXXX" (XXXX: the MAC's last two bytes).
+// AP "esprack-loader-XXXX" (XXXX: the MAC's last two bytes): WPA2 with the
+// handoff's apPass, open without one (no handoff: the boot button, or an
+// app from before handoff version 2; the page warns).
 // A lost station is joined again in the background: after 3 s, or 30 s
 // while the AP is on (a station's scan takes the radio off the AP's
 // channel).
@@ -31,6 +33,7 @@ esp_timer_handle_t s_retry = nullptr;
 bool s_started = false;
 bool s_staOn = false;  // a station is configured
 bool s_apOn = false;
+bool s_apOpen = false;  // the AP has no password
 bool s_nvs = false;  // IDF's Wi-Fi storage usable
 char s_name[24] = {};  // "esprack-loader-XXXX": the AP's SSID and the host name
 
@@ -136,15 +139,23 @@ void startAp() {
   a.ap.ssid_len = uint8_t(strlen(s_name));
   a.ap.channel = 1;
   a.ap.max_connection = 4;
-  a.ap.authmode = WIFI_AUTH_OPEN;  // the page asks for the admin password
+  const char* pass = g.haveHandoff ? g.handoff.apPass : "";
+  s_apOpen = !ota::apPassOk(pass);
+  if (s_apOpen) {
+    a.ap.authmode = WIFI_AUTH_OPEN;  // the page still asks for the admin password
+  } else {
+    a.ap.authmode = WIFI_AUTH_WPA2_PSK;
+    snprintf(reinterpret_cast<char*>(a.ap.password), sizeof(a.ap.password), "%s", pass);
+  }
   s_apOn = true;
   (void)esp_wifi_set_mode(s_staOn ? WIFI_MODE_APSTA : WIFI_MODE_AP);
   (void)esp_wifi_set_config(WIFI_IF_AP, &a);
   apply();
-  ESP_LOGW(TAG, "AP %s (open): http://192.168.4.1/", s_name);
+  ESP_LOGW(TAG, "AP %s (%s): http://192.168.4.1/", s_name, s_apOpen ? "open" : "WPA2");
 }
 
 bool apOn() { return s_apOn; }
+bool apOpen() { return s_apOn && s_apOpen; }
 const char* apName() { return s_name; }
 
 }  // namespace net

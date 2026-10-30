@@ -2,8 +2,9 @@
 #ifndef ESPRACK_LOADER_SIG_VERIFY_H
 #define ESPRACK_LOADER_SIG_VERIFY_H
 
-// SHA-256 and the ECDSA P-256 check of an image's signature, on mbedtls
-// only (the target's, or a host build of it: loader/test-host).
+// SHA-256 and the ECDSA P-256 check of an image's signature, and the
+// upload page's password check, on mbedtls only (the target's, or a host
+// build of it: loader/test-host).
 //
 // The signature is ECDSA-with-SHA-256 over the whole image, DER-encoded
 // (SEQUENCE { INTEGER r, INTEGER s }, 72 B at most): what Python's
@@ -11,6 +12,8 @@
 
 #include <stddef.h>
 #include <stdint.h>
+
+#include "system/OtaHandoff.h"
 
 namespace loader {
 
@@ -43,6 +46,15 @@ const char* sigText(Sig s);
 // pub: SEC1 uncompressed point (0x04 | X | Y, 65 B). hash: the image's
 // SHA-256.
 Sig verifyP256(const uint8_t pub[65], const uint8_t hash[32], const uint8_t* der, size_t derLen);
+
+// PBKDF2-HMAC-SHA256 (mbedtls pkcs5, as the app's SecurityHash.h), keyLen
+// bytes into out. false: mbedtls refused (a bad argument).
+bool pbkdf2Sha256(const void* pw, size_t n, const uint8_t* salt, size_t saltLen, uint32_t rounds, uint8_t* out,
+                  size_t keyLen);
+// The password (n bytes, UTF-8) against the handoff's admin record:
+// SHA-256 (a version 1 handoff) or PBKDF2 over its salt and rounds, the
+// result compared in constant time. false: no record, or no match.
+bool adminPasswordOk(const ESPRack::ota::Handoff& h, const char* pw, size_t n);
 
 }  // namespace loader
 

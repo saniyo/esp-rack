@@ -1,15 +1,20 @@
 #include "system/OtaLoader.h"
 
+#include <bootloader_random.h>
+#include <esp_mac.h>
 #include <esp_ota_ops.h>
 #include <esp_partition.h>
+#include <esp_random.h>
 #include <esp_wifi.h>
-#include <mbedtls/sha256.h>
 #include <nvs.h>
 #include <string.h>
 
 #include <atomic>
 
 #include "App.h"
+#include "DeviceIdentity.h"
+#include "SecurityHash.h"
+#include "SecurityManager.h"
 #include "WebManager.h"
 #include "power/PowerGuard.h"
 #include "system/FirmwareUpdate.h"
@@ -70,7 +75,16 @@ const Layout& layout() {
 ReadyCheck s_ready;
 std::atomic<bool> s_entering{false};  // static storage: RMW is fine
 ota::Handoff s_handoff;               // the one being entered (up to the restart)
-char s_pushHash[65];                  // the admin action's password hash, entered at the client's disconnect
+SecurityManager* s_sm = nullptr;      // set at install (setSecurityManager), read by the admin action
+// The admin action's password check (Handoff adminKdf .. adminUser), entered at the client's disconnect.
+constexpr size_t kAdminFrom = offsetof(ota::Handoff, adminKdf);
+constexpr size_t kAdminTo = offsetof(ota::Handoff, apPass);
+uint8_t s_pushAdmin[kAdminTo - kAdminFrom];
+
+// The loader AP's password when this device's AP gives none: generated
+// once per device, kept in NVS (begin(), before any other task reads it).
+constexpr const char* kNvsApPassKey = "appass";
+char s_apGen[ota::kApPassMax + 1] = "";
 
 bool s_begun = false;
 bool s_fromLoader = false;
@@ -93,6 +107,62 @@ void fillWifi(ota::Handoff& h) {
     return;
   }
   h.useShared = 1;  // no station config here: the loader's own copy
+}
+
+// The loader's AP password: this device's AP's while that AP runs with
+// one, else the generated one ("" and false: none).
+bool apPassword(char (&out)[ota::kApPassMax + 1], bool& deviceAp) {
+  deviceAp = false;
+  wifi_mode_t mode = WIFI_MODE_NULL;
+  wifi_config_t conf;
+  if (esp_wifi_get_mode(&mode) == ESP_OK && (mode == WIFI_MODE_AP || mode == WIFI_MODE_APSTA) &&
+      esp_wifi_get_config(WIFI_IF_AP, &conf) == ESP_OK && conf.ap.authmode != WIFI_AUTH_OPEN) {
+    char pass[sizeof(conf.ap.password) + 1] = {0};  // not terminated at full length
+    memcpy(pass, conf.ap.password, sizeof(conf.ap.password));
+    if (ota::apPassOk(pass)) {
+      ota::setText(out, pass);
+      deviceAp = true;
+      return true;
+    }
+  }
+  ota::setText(out, s_apGen);
+  return s_apGen[0] != 0;
+}
+
+// The AP password and the device id, for any handoff.
+void fillDevice(ota::Handoff& h) {
+  bool deviceAp = false;
+  (void)apPassword(h.apPass, deviceAp);
+  (void)ota::setText(h.deviceId, DeviceIdentity::canonical().c_str());
+}
+
+// The generated AP password: read, or made and stored on the first boot
+// in the loader scheme (early boot: written at once, as BootGuard's). The
+// RF isn't up yet, so the RNG alone would be pseudo-random (the classic
+// ESP32 has no other entropy source): the bootloader's entropy source is
+// on for the draw, as IDF allows in early boot (no ADC, I2S or Wi-Fi in
+// use yet; with the Wi-Fi up the RNG needs none).
+void loadApPassword() {
+  nvs_handle_t nh;
+  if (nvs_open(ota::kNvsNamespace, NVS_READWRITE, &nh) != ESP_OK) return;
+  size_t len = sizeof(s_apGen);
+  if (nvs_get_str(nh, kNvsApPassKey, s_apGen, &len) != ESP_OK || !ota::apPassOk(s_apGen)) {
+    // 12 of 32 letters and digits (no l, o, 0, 1): 60 bits, easy to type.
+    static const char kChars[] = "abcdefghijkmnpqrstuvwxyz23456789";
+    uint8_t rnd[12];
+    wifi_mode_t mode;
+    const bool wifiUp = esp_wifi_get_mode(&mode) == ESP_OK;
+    if (!wifiUp) bootloader_random_enable();
+    esp_fill_random(rnd, sizeof(rnd));
+    if (!wifiUp) bootloader_random_disable();
+    for (size_t i = 0; i < sizeof(rnd); ++i) s_apGen[i] = kChars[rnd[i] & 31];
+    s_apGen[sizeof(rnd)] = 0;
+    if (nvs_set_str(nh, kNvsApPassKey, s_apGen) != ESP_OK || nvs_commit(nh) != ESP_OK) {
+      log_w("[ota] the loader's AP password not stored: its AP stays open");
+      s_apGen[0] = 0;
+    }
+  }
+  nvs_close(nh);
 }
 
 bool writeHandoff() {
@@ -143,11 +213,30 @@ void makePush(ota::Handoff& h, const char* adminPassword) {
   ota::clear(h, ota::Mode::Push);
   h.attemptsAllowed = ESPRACK_OTA_LOADER_ATTEMPTS;
   fillWifi(h);
+  fillDevice(h);
   if (adminPassword && *adminPassword) {
-    uint8_t sha[32];
-    if (mbedtls_sha256(reinterpret_cast<const unsigned char*>(adminPassword), strlen(adminPassword), sha, 0) == 0)
-      ota::toHex(sha, sizeof(sha), h.adminHash);
+    // As the security module stores a user's (SecurityHash.h): the loader
+    // checks both kinds the same way.
+    const String salt = SecurityHash::makeSalt();
+    (void)setAdmin(h, "", salt.c_str(), SecurityHash::hashPassword(adminPassword, salt).c_str());
   }
+}
+
+bool setAdmin(ota::Handoff& h, const char* user, const char* saltHex, const char* hashHex) {
+  const size_t chars = saltHex ? strlen(saltHex) : 0;
+  uint8_t salt[ota::kAdminSaltMax];
+  uint8_t key[ota::kAdminKeyLen];
+  if (!chars || chars % 2 || chars / 2 > sizeof(salt) || !ota::fromHex(saltHex, salt, chars / 2) ||
+      !ota::fromHex(hashHex, key, sizeof(key)))
+    return false;
+  h.adminKdf = static_cast<uint8_t>(ota::AdminKdf::Pbkdf2Sha256);
+  h.adminSaltLen = static_cast<uint8_t>(chars / 2);
+  h.adminIter = SecurityHash::ITERATIONS;
+  memset(h.adminSalt, 0, sizeof(h.adminSalt));
+  memcpy(h.adminSalt, salt, chars / 2);
+  memcpy(h.adminKey, key, sizeof(key));
+  (void)ota::setText(h.adminUser, user);  // shown only: cut is fine
+  return true;
 }
 
 bool makePull(ota::Handoff& h, const char* url, uint32_t size, const char* sha256Hex, const char* sigHex,
@@ -189,6 +278,7 @@ bool makePull(ota::Handoff& h, const char* url, uint32_t size, const char* sha25
   }
   (void)ota::setText(h.targetVersion, targetVersion);  // shown only: cut is fine
   fillWifi(h);
+  fillDevice(h);
   return true;
 }
 
@@ -260,9 +350,11 @@ void begin() {
   if (s_begun) return;  // early boot, one task (BootGuard::begin)
   s_begun = true;
   const Layout& l = layout();
-  if (l.scheme == Scheme::Loader)
+  if (l.scheme == Scheme::Loader) {
     log_i("[ota] loader scheme: app slot %u B, loader %s%s", (unsigned)l.slotSize, l.loaderVer,
           devKey() ? " (dev signing key)" : "");
+    loadApPassword();
+  }
   if (l.note[0]) log_w("[ota] %s", l.note);
   // Only a board the loader ran on has the namespace: elsewhere this is
   // one failed open, nothing written.
@@ -308,6 +400,20 @@ String lastResultText() {
   return String(line);
 }
 
+bool loaderAp(String& ssid, String& pass, bool& deviceAp) {
+  uint8_t mac[6] = {0};
+  (void)esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP);  // as the loader names its AP
+  char name[24];
+  snprintf(name, sizeof(name), "esprack-loader-%02X%02X", mac[4], mac[5]);
+  ssid = name;
+  char p[ota::kApPassMax + 1];
+  const bool ok = apPassword(p, deviceAp);
+  pass = p;
+  return ok;
+}
+
+void setSecurityManager(SecurityManager* sm) { s_sm = sm; }
+
 void registerManifest(WebManager* web) {
   if (!web || scheme() != Scheme::Loader) return;  // a dual board's manifest stays as it was
   WebActionSpec spec;
@@ -327,16 +433,22 @@ void registerManifest(WebManager* web) {
     const AsyncWebParameter* pw = r->getParam("password", true);
     ota::Handoff h;
     makePush(h, pw ? pw->value().c_str() : nullptr);
+    if (!ota::hasAdmin(h) && s_sm) {
+      // No password given: the requesting admin's own (their stored record).
+      Authentication a = s_sm->authenticateRequest(r);
+      if (a.authenticated && a.user)
+        (void)setAdmin(h, a.user->username.c_str(), a.user->salt.c_str(), a.user->password.c_str());
+    }
     String why;
     if (!canEnter(h, why)) {
       r->send(409, "application/json", "{\"ok\":false,\"error\":\"" + why + "\"}");
       return;
     }
-    memcpy(s_pushHash, h.adminHash, sizeof(s_pushHash));
+    memcpy(s_pushAdmin, reinterpret_cast<const uint8_t*>(&h) + kAdminFrom, sizeof(s_pushAdmin));
     r->onDisconnect([] {
       ota::Handoff h;
       makePush(h, nullptr);
-      memcpy(h.adminHash, s_pushHash, sizeof(h.adminHash));
+      memcpy(reinterpret_cast<uint8_t*>(&h) + kAdminFrom, s_pushAdmin, sizeof(s_pushAdmin));
       String why;
       (void)enter(h, kRestartUpdateMode, why);  // refused: logged
     });

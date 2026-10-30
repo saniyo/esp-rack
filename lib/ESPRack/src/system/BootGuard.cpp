@@ -424,6 +424,10 @@ void begin(uint8_t limit, uint32_t windowMs, uint32_t stableAfterMs) {
     log_e("[boot] %u crash boots in a row: into the update loader", (unsigned)s_rec.quick);
     ota::Handoff h;  // the Wi-Fi isn't up yet: the loader's own copy
     OtaLoader::makePush(h, nullptr);
+    // Nor is this device's AP: the password its owner knows for it isn't
+    // known here, a generated one may never have been seen. The loader's
+    // AP opens without one (it warns), reachable without a cable.
+    h.apPass[0] = 0;
     String why;
     if (!OtaLoader::enter(h, kRestartCrashLoop, why)) log_e("[boot] update loader not entered: %s", why.c_str());
   }

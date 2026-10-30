@@ -1,0 +1,3 @@
+# ESP32 (esp32dev, node32s): DIO 40 MHz, as PlatformIO's Arduino bootloader
+CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_40M=y

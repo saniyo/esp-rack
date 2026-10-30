@@ -1,0 +1,4 @@
+# ESP32-S3 (esp32-s3-devkitc-1 and its N8R2 / N16R8 kin): QIO 80 MHz, as
+# PlatformIO's Arduino bootloader (bootloader_qio_80m; the header says DIO)
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y

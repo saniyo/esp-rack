@@ -3,3 +3,4 @@
 sdkconfig.*
 !sdkconfig.defaults
 sdkconfig
+!sdkconfig.defaults.*

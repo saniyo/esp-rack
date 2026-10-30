@@ -1,16 +1,21 @@
 // esprack-loader: one download of the handoff's image, plain HTTP/1.1 on
 // lwIP sockets (http_lite.h: why not esp_http_client). The token goes as
 // "Authorization: Bearer <token>", the same on every attempt (it holds up
-// to the install, brief §6). Everything the response tells before
-// its body (status, length) and the image's first sector are checked
-// before the first flash write. Redirects: up to 3, http:// only.
+// to the install, brief §6). The device tells who it is as the app's
+// image requests do: x-ESP32-STA-MAC, x-ESPRack-Device-Id (the handoff's),
+// x-ESP32-version (the app in ota_0, while it is whole), x-ESP32-mode
+// "sketch"; User-Agent "esprack-loader/<version>". Everything the response
+// tells before its body (status, length) and the image's first sector are
+// checked before the first flash write. Redirects: up to 3, http:// only.
 
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
 
+#include <esp_app_desc.h>
 #include <esp_log.h>
+#include <esp_mac.h>
 #include <lwip/netdb.h>
 #include <lwip/sockets.h>
 
@@ -86,12 +91,21 @@ bool sendAll(int s, const char* p, size_t n) {
 int request(const http::Url& u, const char* token, http::Head& head, size_t* extra) {
   const int s = connectTo(u);
   if (s < 0) return -1;
-  static char req[sizeof(u.path) + sizeof(u.host) + 200 + sizeof(ota::Handoff::token)];
-  const int n = snprintf(req, sizeof(req),
-                         "GET %s HTTP/1.1\r\nHost: %s:%u\r\nUser-Agent: esprack-loader\r\n%s%s%s"
-                         "Connection: close\r\n\r\n",
-                         u.path, u.host, unsigned(u.port), token[0] ? "Authorization: Bearer " : "", token,
-                         token[0] ? "\r\n" : "");
+  static char req[sizeof(u.path) + sizeof(u.host) + 400 + sizeof(ota::Handoff::token) +
+                  sizeof(ota::Handoff::deviceId) + sizeof(g.appVersion)];
+  const ota::Handoff& h = g.handoff;
+  uint8_t mac[6] = {};
+  (void)esp_read_mac(mac, ESP_MAC_WIFI_STA);
+  const char* app = g.appValid ? g.appVersion : "";
+  const int n = snprintf(
+      req, sizeof(req),
+      "GET %s HTTP/1.1\r\nHost: %s:%u\r\nUser-Agent: esprack-loader/%s\r\n%s%s%s"
+      "x-ESP32-STA-MAC: %02X:%02X:%02X:%02X:%02X:%02X\r\nx-ESP32-mode: sketch\r\n%s%s%s%s%s%s"
+      "Connection: close\r\n\r\n",
+      u.path, u.host, unsigned(u.port), esp_app_get_description()->version, token[0] ? "Authorization: Bearer " : "",
+      token, token[0] ? "\r\n" : "", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+      h.deviceId[0] ? "x-ESPRack-Device-Id: " : "", h.deviceId, h.deviceId[0] ? "\r\n" : "",
+      app[0] ? "x-ESP32-version: " : "", app, app[0] ? "\r\n" : "");
   if (n <= 0 || size_t(n) >= sizeof(req) || !sendAll(s, req, size_t(n))) {
     setError("download: request not sent");
     close(s);

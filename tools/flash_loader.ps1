@@ -17,11 +17,19 @@
   from a dual table with the same data offsets keeps its settings and files
   (docs/plans/lib-ota-loader.md, "Switching a board").
 
+  The bootloader: the app env's (Arduino's), unless the loader was built
+  with a boot button (build.ps1 -BootPin, its sdkconfig has
+  CONFIG_BOOTLOADER_FACTORY_RESET=y): then the loader build's own, which
+  boots the loader while that pin is held at reset. Its flash mode and
+  frequency (image header) must equal the app bootloader's; the size is
+  set from the chip (--flash-size detect) for both. -LoaderOnly then
+  writes that bootloader too.
+
 .EXAMPLE
   .\flash_loader.ps1 -Chip c3 -Port COM7                 # env loader-c3 in the current project
   .\flash_loader.ps1 -Chip s3 -Env my-s3-loader -Project D:\proj\gateway -Port COM5
   .\flash_loader.ps1 -Chip c6 -Port COM9 -StartIn loader # boots into the loader first
-  .\flash_loader.ps1 -Chip esp32 -Port COM3 -LoaderOnly  # replaces just the loader
+  .\flash_loader.ps1 -Chip esp32 -Port COM3 -LoaderOnly  # replaces just the loader (and its boot-button bootloader)
   .\flash_loader.ps1 -Chip c3 -DryRun                    # checks and prints the command
 #>
 param(
@@ -38,7 +46,7 @@ param(
   [int]$Baud = 921600,
   [switch]$EraseAll,                 # erase the whole flash first (settings and files too)
   [switch]$LoaderOnly,               # write only the loader into factory
-  [switch]$Force,                    # skip the project-name checks
+  [switch]$Force,                    # skip the project-name and bootloader flash-setting checks
   [switch]$DryRun
 )
 
@@ -79,6 +87,47 @@ function Read-Image([string]$path) {
   @{ Ok = $true; Size = $b.Length; ChipId = [BitConverter]::ToUInt16($b, 12); Project = $project }
 }
 
+# The loader build next to a loader image: its sdkconfig and bootloader.bin
+# (build.ps1: <dir>\sdkconfig, <dir>\bootloader\bootloader.bin; idf.py:
+# the project's loader\sdkconfig, build*\bootloader\bootloader.bin;
+# PlatformIO: loader\sdkconfig.<env>, .pio\build\<env>\bootloader.bin).
+# Only an sdkconfig for this chip counts (idf.py's is shared by its build
+# dirs). Boot: the boot button's pin, level and hold time, or $null.
+function Read-LoaderBuild([string]$loaderPath) {
+  $dir = Split-Path -Parent $loaderPath
+  $envName = Split-Path -Leaf $dir
+  $confs = @((Join-Path $dir 'sdkconfig'), (Join-Path $espRack "loader\sdkconfig.$envName"))
+  if ($envName -like 'build*') { $confs += Join-Path (Split-Path -Parent $dir) 'sdkconfig' }  # idf.py's default
+  $target = "CONFIG_IDF_TARGET=`"$($c.Esptool)`""
+  $conf = $confs | Where-Object { (Test-Path -LiteralPath $_ -PathType Leaf) -and
+    @(Get-Content -LiteralPath $_) -contains $target } | Select-Object -First 1
+  $boot = @((Join-Path $dir 'bootloader\bootloader.bin'), (Join-Path $dir 'bootloader.bin')) |
+    Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+  $info = @{ Conf = $conf; Bootloader = $boot; Boot = $null; Mode = '?' }
+  if (-not $conf) { return $info }
+  $lines = Get-Content -LiteralPath $conf
+  $info.Mode = if ($lines -contains 'CONFIG_ESPTOOLPY_FLASHMODE_QIO=y') { 'qio' } else { 'dio' }
+  if ($lines -contains 'CONFIG_BOOTLOADER_FACTORY_RESET=y') {
+    $val = { param($k) (($lines | Select-String "^$k=(.*)$").Matches | Select-Object -First 1).Groups[1].Value }
+    $info.Boot = @{
+      Pin = & $val 'CONFIG_BOOTLOADER_NUM_PIN_FACTORY_RESET'
+      Level = if ($lines -contains 'CONFIG_BOOTLOADER_FACTORY_RESET_PIN_HIGH=y') { 'high' } else { 'low' }
+      Hold = & $val 'CONFIG_BOOTLOADER_HOLD_TIME_GPIO'
+    }
+  }
+  $info
+}
+
+# A bootloader's flash settings from its image header: mode (byte 2), and
+# size / frequency (byte 3: high / low nibble).
+function Read-FlashHeader([string]$path) {
+  $b = [System.IO.File]::ReadAllBytes($path)
+  if ($b.Length -lt 16 -or $b[0] -ne 0xE9) { return $null }
+  $modes = @('qio', 'qout', 'dio', 'dout')
+  @{ Mode = $b[2]; Freq = $b[3] -band 0x0F; Size = $b[3] -shr 4; ChipId = [BitConverter]::ToUInt16($b, 12)
+    Text = ('{0}, frequency code {1:x}' -f $(if ($b[2] -lt 4) { $modes[$b[2]] } else { $b[2] }), ($b[3] -band 0x0F)) }
+}
+
 # partitions.bin: 32-byte entries (magic AA 50, type, subtype, offset, size, label).
 function Read-Partitions([string]$path) {
   $b = [System.IO.File]::ReadAllBytes($path)
@@ -109,7 +158,8 @@ if (-not $factory -or -not $ota0 -or $ota1 -or -not $otadata) {
 # The loader for this chip: -LoaderBin, else the newest loader build under
 # esp-rack/loader (idf.py: build*/esprack-loader.bin, PlatformIO:
 # .pio/build/*/firmware.bin) whose image is for this chip.
-$searched = @((Join-Path $espRack 'loader\build*\esprack-loader.bin'), (Join-Path $espRack 'loader\.pio\build\*\firmware.bin'))
+$searched = @((Join-Path $espRack 'loader\build*\esprack-loader.bin'), (Join-Path $espRack 'loader\.pio\build\*\firmware.bin'),
+  (Join-Path $env:TEMP 'esprack-loader\*\esprack-loader.bin'))  # build.ps1's default
 if ($LoaderBin) {
   $loaderCandidates = @($LoaderBin)
 } else {
@@ -133,11 +183,41 @@ if ($loaderImg.Size -gt $factory.Size) {
   Fail "the loader ($($loaderImg.Size) B) does not fit factory ($($factory.Size) B)"
 }
 
+# The bootloader: the app env's, or the loader build's when it has a boot
+# button; that one's flash settings must be the app bootloader's.
+$loaderBuild = Read-LoaderBuild $loader
+if (-not $loaderBuild.Conf -and $loaderBuild.Bootloader) {
+  Write-Warning ("no $($c.Esptool) sdkconfig found for $loader`: whether its bootloader has a boot button is " +
+    "unknown, the app env's is written (build.ps1 keeps the sdkconfig next to the image)")
+}
+$appBoot = Join-Path $buildDir 'bootloader.bin'
+$bootNote = "the app env's"
+$bootloader = $null
+if ($loaderBuild.Boot) {
+  $lb = $loaderBuild.Boot
+  if (-not $loaderBuild.Bootloader) { Fail "the loader has a boot button (GPIO $($lb.Pin)) but its build has no bootloader.bin: rebuild it (build.ps1)" }
+  $bootloader = (Resolve-Path -LiteralPath $loaderBuild.Bootloader).Path
+  $mine = Read-FlashHeader $bootloader
+  if (-not $mine -or $mine.ChipId -ne $c.Id) { Fail "$bootloader is not a bootloader for $($c.Esptool)" }
+  if (Test-Path -LiteralPath $appBoot -PathType Leaf) {
+    $theirs = Read-FlashHeader $appBoot
+    if (-not $Force -and (-not $theirs -or $theirs.Mode -ne $mine.Mode -or $theirs.Freq -ne $mine.Freq)) {
+      Fail ("the loader's bootloader has flash $($mine.Text), the app's $($theirs.Text): build the loader with the " +
+        "board's settings (build.ps1 -FlashMode / -FlashFreq), or -Force")
+    }
+  } elseif (-not $Force) {
+    Fail "no app bootloader to compare the loader's with ($appBoot): pio run -e $PioEnv first, or -Force"
+  }
+  $bootNote = "the loader's: GPIO $($lb.Pin) held $($lb.Level) for $($lb.Hold) s at reset boots the loader; " +
+    "flash $($mine.Text), built $($loaderBuild.Mode)"
+}
+
 $writes = @()
 if ($LoaderOnly) {
+  if ($bootloader) { $writes += , @((Hex $c.Boot), $bootloader) }
   $writes += , @((Hex $factory.Offset), $loader)
 } else {
-  $bootloader = Need (Join-Path $buildDir 'bootloader.bin') "the env's bootloader"
+  if (-not $bootloader) { $bootloader = Need $appBoot "the env's bootloader" }
   $app = Need (Join-Path $buildDir 'firmware.bin') "the env's app"
   $appImg = Read-Image $app
   if (-not $appImg.Ok -or $appImg.ChipId -ne $c.Id) { Fail "$app is not an app for $($c.Esptool)" }
@@ -167,6 +247,7 @@ if ($EraseAll) { $cmd += '--erase-all' }
 foreach ($w in $writes) { $cmd += @($w[0], $w[1]) }
 
 Write-Host ("chip {0}, env {1}: loader {2} B in factory {3}" -f $c.Esptool, $PioEnv, $loaderImg.Size, (Hex $factory.Offset))
+if ($bootloader) { Write-Host "bootloader: $bootNote" }
 if (-not $LoaderOnly) {
   Write-Host ("app {0} B in ota_0 {1} ({2:N0} % of {3} B), first boot: {4}" -f $appImg.Size, (Hex $ota0.Offset),
     (100.0 * $appImg.Size / $ota0.Size), $ota0.Size, $StartIn)

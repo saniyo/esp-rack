@@ -67,10 +67,6 @@ uint32_t retryPauseMs(uint16_t failed);
 constexpr uint8_t kDefaultAttempts = 10;
 inline uint16_t attemptsAllowed(uint8_t fromHandoff) { return fromHandoff ? fromHandoff : kDefaultAttempts; }
 
-// Two hex strings equal ignoring case, compared in constant time over a's
-// length (b must be as long).
-bool hexEqual(const char* a, const char* b);
-
 }  // namespace loader
 
 #endif  // ESPRACK_LOADER_IMAGE_RULES_H

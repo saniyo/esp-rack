@@ -28,6 +28,17 @@ void terminateAll(Handoff& h) {
   terminate(h.targetVersion);
   terminate(h.wifiSsid);
   terminate(h.wifiPass);
+  terminate(h.adminUser);
+  terminate(h.apPass);
+  terminate(h.deviceId);
+}
+
+void terminateAll(HandoffV1& h) {
+  terminate(h.url);
+  terminate(h.token);
+  terminate(h.targetVersion);
+  terminate(h.wifiSsid);
+  terminate(h.wifiPass);
   terminate(h.adminHash);
 }
 
@@ -37,7 +48,9 @@ void terminateAll(Result& r) {
   terminate(r.lastError);
 }
 
-void zeroPadding(Handoff& h) { zeroGap(&h, offsetof(Handoff, adminHash) + sizeof(h.adminHash), offsetof(Handoff, crc)); }
+void zeroPadding(Handoff& h) {
+  zeroGap(&h, offsetof(Handoff, adminSaltLen) + sizeof(h.adminSaltLen), offsetof(Handoff, adminIter));
+}
 
 void zeroPadding(Result& r) {
   zeroGap(&r, offsetof(Result, to) + sizeof(r.to), offsetof(Result, attempts));
@@ -45,15 +58,17 @@ void zeroPadding(Result& r) {
 }
 
 // Magic and version first: a record of another version may have another size.
-template <typename T>
-Verdict check(const void* blob, size_t len, uint32_t magic, uint16_t version, T& out) {
+Verdict head(const void* blob, size_t len, uint32_t magic, uint16_t& version) {
   if (!blob || len < 6) return Verdict::BadSize;
   uint32_t m;
-  uint16_t v;
   memcpy(&m, blob, sizeof(m));
-  memcpy(&v, static_cast<const uint8_t*>(blob) + 4, sizeof(v));
-  if (m != magic) return Verdict::BadMagic;
-  if (v != version) return Verdict::OtherVersion;
+  memcpy(&version, static_cast<const uint8_t*>(blob) + 4, sizeof(version));
+  return m == magic ? Verdict::Ok : Verdict::BadMagic;
+}
+
+// The rest, once the version says which layout T it is.
+template <typename T>
+Verdict check(const void* blob, size_t len, T& out) {
   if (len != sizeof(T)) return Verdict::BadSize;
   T r;
   memcpy(&r, blob, sizeof(T));
@@ -61,6 +76,53 @@ Verdict check(const void* blob, size_t len, uint32_t magic, uint16_t version, T&
   terminateAll(r);
   out = r;
   return Verdict::Ok;
+}
+
+template <typename T>
+Verdict check(const void* blob, size_t len, uint32_t magic, uint16_t version, T& out) {
+  uint16_t v = 0;
+  const Verdict h = head(blob, len, magic, v);
+  if (h != Verdict::Ok) return h;
+  if (v != version) return Verdict::OtherVersion;
+  return check(blob, len, out);
+}
+
+bool printable(const char* s) {
+  for (; *s; ++s)
+    if (*s < 0x20 || *s > 0x7E) return false;
+  return true;
+}
+
+// What no writer of ours seals, cleared: no signature, no password check,
+// an open AP (encode() and decode() alike).
+void sanitize(Handoff& h) {
+  if (h.sigLen > kSigMax) h.sigLen = 0;
+  bool admin = false;
+  switch (static_cast<AdminKdf>(h.adminKdf)) {
+    case AdminKdf::None: break;
+    case AdminKdf::Sha256: admin = true; break;
+    case AdminKdf::Pbkdf2Sha256:
+      admin = h.adminSaltLen >= 1 && h.adminSaltLen <= kAdminSaltMax && h.adminIter >= 1 && h.adminIter <= kAdminIterMax;
+      break;
+  }
+  if (!admin) {
+    h.adminKdf = static_cast<uint8_t>(AdminKdf::None);
+    h.adminSaltLen = 0;
+    h.adminIter = 0;
+    memset(h.adminSalt, 0, sizeof(h.adminSalt));
+    memset(h.adminKey, 0, sizeof(h.adminKey));
+  }
+  if (h.apPass[0] && !apPassOk(h.apPass)) memset(h.apPass, 0, sizeof(h.apPass));
+}
+
+// A version 1 record as version 2: the same first bytes, its password hash
+// as an Sha256 admin record (a hash that isn't 64 hex digits: none).
+void fromV1(const HandoffV1& v1, Handoff& h) {
+  memset(&h, 0, sizeof(h));
+  memcpy(&h, &v1, offsetof(HandoffV1, adminHash));
+  h.version = kHandoffVersion;
+  if (fromHex(v1.adminHash, h.adminKey, kAdminKeyLen)) h.adminKdf = static_cast<uint8_t>(AdminKdf::Sha256);
+  terminateAll(h);
 }
 
 int hexVal(char c) {
@@ -106,8 +168,8 @@ const char* verdictName(Verdict v) {
 void encode(Handoff& h) {
   h.magic = kHandoffMagic;
   h.version = kHandoffVersion;
-  if (h.sigLen > kSigMax) h.sigLen = 0;
   terminateAll(h);
+  sanitize(h);
   zeroPadding(h);
   h.crc = crcOf(h);
 }
@@ -121,10 +183,21 @@ void encode(Result& r) {
 }
 
 Verdict decode(const void* blob, size_t len, Handoff& out) {
-  Handoff h;
-  const Verdict v = check(blob, len, kHandoffMagic, kHandoffVersion, h);
+  uint16_t version = 0;
+  Verdict v = head(blob, len, kHandoffMagic, version);
   if (v != Verdict::Ok) return v;
-  if (h.sigLen > kSigMax) h.sigLen = 0;  // not ours (encode() never seals that): no signature
+  Handoff h;
+  if (version == kHandoffVersion) {
+    v = check(blob, len, h);
+  } else if (version == kHandoffVersionV1) {
+    HandoffV1 v1;
+    v = check(blob, len, v1);
+    if (v == Verdict::Ok) fromV1(v1, h);
+  } else {
+    return Verdict::OtherVersion;
+  }
+  if (v != Verdict::Ok) return v;
+  sanitize(h);  // not ours (encode() never seals that): cleared
   out = h;
   return v;
 }
@@ -189,6 +262,14 @@ bool hasSha256(const Handoff& h) {
   for (uint8_t b : h.sha256)
     if (b) return true;
   return false;
+}
+
+bool hasAdmin(const Handoff& h) { return h.adminKdf != static_cast<uint8_t>(AdminKdf::None); }
+
+bool apPassOk(const char* pass) {
+  if (!pass) return false;
+  const size_t n = strlen(pass);
+  return n >= kApPassMin && n <= kApPassMax && printable(pass);
 }
 
 size_t describe(const Result& r, char* out, size_t cap) {

@@ -35,6 +35,18 @@
 // (begin(), from BootGuard::begin) and erased; lastResult() hands it out
 // for the rest of the boot. A boot that came from the loader is no crash
 // (BootGuard). ESP32 family only.
+//
+// What a handoff carries besides the update (OtaHandoff.h, version 2):
+//   - the upload page's password check: the stored PBKDF2 record of the
+//     admin who entered update mode (SecurityHash.h: salt, rounds, hash;
+//     the loader derives the same), or one made from a password given
+//     with the action; none (no security module, a machine token, a pull,
+//     the crash loop): the loader's page is open and says so;
+//   - the loader's fallback AP password (loaderAp()): this device's own
+//     AP password when its AP runs with one, else one generated once per
+//     device (NVS, shown on the upload page); the crash loop's handoff
+//     (early boot, no AP up yet) gives none: the loader's AP is open;
+//   - the device id the loader sends the image server.
 
 #include <Arduino.h>
 
@@ -42,6 +54,7 @@
 
 #include "system/OtaHandoff.h"
 
+class SecurityManager;
 class WebManager;
 
 #ifndef ESPRACK_OTA_LOADER_ATTEMPTS
@@ -81,9 +94,15 @@ void setReadyCheck(ReadyCheck check);
 bool ready(String& why);
 
 // Handoffs. The station's Wi-Fi goes along (the shared copy when it is
-// not up). adminPassword: the loader's upload page asks for it ("" or
-// null: no password; the page warns).
+// not up), the loader's AP password and the device id too.
+// adminPassword: the loader's upload page asks for it, checked as a PBKDF2
+// record made here (SecurityHash.h's salt size and rounds; "" or null: no
+// password, the page warns).
 void makePush(ota::Handoff& h, const char* adminPassword);
+// The upload page's check from a user's stored record (SecurityManager's
+// User: password = hex PBKDF2-SHA256, salt = hex salt). false: not such a
+// record (a legacy row, a machine token): h keeps no password check.
+bool setAdmin(ota::Handoff& h, const char* user, const char* saltHex, const char* hashHex);
 // size: the image's bytes or the whole signed file's (a server's
 // Content-Length), 0 unknown: the loader takes either. sha256Hex / sigHex:
 // as the server gave them, over the image bytes (null or "": not given; a
@@ -114,8 +133,24 @@ bool fromLoader();
 bool lastResult(ota::Result& out);
 // One line of it for a page ("" none).
 String lastResultText();
+
+// The loader's fallback AP (it opens one when it has no station): its
+// name "esprack-loader-XXXX" (XXXX: the soft-AP MAC's last two bytes) and
+// the WPA2 password the next handoff gives it: this device's own AP
+// password when its AP runs with one (deviceAp), else the one generated
+// for this device (begin(), NVS). false: no password (NVS failed): the
+// loader's AP would be open (it warns). BootGuard's crash-loop entry
+// gives none either (this device's AP password isn't known that early):
+// open, so the owner reaches the loader without a cable.
+bool loaderAp(String& ssid, String& pass, bool& deviceAp);
+
+// The security manager the admin action asks who the requesting admin is
+// (their stored record guards the loader's page). The upload page's
+// module sets it; without one only a password given with the action does.
+void setSecurityManager(SecurityManager* sm);
 // Admin action system.enterUpdateMode (Loader scheme only): a push
-// handoff; an optional form field "password" sets the upload page's.
+// handoff; the loader's page asks for the requesting admin's password, or
+// for the optional form field "password" when one is given.
 void registerManifest(WebManager* web);
 
 }  // namespace OtaLoader

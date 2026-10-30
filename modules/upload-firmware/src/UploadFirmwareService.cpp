@@ -34,6 +34,9 @@ UploadFirmwareService::UploadFirmwareService(AsyncWebServer* server, SecurityMan
 #ifdef ESP32
   // The pump's FlashWriter job (at setup, on the loop task).
   _pump.attach("fw-upload");
+  // "Restart into update mode" asks it who the admin is: the loader's page
+  // then takes that admin's own password.
+  ESPRack::OtaLoader::setSecurityManager(securityManager);
 #elif defined(ESP8266)
   Update.runAsync(true);
 #endif
@@ -114,6 +117,18 @@ void buildLoaderForm(JsonObject& root) {
         level(r.outcome == uint8_t(ota::Outcome::Ok) ? "success" : "error"), icon("History"));
   }
   FormBuilder::addTextField(set, "loader", AF::R, OtaLoader::loaderVersion(), icon("Memory"));
+  // How to reach the loader: the station when it joins, else its own AP.
+  String ssid, pass;
+  bool deviceAp = false;
+  const bool apPass = OtaLoader::loaderAp(ssid, pass, deviceAp);
+  String ap = "Update mode joins this device's Wi-Fi. Without it the loader opens the Wi-Fi " + ssid +
+              (!apPass ? " (open: no password could be stored)"
+               : deviceAp ? ", with this device's own AP password"
+                          : " with the password below");
+  ap += ". Its page asks for the password of the admin who restarted it. After a crash loop that Wi-Fi and the page are open.";
+  FormBuilder::addMessageField(set, "ap", ap.c_str(), level(apPass ? "info" : "warning"), icon("Wifi"));
+  if (apPass && !deviceAp)
+    FormBuilder::addTextField(set, "ap_pass", AF::R, pass.c_str(), label("Update mode Wi-Fi password"), icon("Key"));
   FormBuilder::addActionField(set, "a_update_mode", "Restart into update mode", AF::RW,
                               actionRef("system.enterUpdateMode"));
 }

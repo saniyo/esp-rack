@@ -4,7 +4,10 @@
 #include <mbedtls/bignum.h>
 #include <mbedtls/ecdsa.h>
 #include <mbedtls/ecp.h>
+#include <mbedtls/md.h>
+#include <mbedtls/pkcs5.h>
 #include <mbedtls/sha256.h>
+#include <string.h>
 
 namespace loader {
 
@@ -79,6 +82,33 @@ Sig verifyP256(const uint8_t pub[65], const uint8_t hash[32], const uint8_t* der
   mbedtls_ecp_point_free(&q);
   mbedtls_ecp_group_free(&grp);
   return out;
+}
+
+bool pbkdf2Sha256(const void* pw, size_t n, const uint8_t* salt, size_t saltLen, uint32_t rounds, uint8_t* out,
+                  size_t keyLen) {
+  return mbedtls_pkcs5_pbkdf2_hmac_ext(MBEDTLS_MD_SHA256, static_cast<const unsigned char*>(pw), n, salt, saltLen,
+                                       rounds, uint32_t(keyLen), out) == 0;
+}
+
+bool adminPasswordOk(const ESPRack::ota::Handoff& h, const char* pw, size_t n) {
+  namespace ota = ESPRack::ota;
+  uint8_t key[ota::kAdminKeyLen];
+  switch (static_cast<ota::AdminKdf>(h.adminKdf)) {
+    case ota::AdminKdf::Sha256:
+      sha256(pw, n, key);
+      break;
+    case ota::AdminKdf::Pbkdf2Sha256:
+      if (!h.adminSaltLen || h.adminSaltLen > ota::kAdminSaltMax || !h.adminIter || h.adminIter > ota::kAdminIterMax ||
+          !pbkdf2Sha256(pw, n, h.adminSalt, h.adminSaltLen, h.adminIter, key, sizeof(key)))
+        return false;
+      break;
+    default:
+      return false;
+  }
+  uint8_t diff = 0;
+  for (size_t i = 0; i < sizeof(key); ++i) diff |= uint8_t(key[i] ^ h.adminKey[i]);
+  memset(key, 0, sizeof(key));
+  return diff == 0;
 }
 
 }  // namespace loader

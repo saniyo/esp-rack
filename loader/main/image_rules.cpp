@@ -63,17 +63,4 @@ uint32_t retryPauseMs(uint16_t failed) {
   }
 }
 
-bool hexEqual(const char* a, const char* b) {
-  const size_t n = strlen(a);
-  if (strlen(b) != n) return false;
-  uint8_t diff = 0;
-  for (size_t i = 0; i < n; ++i) {
-    char x = a[i], y = b[i];
-    if (x >= 'A' && x <= 'F') x = char(x - 'A' + 'a');
-    if (y >= 'A' && y <= 'F') y = char(y - 'A' + 'a');
-    diff |= uint8_t(x ^ y);
-  }
-  return diff == 0;
-}
-
 }  // namespace loader

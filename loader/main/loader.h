@@ -8,10 +8,12 @@
 // (system/OtaHandoff.h), sets the boot partition to factory and restarts
 // into this loader, which
 //   - joins Wi-Fi (the handoff's station, else the one it keeps in IDF's
-//     storage; no station: an open AP "esprack-loader-XXXX");
+//     storage; no station: an AP "esprack-loader-XXXX", WPA2 with the
+//     handoff's AP password, else open);
 //   - pull: downloads the image (plain HTTP, http_lite.h); push, or no
-//     handoff: serves a minimal upload page (esp_http_server, admin
-//     password);
+//     handoff (the boot button: the bootloader's factory-reset pin, a
+//     build choice): serves a minimal upload page (esp_http_server, the
+//     admin's password checked as the app stores it: PBKDF2);
 //   - writes it into ota_0 in 4 KB sector steps (FlashSteps), hashing it
 //     on the fly, checks header, chip, SHA-256 and the ECDSA P-256
 //     signature (ota_pubkey.h), sets ota_0 to boot and restarts;
@@ -118,10 +120,12 @@ bool join(const char* ssid, const char* pass, uint32_t timeoutMs);
 bool waitUp(uint32_t timeoutMs);
 bool up();
 bool configured();
-// The fallback AP "esprack-loader-XXXX", open: the page asks for the admin
-// password. Next to the station when one is configured.
+// The fallback AP "esprack-loader-XXXX": WPA2 with the handoff's apPass,
+// open without one (the page asks for the admin password either way).
+// Next to the station when one is configured.
 void startAp();
 bool apOn();
+bool apOpen();  // on, without a password
 const char* apName();
 }  // namespace net
 

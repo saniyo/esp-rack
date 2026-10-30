@@ -4,16 +4,22 @@
 //   POST /upload  the image (or a signed .bin) as the raw body
 //   POST /back    boot the old app again (when it is still there)
 // The POSTs need the admin password in "X-Password" (URI-encoded UTF-8),
-// checked against the handoff's adminHash (hex SHA-256). No hash (no
+// checked against the handoff's admin record (adminPasswordOk: PBKDF2 as
+// the app stores it, or a version 1 handoff's SHA-256). No record (no
 // handoff, or the app had none): open, and the page says so.
+// With a production key the page checks a file's signature trailer before
+// it sends it (an unsigned file is refused without a byte written); the
+// image writer checks the signature itself all the same.
 // Handlers run on the server's task; an upload streams into the
 // ImageWriter there, under Session::writer.
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <esp_http_server.h>
 #include <esp_log.h>
+#include <mbedtls/platform_util.h>
 
 #include "image_rules.h"
 #include "image_writer.h"
@@ -46,21 +52,32 @@ const char kPage[] =
     "<button onclick=up()>Upload and install</button> "
     "<button id=bk onclick=back() hidden>Back to the app</button></p><p id=msg></p>"
     "<script>"
-    "const $=i=>document.getElementById(i);"
-    "function st(){fetch('/status').then(r=>r.json()).then(s=>{"
+    "const $=i=>document.getElementById(i);let S={};"
+    "function st(){fetch('/status').then(r=>r.json()).then(s=>{S=s;"
     "$('ph').textContent=s.phase+' ('+s.mode+')';$('app').textContent=s.app||'none';"
     "$('to').textContent=s.target||'-';const t=s.total||0;$('pg').max=t||1;$('pg').value=s.bytes;"
     "$('pb').textContent=s.bytes+(t?' / '+t:'')+' B, attempt '+s.attempts+"
     "(s.mode=='pull'&&s.attempts>=s.allowed?' (stuck: pulls go on every 5 min, an upload works too)':'');"
     "$('er').textContent=s.error;$('wr').textContent=s.warn.join(' | ');"
-    "$('bk').hidden=!s.appValid;$('pwr').hidden=!s.pw}).catch(()=>{})"
+    "$('bk').hidden=!s.appValid;$('pwr').hidden=!s.pw;"
+    "$('pw').placeholder=s.user?'password of '+s.user:'admin password'}).catch(()=>{})"
     ".finally(()=>setTimeout(st,2000))}"
     "function send(u,b){const x=new XMLHttpRequest();x.open('POST',u);"
     "x.setRequestHeader('X-Password',encodeURIComponent($('pw').value));"
     "x.upload.onprogress=e=>{$('pg').max=e.total;$('pg').value=e.loaded};"
     "x.onload=()=>$('msg').textContent=x.responseText;"
     "x.onerror=()=>$('msg').textContent='connection lost';x.send(b)}"
-    "function up(){const f=$('f').files[0];if(!f)return;$('msg').textContent='uploading...';"
+    // CRC-32 (IEEE) and the ESRKSIG1 trailer as ota::parseTrailer reads it.
+    "function crc(b){let c=-1;for(const x of b){c^=x;for(let k=0;k<8;k++)c=c>>>1^0xEDB88320&-(c&1)}return~c>>>0}"
+    "async function check(f){if(f.size<112)return'not a firmware image';"
+    "const h=new Uint8Array(await f.slice(0,1).arrayBuffer());if(h[0]!=0xE9)return'not an ESP firmware image';"
+    "if(!S.prod)return'';const t=new Uint8Array(await f.slice(-128).arrayBuffer()),d=new DataView(t.buffer);"
+    "if(String.fromCharCode(...t.slice(0,8))!='ESRKSIG1')"
+    "return'unsigned file: this loader takes signed images only (firmware.signed.bin)';"
+    "if(d.getUint32(124,true)!=crc(t.slice(0,124))||d.getUint32(8,true)!=f.size-128||!t[12]||t[12]>72)"
+    "return'damaged signature trailer';return''}"
+    "async function up(){const f=$('f').files[0];if(!f)return;const e=await check(f);"
+    "if(e){$('msg').textContent=e+': not sent';return}$('msg').textContent='uploading...';"
     "send('/upload',f)}"
     "function back(){send('/back',null)}"
     "st()</script></body></html>";
@@ -71,7 +88,7 @@ esp_err_t reply(httpd_req_t* req, const char* status, const char* text) {
   return httpd_resp_sendstr(req, text);
 }
 
-const char* adminHash() { return g.haveHandoff ? g.handoff.adminHash : ""; }
+bool adminSet() { return g.haveHandoff && ota::hasAdmin(g.handoff); }
 
 int hexVal(char c) {
   if (c >= '0' && c <= '9') return c - '0';
@@ -94,18 +111,33 @@ void uriDecode(char* s) {
   *o = 0;
 }
 
+// The header at any length the server took in (CONFIG_HTTPD_MAX_REQ_HDR_LEN):
+// the security module sets no password length, and URI-encoding makes
+// each UTF-8 byte of a non-ASCII one three characters. Sized to the
+// header, wiped after.
 bool authorized(httpd_req_t* req) {
-  const char* want = adminHash();
-  if (!want[0]) return true;  // none known: open (the page warns)
-  char pw[200];
-  if (httpd_req_get_hdr_value_str(req, "X-Password", pw, sizeof(pw)) != ESP_OK) return false;
-  uriDecode(pw);
-  uint8_t sha[32];
-  char hex[65];
-  sha256(pw, strlen(pw), sha);
-  ota::toHex(sha, sizeof(sha), hex);
-  memset(pw, 0, sizeof(pw));
-  return hexEqual(hex, want);
+  if (!adminSet()) return true;  // none known: open (the page warns)
+  const size_t len = httpd_req_get_hdr_value_len(req, "X-Password");
+  if (!len || len > CONFIG_HTTPD_MAX_REQ_HDR_LEN) return false;
+  char* pw = static_cast<char*>(malloc(len + 1));
+  if (!pw) return false;
+  bool ok = false;
+  if (httpd_req_get_hdr_value_str(req, "X-Password", pw, len + 1) == ESP_OK) {
+    uriDecode(pw);
+    ok = adminPasswordOk(g.handoff, pw, strlen(pw));  // PBKDF2: some 100 ms
+  }
+  mbedtls_platform_zeroize(pw, len + 1);
+  free(pw);
+  return ok;
+}
+
+// Appends ,"<text>" to a JSON array body; one that doesn't fit is left out
+// whole (the body stays valid JSON).
+void addWarn(char* out, size_t cap, size_t& n, const char* text) {
+  if (n + 1 >= cap) return;
+  const int k = snprintf(out + n, cap - n, "%s\"%s\"", n ? "," : "", text);
+  if (k > 0 && size_t(k) < cap - n) n += size_t(k);
+  else out[n] = 0;
 }
 
 // A JSON string body: quotes, backslashes and control characters dropped.
@@ -131,21 +163,29 @@ esp_err_t onStatus(httpd_req_t* req) {
   jsonText(app, sizeof(app), g.appValid ? g.appVersion : "");
   jsonText(to, sizeof(to), g.result.to);
   const uint8_t mode = g.haveHandoff ? g.handoff.mode : 0;
-  char warns[256];
-  int n = snprintf(warns, sizeof(warns), "\"%s\"", w);
-  if (!g.prodKey)
-    n += snprintf(warns + n, sizeof(warns) - size_t(n), ",\"dev signing key %s: images are not strictly checked\"",
-                  keyId());
-  if (!adminHash()[0]) n += snprintf(warns + n, sizeof(warns) - size_t(n), ",\"no admin password: this page is open\"");
-  if (net::apOn()) snprintf(warns + n, sizeof(warns) - size_t(n), ",\"open Wi-Fi AP %s\"", net::apName());
-  char out[640];
+  char warns[384], line[96], user[32];
+  size_t n = 0;
+  warns[0] = 0;
+  if (w[0]) addWarn(warns, sizeof(warns), n, w);
+  if (!g.prodKey) {
+    snprintf(line, sizeof(line), "dev signing key %s: images are not strictly checked", keyId());
+    addWarn(warns, sizeof(warns), n, line);
+  }
+  if (!adminSet()) addWarn(warns, sizeof(warns), n, "no admin password: this page is open");
+  if (net::apOpen()) {
+    snprintf(line, sizeof(line), "open Wi-Fi AP %s", net::apName());
+    addWarn(warns, sizeof(warns), n, line);
+  }
+  jsonText(user, sizeof(user), adminSet() ? g.handoff.adminUser : "");
+  char out[896];
   snprintf(out, sizeof(out),
            "{\"phase\":\"%s\",\"mode\":\"%s\",\"app\":\"%s\",\"appValid\":%s,\"target\":\"%s\",\"bytes\":%u,"
-           "\"total\":%u,\"attempts\":%u,\"allowed\":%u,\"error\":\"%s\",\"warn\":[%s],\"pw\":%s}",
+           "\"total\":%u,\"attempts\":%u,\"allowed\":%u,\"error\":\"%s\",\"warn\":[%s],\"pw\":%s,"
+           "\"user\":\"%s\",\"prod\":%s}",
            phaseName(phase()), ota::modeName(mode), app, g.appValid ? "true" : "false", to, unsigned(g.bytes.load()),
            unsigned(g.total.load()), unsigned(g.result.attempts),
            unsigned(attemptsAllowed(g.haveHandoff ? g.handoff.attemptsAllowed : 0)), e, warns,
-           adminHash()[0] ? "true" : "false");
+           adminSet() ? "true" : "false", user, g.prodKey ? "true" : "false");
   httpd_resp_set_type(req, "application/json");
   httpd_resp_set_hdr(req, "Cache-Control", "no-store");
   return httpd_resp_sendstr(req, out);
