@@ -10,6 +10,7 @@
 
 #ifdef ESP32
 #include <WiFi.h>
+#include <HTTPClient.h>
 #include <HTTPUpdate.h>  // t_httpUpdate_return, HTTP_UE_* (the image goes through ESPRack::OtaWriter)
 #include <system/OtaWriter.h>
 #elif defined(ESP8266)
@@ -230,6 +231,16 @@ class AutoUpdateService : public StatefulService<AutoUpdateSettings> {
   // sent, redirects followed, 204/304 = no update, x-MD5 checked), then
   // the image through ESPRack::OtaWriter, each 4 KB step in a WriteSlot.
   t_httpUpdate_return downloadImage(const String& url);
+  // The loader scheme (system/OtaLoader.h, one app slot): the image's
+  // answer (size; x-SHA256 and x-Signature over the image bytes, x-Token,
+  // x-Version when the server sends them, hex) becomes a pull handoff;
+  // once the consumer's ready check agrees the device restarts into the
+  // update loader, which downloads and checks it. A production-key loader
+  // needs x-SHA256 and x-Signature; x-Token holds for its retries up to
+  // the install. Returns only when it doesn't go.
+  t_httpUpdate_return handOffToLoader(const String& url);
+  void addImageRequestHeaders(HTTPClient& http);  // what httpUpdate sent
+  t_httpUpdate_return checkImageAnswer(int code, int len);  // OK: a 200 with a size
   t_httpUpdate_return otaFailed(int err, const String& msg);
   bool otaPastDeadline() const;
   // n bytes of the image, waiting for the socket in select() (no polling);

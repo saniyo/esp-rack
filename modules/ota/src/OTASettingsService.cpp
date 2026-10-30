@@ -21,6 +21,9 @@ const char kOtaSource[] = "ota";  // FirmwareUpdate's name for it: end() checks 
 // writer has it: the upload page, auto-update; they share the next slot).
 bool takeUpdate() {
 #ifdef ESP32
+  // No free slot (the loader scheme): Arduino's Update would pick the
+  // running one (3.2.x checks nothing) and erase the app under itself.
+  if (!ESPRack::OtaWriter::freeSlotSize()) return false;
   // An OtaWriter takes its claim, then FirmwareUpdate: one that comes
   // between these two finds FirmwareUpdate taken and backs off.
   if (ESPRack::OtaWriter::busy() || !ESPRack::FirmwareUpdate::tryBegin(kOtaSource)) return false;
@@ -42,6 +45,15 @@ void giveUpdate(bool resumeWdt) {
 
 void OTASettings::buildForm(OTASettings& settings, JsonObject& root) {
   web::Form form(root, "ota", "OTA Settings");
+#ifdef ESP32
+  if (!ESPRack::OtaWriter::freeSlotSize()) {
+    form.add(web::Message("m_slot",
+                          "ArduinoOTA stays off on this board: its partition table has no free app slot (the "
+                          "update loader scheme). Update through the firmware upload page, auto-update or the "
+                          "mothership.")
+                 .level("warning"));
+  }
+#endif
   if (ESPRack::WriteGate::holders() > 0) {
     // Arduino's Update erases 64 KB blocks: not through the write gate.
     form.add(web::Message("m_gate",
@@ -158,6 +170,12 @@ void OTASettingsService::configureArduinoOTA() {
     if (!WiFi.isConnected()) {
       return;
     }
+    // No free app slot (the loader scheme): nothing espota could write
+    // without erasing the running app.
+    if (!ESPRack::OtaWriter::freeSlotSize()) {
+      log_w("[ota] ArduinoOTA off: no free app slot (update loader scheme)");
+      return;
+    }
 #endif
     log_d("Starting OTA Update Service...");
     if (ESPRack::WriteGate::holders() > 0) {
@@ -183,7 +201,8 @@ void OTASettingsService::configureArduinoOTA() {
         // Update.begin() already ran (nothing written yet): its abort ends
         // the transfer, onError(OTA_END_ERROR) follows and espota gets the
         // error.
-        log_w("[ota] refused: another firmware update is under way (%s)", ESPRack::FirmwareUpdate::source());
+        log_w("[ota] refused: no free app slot, or another firmware update is under way (%s)",
+              ESPRack::FirmwareUpdate::source());
 #ifdef ESP32
         Update.abort();
 #endif

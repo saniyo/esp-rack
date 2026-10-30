@@ -13,7 +13,11 @@
 //   quickReboots >= limit  ->  safeMode (sticky, persisted)
 //
 // safeMode is advisory: the consumer reads info().safeMode at start (e.g.
-// keeps its outputs off). It's cleared by clearSafeMode() (also the admin
+// keeps its outputs off). On a board with the update loader (the `loader`
+// partition scheme, system/OtaLoader.h) the limit + 2nd crash boot in a
+// row restarts into the loader's upload page, and so does every further
+// one (the boot back from the loader is an intended one, "loader", and
+// ends no run). The admin action system.enterUpdateMode is registered here. It's cleared by clearSafeMode() (also the admin
 // action system.clearSafeMode), a new firmware (different ELF SHA) or a
 // factory reset — never by a stable run (the code that crashed may be off).
 //

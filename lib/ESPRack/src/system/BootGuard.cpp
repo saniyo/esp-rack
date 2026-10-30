@@ -17,6 +17,7 @@
 #include "power/PowerGuard.h"
 #include "power/WriteGate.h"
 #include "system/LoopWait.h"
+#include "system/OtaLoader.h"
 #include "time/TimeSync.h"
 
 namespace ESPRack {
@@ -345,7 +346,14 @@ void begin(uint8_t limit, uint32_t windowMs, uint32_t stableAfterMs) {
 
   const esp_reset_reason_t rr = esp_reset_reason();
   const char* last = lastRestartReason();
-  const BootClass cls = classify(rr, last);
+  BootClass cls = classify(rr, last);
+  // The update loader restarts into the app with a plain esp_restart
+  // ("idf"): it leaves a result, so the boot is an intended one.
+  OtaLoader::begin();
+  if (cls == BootClass::Unexplained && rr == ESP_RST_SW && OtaLoader::fromLoader()) {
+    cls = BootClass::Intended;
+    last = "loader";
+  }
 
   if (!load(s_rec)) s_rec = Record{};
 
@@ -406,6 +414,19 @@ void begin(uint8_t limit, uint32_t windowMs, uint32_t stableAfterMs) {
   }
   log_i("[boot] #%u %s (%s), crash run %u/%u%s", (unsigned)s_rec.bootCount, last, bootClassName(cls),
         (unsigned)s_rec.quick, (unsigned)s_limit, s_info.safeMode ? ", SAFE MODE" : "");
+
+  // Loader scheme: a crash run past safe mode (limit + 2) goes to the
+  // update loader's upload page, the one way left to replace the app
+  // without a cable. A boot back from the loader is no crash and ends no
+  // run: every further crash boot goes again, up to a stable run or a new
+  // firmware.
+  if (isCrash(cls) && s_rec.quick >= uint16_t(s_limit) + 2 && OtaLoader::scheme() == OtaLoader::Scheme::Loader) {
+    log_e("[boot] %u crash boots in a row: into the update loader", (unsigned)s_rec.quick);
+    ota::Handoff h;  // the Wi-Fi isn't up yet: the loader's own copy
+    OtaLoader::makePush(h, nullptr);
+    String why;
+    if (!OtaLoader::enter(h, kRestartCrashLoop, why)) log_e("[boot] update loader not entered: %s", why.c_str());
+  }
 }
 
 const BootInfo& info() { return s_info; }
@@ -545,6 +566,8 @@ uint32_t loopWaitMs(uint32_t nowMs) {
 
 void registerManifest(WebManager* web) {
   if (!web) return;
+  // Loader scheme: system.enterUpdateMode, wanted most in safe mode.
+  OtaLoader::registerManifest(web);
   WebActionSpec spec;
   spec.id = "system.clearSafeMode";
   spec.title = "Clear safe mode";

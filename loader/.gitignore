@@ -1,0 +1,5 @@
+.pio/
+# generated per env from sdkconfig.defaults
+sdkconfig.*
+!sdkconfig.defaults
+sdkconfig

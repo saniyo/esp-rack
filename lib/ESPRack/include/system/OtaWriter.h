@@ -126,7 +126,8 @@ class OtaWriter {
   int error() const { return _error; }         // 0: none
   const char* errorString() const;
 
-  // The next update slot's size (0: none), for a size check before begin().
+  // The next update slot's size (0: none, or only the running one: the
+  // loader scheme), for a size check before begin().
   static uint32_t freeSlotSize();
   // begin() may erase (IDF >= 5.5 with rollback): take a slot for it.
   static bool beginWrites();

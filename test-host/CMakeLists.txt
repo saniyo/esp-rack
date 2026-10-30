@@ -1,6 +1,6 @@
 # Host unit tests for the parts of the core that don't need Arduino/IDF
 # (today: time/TimeArbiter, hw/HwClaims, hw/Rs485Framer, persist/*, power/PowerGuard, power/WriteGateCore,
-# history/HistCore, system/FlashSteps, net/UploadPumpCore), with any C++17 compiler (MSVC, GCC, Clang) and a
+# history/HistCore, system/FlashSteps, system/OtaHandoff, net/UploadPumpCore), with any C++17 compiler (MSVC, GCC, Clang) and a
 # self-contained Unity-compatible shim (shim/unity.h). WriteGate itself runs on the host as
 # shim/WriteGateHost.cpp (one thread, a set clock).
 #
@@ -31,6 +31,7 @@ add_library(esprack_host STATIC
   ${ESPRACK_ROOT}/lib/ESPRack/src/history/HistCore.cpp
   ${ESPRACK_ROOT}/lib/ESPRack/src/hw/Rs485Framer.cpp
   ${ESPRACK_ROOT}/lib/ESPRack/src/system/FlashSteps.cpp
+  ${ESPRACK_ROOT}/lib/ESPRack/src/system/OtaHandoff.cpp
   ${ESPRACK_ROOT}/lib/ESPRack/src/net/UploadPumpCore.cpp)
 target_include_directories(esprack_host PUBLIC ${ESPRACK_ROOT}/lib/ESPRack/include ${CMAKE_CURRENT_SOURCE_DIR}/shim)
 

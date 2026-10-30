@@ -9,7 +9,7 @@
 class AutoUpdateModule : public ESPRack::Module {
  public:
   void describe(ESPRack::ModuleDescriptor& d) override {
-    d.id = "autoUpdate"; d.version = "1.1.0"; d.priority = 40;
+    d.id = "autoUpdate"; d.version = "1.2.0"; d.priority = 40;
     d.requires_ = {"wifi"};
   }
   void onInstall(ESPRack::ModuleContext& ctx) override {

@@ -37,3 +37,4 @@ WWWData-*.h
 # don't need re-enrollment after every server bounce. Local-only.
 scripts/.mock_ca.pem
 scripts/.mock_ca.key
+__pycache__/

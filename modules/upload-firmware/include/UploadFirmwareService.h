@@ -35,6 +35,10 @@ class WebManager;
 // restart). One image at a time: 503 while auto-update, ArduinoOTA or
 // another upload holds the update (OtaWriter::reserve at the first chunk;
 // an image that passed keeps it up to the restart).
+// On a board with the update loader (system/OtaLoader.h: one app slot)
+// this app writes no image: the page offers "Restart into update mode"
+// (the action system.enterUpdateMode) with the downtime warning and the
+// loader's last result, and a POST here is refused (409).
 class UploadFirmwareService {
  public:
   UploadFirmwareService(AsyncWebServer* server, SecurityManager* securityManager);
@@ -43,7 +47,8 @@ class UploadFirmwareService {
   void registerManifest(WebManager* web);
 
   // Emits the 'upload' sub-form: warning message + drag-drop upload widget
-  // whose url= points at the legacy UPLOAD_FIRMWARE_PATH handler.
+  // whose url= points at the legacy UPLOAD_FIRMWARE_PATH handler; with the
+  // update loader the restart into update mode instead.
   static void buildForm(JsonObject& root);
 
  private:

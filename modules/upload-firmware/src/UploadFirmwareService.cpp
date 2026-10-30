@@ -4,6 +4,10 @@
 #include <FormBuilder.h>
 #include <WebManager.h>
 #include <system/FirmwareUpdate.h>
+#ifdef ESP32
+#include <system/BootGuard.h>
+#include <system/OtaLoader.h>
+#endif
 
 UploadFirmwareService::UploadFirmwareService(AsyncWebServer* server, SecurityManager* securityManager) :
     _securityManager(securityManager) {
@@ -80,7 +84,50 @@ void UploadFirmwareService::registerManifest(WebManager* web) {
   web->addTabToFeature("system", tab);
 }
 
+#ifdef ESP32
+namespace {
+
+// The loader scheme (one app slot, system/OtaLoader.h): the image goes to
+// the loader's own upload page, after a restart into it.
+void buildLoaderForm(JsonObject& root) {
+  using namespace ESPRack;
+  JsonArray set = FormBuilder::createForm(root, "upload", "Upload Firmware");
+  if (BootGuard::info().safeMode) {
+    FormBuilder::addMessageField(set, "safe",
+        "Safe mode: this firmware crashed several times in a row. Restart into update mode to replace it.",
+        level("error"), icon("ReportProblem"));
+  }
+  FormBuilder::addMessageField(set, "warn",
+      "This board updates through its loader. The device restarts into update mode and serves an upload "
+      "page at the same address; it is offline for the whole upload. Until a good image is in, it stays "
+      "in update mode.",
+      level("warning"), icon("Warning"));
+  if (OtaLoader::devKey()) {
+    FormBuilder::addMessageField(set, "devKey",
+        "The loader has the dev signing key: it also takes unsigned images.",
+        level("warning"), icon("Key"));
+  }
+  ota::Result r;
+  if (OtaLoader::lastResult(r)) {
+    const String last = "Last update: " + OtaLoader::lastResultText();
+    FormBuilder::addMessageField(set, "last", last.c_str(),
+        level(r.outcome == uint8_t(ota::Outcome::Ok) ? "success" : "error"), icon("History"));
+  }
+  FormBuilder::addTextField(set, "loader", AF::R, OtaLoader::loaderVersion(), icon("Memory"));
+  FormBuilder::addActionField(set, "a_update_mode", "Restart into update mode", AF::RW,
+                              actionRef("system.enterUpdateMode"));
+}
+
+}  // namespace
+#endif
+
 void UploadFirmwareService::buildForm(JsonObject& root) {
+#ifdef ESP32
+  if (ESPRack::OtaLoader::scheme() == ESPRack::OtaLoader::Scheme::Loader) {
+    buildLoaderForm(root);
+    return;
+  }
+#endif
   JsonArray set = FormBuilder::createForm(root, "upload", "Upload Firmware");
   FormBuilder::addMessageField(set, "warn",
       "Upload a new firmware (.bin) file below to replace the existing firmware.",
@@ -128,6 +175,13 @@ void UploadFirmwareService::handleUpload(AsyncWebServerRequest* request,
     Authentication authentication = _securityManager->authenticateRequest(request);
     if (!AuthenticationPredicates::IS_ADMIN(authentication)) {
       handleError(request, 403);
+      return;
+    }
+    // The loader scheme: the loader's page takes the image (this app
+    // can't write its own slot).
+    if (ESPRack::OtaLoader::scheme() == ESPRack::OtaLoader::Scheme::Loader) {
+      log_w("[upload] firmware: this board updates through its loader (update mode)");
+      handleError(request, 409);
       return;
     }
     // As Update.begin(contentLength) refused it: no slot, or the body

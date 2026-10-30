@@ -14,6 +14,7 @@
 #include <esp_partition.h>
 #include <lwip/sockets.h>
 #include <power/WriteGate.h>
+#include <system/OtaLoader.h>
 #include <system/OtaWriter.h>
 #elif defined(ESP8266)
 #include <ESP8266HTTPClient.h>
@@ -156,6 +157,11 @@ void AutoUpdateService::begin() {
   String baseLower = String(_deviceName);
   baseLower.toLowerCase();
   _state.effectivePlatformId = baseLower + "-" + _state.hwSuffix;
+#ifdef ESP32
+  // The update loader's outcome (loader scheme), shown up to the next check.
+  const String loader = ESPRack::OtaLoader::lastResultText();
+  if (loader.length()) setLastResult(("loader " + loader).c_str());
+#endif
 
   // Boot-time config dump removed — full state is visible on the
   // OTA tab in the UI; serial spam at every reboot just adds noise.
@@ -359,6 +365,8 @@ t_httpUpdate_return AutoUpdateService::performUpdate(const String& url) {
   }
   return ESPhttpUpdate.update(WiFi, url, _state.currentVersion);
 #elif defined(ESP32)
+  // One app slot: the update loader downloads it, after a restart.
+  if (ESPRack::OtaLoader::scheme() == ESPRack::OtaLoader::Scheme::Loader) return handOffToLoader(url);
   // No reboot here (handleOtaResult restarts); FirmwareUpdate is reported
   // by the OtaWriter.
   return downloadImage(url);
@@ -423,19 +431,7 @@ t_httpUpdate_return AutoUpdateService::otaFailed(int err, const String& msg) {
   return HTTP_UPDATE_FAILED;
 }
 
-t_httpUpdate_return AutoUpdateService::downloadImage(const String& url) {
-  _otaErr = 0;
-  _otaErrStr = "";
-  _otaTimedOut = false;
-  // One image at a time (ota.begin() checks again before the first write).
-  if (ESPRack::FirmwareUpdate::active() || ESPRack::OtaWriter::busy()) {
-    return otaFailed(ESPRack::OtaWriter::kErrBusy, "Update error: another firmware update is under way");
-  }
-
-  WiFiClient client;
-  HTTPClient http;
-  if (!http.begin(client, url)) return otaFailed(HTTPC_ERROR_CONNECTION_REFUSED, "HTTP error: http.begin failed");
-
+void AutoUpdateService::addImageRequestHeaders(HTTPClient& http) {
   // What Arduino's httpUpdate sent (servers may route on it).
   http.useHTTP10(true);  // no chunked transfer
   http.setTimeout(AUTO_UPDATE_HTTP_TIMEOUT_MS);
@@ -455,36 +451,88 @@ t_httpUpdate_return AutoUpdateService::downloadImage(const String& url) {
   http.addHeader("x-ESP32-sdk-version", ESP.getSdkVersion());
   http.addHeader("x-ESP32-mode", "sketch");
   if (_state.currentVersion.length()) http.addHeader("x-ESP32-version", _state.currentVersion);
-  const char* keys[] = {"x-MD5"};
-  http.collectHeaders(keys, 1);
+}
 
-  const int code = http.GET();
-  const int len = http.getSize();
-  if (code <= 0) {
-    const String e = "HTTP error: " + HTTPClient::errorToString(code);
-    http.end();
-    return otaFailed(code, e);
-  }
+t_httpUpdate_return AutoUpdateService::checkImageAnswer(int code, int len) {
+  if (code <= 0) return otaFailed(code, "HTTP error: " + HTTPClient::errorToString(code));
   switch (code) {
     case HTTP_CODE_OK:
       break;
     case HTTP_CODE_NO_CONTENT:
     case HTTP_CODE_NOT_MODIFIED:
-      http.end();
       return HTTP_UPDATE_NO_UPDATES;
     case HTTP_CODE_NOT_FOUND:
-      http.end();
       return otaFailed(HTTP_UE_SERVER_FILE_NOT_FOUND, "File Not Found (404)");
     case HTTP_CODE_FORBIDDEN:
-      http.end();
       return otaFailed(HTTP_UE_SERVER_FORBIDDEN, "Forbidden (403)");
     default:
-      http.end();
       return otaFailed(HTTP_UE_SERVER_WRONG_HTTP_CODE, "Wrong HTTP Code (" + String(code) + ")");
   }
-  if (len <= 0) {
+  if (len <= 0) return otaFailed(HTTP_UE_SERVER_NOT_REPORT_SIZE, "Server Did Not Report Size");
+  return HTTP_UPDATE_OK;
+}
+
+t_httpUpdate_return AutoUpdateService::handOffToLoader(const String& url) {
+  _otaErr = 0;
+  _otaErrStr = "";
+  _otaTimedOut = false;
+  // The image's answer only (its size; the server's SHA-256, signature,
+  // token and version when it sends them): the loader downloads the body.
+  WiFiClient client;
+  HTTPClient http;
+  if (!http.begin(client, url)) return otaFailed(HTTPC_ERROR_CONNECTION_REFUSED, "HTTP error: http.begin failed");
+  addImageRequestHeaders(http);
+  const char* keys[] = {"x-SHA256", "x-Signature", "x-Token", "x-Version"};
+  http.collectHeaders(keys, 4);
+  const int code = http.GET();
+  const int len = http.getSize();
+  const String sha = http.header("x-SHA256");
+  const String sig = http.header("x-Signature");
+  const String token = http.header("x-Token");
+  const String version = http.header("x-Version");
+  http.end();  // the body stays unread
+  const t_httpUpdate_return answer = checkImageAnswer(code, len);
+  if (answer != HTTP_UPDATE_OK) return answer;
+
+  ESPRack::ota::Handoff h;  // 616 B of the update task's stack (enter() keeps its own copy)
+  String why;
+  // len: the file served, a plain image or a signed one (image + trailer):
+  // the loader takes either as the size.
+  if (!ESPRack::OtaLoader::makePull(h, url.c_str(), (uint32_t)len, sha.c_str(), sig.c_str(), token.c_str(),
+                                    version.c_str(), why))
+    return otaFailed(HTTP_UE_TOO_LESS_SPACE, "Update error: " + why);
+  if (!ESPRack::OtaLoader::ready(why)) return otaFailed(ESP_ERR_INVALID_STATE, "not now: " + why);
+  if (!sig.length()) log_w("[AutoUpdate] no signature from the server: the (dev-key) loader looks for one in the image");
+  setOtaState(AU_SUCCESS);
+  setLastResult("restarting into update mode");
+  // Goes (the restart, no return), or why not.
+  if (!ESPRack::OtaLoader::enter(h, ESPRack::kRestartAutoUpdate, why))
+    return otaFailed(ESP_ERR_INVALID_STATE, "Update error: " + why);
+  return HTTP_UPDATE_OK;
+}
+
+t_httpUpdate_return AutoUpdateService::downloadImage(const String& url) {
+  _otaErr = 0;
+  _otaErrStr = "";
+  _otaTimedOut = false;
+  // One image at a time (ota.begin() checks again before the first write).
+  if (ESPRack::FirmwareUpdate::active() || ESPRack::OtaWriter::busy()) {
+    return otaFailed(ESPRack::OtaWriter::kErrBusy, "Update error: another firmware update is under way");
+  }
+
+  WiFiClient client;
+  HTTPClient http;
+  if (!http.begin(client, url)) return otaFailed(HTTPC_ERROR_CONNECTION_REFUSED, "HTTP error: http.begin failed");
+  addImageRequestHeaders(http);
+  const char* keys[] = {"x-MD5"};
+  http.collectHeaders(keys, 1);
+
+  const int code = http.GET();
+  const int len = http.getSize();
+  const t_httpUpdate_return answer = checkImageAnswer(code, len);
+  if (answer != HTTP_UPDATE_OK) {
     http.end();
-    return otaFailed(HTTP_UE_SERVER_NOT_REPORT_SIZE, "Server Did Not Report Size");
+    return answer;
   }
   const uint32_t room = ESPRack::OtaWriter::freeSlotSize();
   if (!room) {

@@ -6,6 +6,7 @@
 #include <WebManager.h>
 #include <App.h>  // ESPRack::restartDevice (LIB-FIX-006)
 #include <power/PowerGuard.h>
+#include <system/OtaLoader.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
@@ -955,6 +956,20 @@ String MothershipService::actionUpdate(JsonObjectConst params) {
   // dispatcher path works.
   String url = params["url"].as<String>();
   if (url.length() == 0) return "missing url";
+  // One app slot (the loader scheme, system/OtaLoader.h): a pull handoff
+  // {url, size, sha256, sig (hex DER), token, version}; once the consumer's
+  // ready check agrees, the device restarts into the update loader (this
+  // task parks up to the reset). The new app's check-in shows the version.
+  if (ESPRack::OtaLoader::scheme() == ESPRack::OtaLoader::Scheme::Loader) {
+    ESPRack::ota::Handoff h;  // enter() keeps its own copy
+    String why;
+    if (!ESPRack::OtaLoader::makePull(h, url.c_str(), params["size"] | 0u, params["sha256"] | "",
+                                      params["sig"] | "", params["token"] | "", params["version"] | "", why))
+      return "refused: " + why;
+    if (!ESPRack::OtaLoader::ready(why)) return "not now: " + why;
+    if (!ESPRack::OtaLoader::enter(h, ESPRack::kRestartMothership, why)) return "refused: " + why;
+    return "restarting into update mode";
+  }
   log_d("[mship.action.update] would download %s", url.c_str());
   return "deferred to phase 2.5";
 }

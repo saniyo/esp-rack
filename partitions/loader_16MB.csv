@@ -1,0 +1,13 @@
+# ESP-Rack "loader" OTA scheme, 16 MB flash: one table for ESP32, C3, C6 and S3.
+# factory = the OTA loader (esp-rack/loader; 1 MB leaves room for an HTTPS
+# loader later: a new table needs a cable), ota_0 = the app, no ota_1.
+# nvs, spiffs (LittleFS, 3.4 MB) and coredump sit where default_16MB.csv has
+# them: a board switched from default_16MB.csv keeps its settings and files.
+# App partitions start on 64 KB boundaries. See docs/plans/lib-ota-loader.md.
+# Name,   Type, SubType,  Offset,   Size,     Flags
+nvs,      data, nvs,      0x9000,   0x5000,
+otadata,  data, ota,      0xe000,   0x2000,
+loader,   app,  factory,  0x10000,  0x100000,
+app0,     app,  ota_0,    0x110000, 0xB80000,
+spiffs,   data, spiffs,   0xC90000, 0x360000,
+coredump, data, coredump, 0xFF0000, 0x10000,

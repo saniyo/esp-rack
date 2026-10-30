@@ -127,8 +127,8 @@ and every `FT_*`.
 | `esp32-c6-devkitc-1` | 16 MB (`board_upload.flash_size`; the board JSON says 8 MB), `default_16MB.csv` | — | `ARDUINO_USB_MODE=0`, `ARDUINO_USB_CDC_ON_BOOT=0` |
 | `esp32-s3-devkitc1-n16r8` | 16 MB, `default_16MB.csv` | 8 MB OPI (`qio_opi`) | USB flags; SD-MMC 1-bit pins (`BOARD_SD_MMC_*`) for `FileSystemSd` |
 | `esp32-s3-devkitc1-n8r2` | 8 MB, `default_8MB.csv` | 2 MB QSPI | USB flags |
-| `esp32-c3-devkitm-1` | 4 MB, **`huge_app.csv`**, `flash_mode = dio` | — | ⚠ `huge_app.csv` has **one** app slot, so OTA/upload/auto-update can't install an image |
-| `node32s` | 4 MB, `min_spiffs.csv` | — | ⚠ 1.875 MiB app slots, likely too small for a full build (not verified) |
+| `esp32-c3-devkitm-1` | 4 MB, **`huge_app.csv`**, `flash_mode = dio` | — | ⚠ `huge_app.csv` has **one** app slot and no loader, so OTA/upload/auto-update can't install an image; `loader-c3` uses `loader_4MB.csv` (§2.3) |
+| `node32s` | 4 MB, `min_spiffs.csv` | — | ⚠ 1.875 MiB app slots, likely too small for a full build (not verified); `loader-esp32` uses `loader_4MB.csv` (§2.3) |
 
 Measured on 2026-10-13, C6 with the demo's full module set: static RAM
 80,824 B (24.7 %), flash image 2,519,703 B (before LIB-FIX; about +38 KB
@@ -179,6 +179,62 @@ reconnects. To see them, wait for the monitor in `setup()`, e.g.
 > install, pioarduino runs ESP-IDF's `idf_tools.py`, which aborts under MSYS
 > ("MSys/Mingw is not supported"). The build then fails with
 > `'riscv32-esp-elf-g++' is not recognized`.
+
+### 2.3 Firmware updates: dual vs loader scheme
+
+The partition table picks how a board takes new firmware. The firmware code is the
+same in both, on every chip (ESP32, C3, C6, S3); the app finds the scheme at run time
+(`OtaLoader::scheme()`), and nothing switches by itself.
+
+| | `dual` | `loader` |
+|---|---|---|
+| Table | two OTA slots (`default_16MB.csv`, `default_8MB.csv`, `min_spiffs.csv`, ...) | `esp-rack/partitions/loader_{4,8,16}MB.csv` |
+| Largest app | half the flash, less (4 MB: 1.9 MB) | 4 MB: 3 MB; 8 MB: 5.4 MB; 16 MB: 11.5 MB |
+| Who writes the image | the app, into the other slot | the OTA loader (`factory`), after a restart into it |
+| During an update | the app runs on; one restart | the device is in the loader for the whole transfer |
+| Rollback | the previous image stays in the other slot | none: a failed new app is caught by BootGuard (crash loop → loader) or the boot button |
+| Upload page, auto-update, mothership | as before | the same pages; they hand the update to the loader |
+| ArduinoOTA (`OTAModule`) | works | no slot to write into: leave it out |
+| Signed images | optional | `custom_ota_sign = yes`; mandatory once a production key is configured |
+
+Pick `loader` when the app no longer fits twice (most 4 MB boards with the full module
+set) or when an update must never leave the board without a way back in; keep `dual`
+where an update must not take the device off its job for longer than a restart.
+
+**A board on the loader scheme** (the demo's `loader-esp32`, `loader-c3`, `loader-c6`,
+`loader-s3` envs do exactly this):
+
+```ini
+[env:my-board-loader]
+extends = env:my-board
+board_build.partitions = ../esp-rack/partitions/loader_16MB.csv   ; the board's flash size
+extra_scripts =
+    ${env.extra_scripts}
+    ../esp-rack/tools/pio_ota_sign.py
+custom_ota_sign = yes            ; firmware.signed.bin + .signed.json after each build
+```
+
+- **Signing key**: `%USERPROFILE%\.esprack\ota_sign_key.pem` (`esp-rack/tools/ota_sign.py
+  keygen`), or `ESPRACK_OTA_KEY`. Without one a dev key is made on first use: images
+  still install, with a "dev signing key" warning. Never commit a key.
+- **The loader**: `ota_sign.py export-pubkey`, then `pio run -d ..\esp-rack\loader -e
+  <esp32|esp32c3|esp32c6|esp32s3>` (one build per chip, every flash size).
+- **First install, and every switch of scheme, over USB only** (a partition table is
+  never rewritten over the air):
+  `..\esp-rack\tools\flash_loader.ps1 -Chip <esp32|c3|c6|s3> -PioEnv my-board-loader -Port COMx`
+  writes bootloader, table, otadata, the loader and the app, with the offsets from the
+  env's `partitions.bin`, after checking chip, table and sizes. Later app-only USB
+  flashes: `pio run -e my-board-loader -t upload` as usual.
+- **Switching an existing board** (e.g. a 16 MB S3 on `default_16MB.csv`): the flash
+  command above, without `-EraseAll`. The loader tables keep NVS, the file system and
+  the core dump where `min_spiffs.csv` (4 MB), `default_8MB.csv` and
+  `default_16MB.csv` have them, so settings and files survive. From another table
+  (e.g. `huge_app.csv`) the file system is lost: back the config up first.
+- **Back to dual**: `pio run -e my-board -t upload` (USB) with the dual env; the loader is
+  overwritten, settings and files stay when the data offsets match.
+- **What `loader` gives up**: rollback, uptime during the transfer, ArduinoOTA.
+
+The design, the formats and the bench tests: `docs/plans/lib-ota-loader.md`.
 
 ---
 
@@ -561,8 +617,10 @@ An item's parent, highest first:
      libraries.
    - Keep only your board envs, and make sure each ends with
      `${env.build_flags}`.
-   - Pick a partition table with **two OTA slots** if you install OTA,
-     upload-firmware or auto-update.
+   - Pick the update scheme (§2.3): a partition table with **two OTA slots**
+     (`dual`), or a loader table from `esp-rack/partitions/` with the signing
+     script (`loader`), if you install upload-firmware, auto-update or the
+     mothership (OTA/ArduinoOTA: `dual` only).
    - Set `default_envs`.
 6. Edit `factory_settings.ini`:
    - Name, version (`vX.Y.Z`), hardware revision.

@@ -48,8 +48,11 @@ bool parseMd5(const char* hex, uint8_t out[16]) {
 }  // namespace
 
 uint32_t OtaWriter::freeSlotSize() {
+  // Never the running slot: with one OTA slot (the loader scheme) IDF
+  // hands back the one the app runs from.
   const esp_partition_t* p = esp_ota_get_next_update_partition(nullptr);
-  return p ? p->size : 0;
+  const esp_partition_t* running = esp_ota_get_running_partition();
+  return p && !(running && running->address == p->address) ? p->size : 0;
 }
 
 bool OtaWriter::busy() { return s_owner.load() != nullptr; }
